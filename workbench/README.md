@@ -1,5 +1,7 @@
 # Dify Agent 工作台
 
+当前维护基线为 Dify `1.17.1`（`8387590ace4a094de812b7847fc6a4c3a27cd52b`）。升级合并、数据库迁移和后续同步方式见 [1.17.1 升级记录](UPGRADE-1.17.1.md)。定制分支为 `workbench/main`；独立前端位于 [tleom/webapp-conversation](https://github.com/tleom/webapp-conversation/tree/workbench/main)。下文保留首次部署的实现说明和历史记录。
+
 2026-09-11 并发、会话菜单、上传与语音功能更新见 [最新更新记录](CAPACITY-20260911.md)。
 
 2026-09-11 界面更新已上线，当前使用方式与验证见 [界面更新记录](UI-20260911.md)。原隔离开发环境已清理，下文开发部署内容作为历史记录。

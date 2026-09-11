@@ -221,7 +221,10 @@ class AgentAppRuntimeRequestBuilder:
         )
         if workbench_run_id:
             from dify_agent.protocol.schemas import RunLayerSpec
-            request.composition.layers.append(RunLayerSpec(name="workbench_environment", type="dify.workbench_environment", config={}))
+
+            request.composition.layers.append(
+                RunLayerSpec(name="workbench_environment", type="dify.workbench_environment", config={})
+            )
             request.rebuild_layers = context.deferred_tool_results is None
         self._validate_session_snapshot_layers(request)
         redacted = cast(dict[str, Any], redact_for_agent_backend_log(request))

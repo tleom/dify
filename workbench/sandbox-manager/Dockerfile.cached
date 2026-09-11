@@ -1,4 +1,4 @@
-FROM langgenius/dify-agent-local-sandbox:1.17.0
+FROM langgenius/dify-agent-local-sandbox:1.17.1
 USER root
 WORKDIR /app
 COPY server.py file_ops.py environment.py stop_jobs.py ./

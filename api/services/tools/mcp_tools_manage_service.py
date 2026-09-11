@@ -6,6 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 from urllib.parse import urlparse
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
@@ -100,6 +101,14 @@ class MCPToolManageService:
         Raises:
             ValueError: If provider not found
         """
+        # Management pages may send the server identifier returned by the tool list.
+        # Keep UUID lookup unchanged and scope both forms to the current tenant.
+        if not server_identifier and provider_id:
+            try:
+                UUID(provider_id)
+            except ValueError:
+                server_identifier = provider_id
+
         if server_identifier:
             stmt = select(MCPToolProvider).where(
                 MCPToolProvider.tenant_id == tenant_id, MCPToolProvider.server_identifier == server_identifier
@@ -207,6 +216,7 @@ class MCPToolManageService:
                               instead of performing network operations.
         """
         mcp_provider = self.get_provider(provider_id=provider_id, tenant_id=tenant_id)
+        provider_id = mcp_provider.id
 
         # Check for duplicate name (excluding current provider)
         if name != mcp_provider.name:

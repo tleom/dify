@@ -87,7 +87,7 @@ def test_workbench_uses_only_frozen_skills_and_rebuilds_new_turn(monkeypatch: py
     assert any(layer.type == "dify.workbench_environment" for layer in result.request.composition.layers)
 
 
-@pytest.mark.parametrize("previous_prompt,current_prompt", [("", "New soul"), ("Old soul", "")])
+@pytest.mark.parametrize(("previous_prompt", "current_prompt"), [("", "New soul"), ("Old soul", "")])
 def test_workbench_rebuild_accepts_previous_composition(previous_prompt: str, current_prompt: str):
     builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_NoToolsBuilder())  # type: ignore[arg-type]
     previous_soul = _soul_with_model()

@@ -3,7 +3,7 @@ name: dify-workbench
 # Private env files, databases and storage are provisioned separately. This file
 # describes the application services without embedding credentials or database dumps.
 x-api: &api
-  image: dify-workbench-api:1.17.0-20260910.1
+  image: dify-workbench-api:1.17.1-20260911.1
   restart: unless-stopped
   volumes:
     - ${WORKBENCH_CONFIG_DIR:?Set the private configuration directory}/storage:/app/api/storage
@@ -29,13 +29,13 @@ services:
     container_name: wb-beat
     env_file: ${WORKBENCH_CONFIG_DIR}/beat.env
   wb-agent:
-    image: dify-workbench-agent:1.17.0-20260910.1
+    image: dify-workbench-agent:1.17.1-20260911.1
     container_name: wb-agent
     restart: unless-stopped
     env_file: ${WORKBENCH_CONFIG_DIR}/agent.env
     networks: [backend, sandboxes]
   wb-manager:
-    image: dify-workbench-manager:20260910.1
+    image: dify-workbench-manager:1.17.1-20260911.1
     container_name: wb-manager
     restart: unless-stopped
     env_file: ${WORKBENCH_CONFIG_DIR}/manager.env
@@ -45,7 +45,7 @@ services:
       - ${WORKBENCH_CONFIG_DIR}/manager-state:/state
     networks: [backend]
   wb-web:
-    image: dify-workbench-web:33085b66-20260910
+    image: dify-workbench-web:1.17.1-20260911.1
     container_name: wb-web
     restart: unless-stopped
     env_file: ${WORKBENCH_CONFIG_DIR}/frontend.env
