@@ -117,6 +117,7 @@ class AgentConfigTarget:
     writable: bool
     version: AgentConfigSnapshot | AgentConfigDraft
     agent_soul: AgentSoulConfig
+    include_runtime_workspace_skills: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,10 +148,12 @@ class AgentConfigService:
         tool_file_manager: ToolFileManager | None = None,
         skill_normalize_service: ConfigSkillNormalizeService | None = None,
         session_factory: Callable[[], Session] | None = None,
+        workbench_run_id: str | None = None,
     ) -> None:
         self._tool_files = tool_file_manager or ToolFileManager()
         self._skill_normalizer = skill_normalize_service or ConfigSkillNormalizeService()
         self._session_factory = session_factory or default_session_factory.create_session
+        self._workbench_run_id = workbench_run_id
 
     def resolve_target(
         self,
@@ -178,6 +181,7 @@ class AgentConfigService:
                 writable=target.writable,
                 version=target.version,
                 agent_soul=target.agent_soul.model_copy(deep=True),
+                include_runtime_workspace_skills=target.include_runtime_workspace_skills,
             )
 
     def manifest(
@@ -273,7 +277,7 @@ class AgentConfigService:
                     missing_message="config skill payload is missing",
                 )
             except AgentConfigServiceError as exc:
-                if exc.code != "config_skill_not_found":
+                if exc.code != "config_skill_not_found" or not target.include_runtime_workspace_skills:
                     raise
 
             runtime_skill = next(
@@ -355,7 +359,7 @@ class AgentConfigService:
             archive_bytes, _mime_type = self._load_tool_file_bytes(tenant_id=tenant_id, file_id=file_id)
             skill_item = self._serialize_skill_item(skill)
         except AgentConfigServiceError as exc:
-            if exc.code != "config_skill_not_found":
+            if exc.code != "config_skill_not_found" or not target.include_runtime_workspace_skills:
                 raise
             try:
                 workspace_archive = SkillManagementService().pull_runtime_agent_skill(
@@ -942,6 +946,12 @@ class AgentConfigService:
                 "agent config version was not found",
                 status_code=404,
             )
+        soul = AgentSoulConfig.model_validate(version.config_snapshot_dict)
+        if self._workbench_run_id:
+            from services.workbench.runtime import config_soul
+            soul = config_soul(session, run_id=self._workbench_run_id, tenant_id=tenant_id,
+                               account_id=user_id, agent_id=agent_id, snapshot_id=config_version_id)
+            writable = False
         return AgentConfigTarget(
             tenant_id=tenant_id,
             agent_id=agent_id,
@@ -949,7 +959,8 @@ class AgentConfigService:
             kind=config_version_kind,
             writable=writable,
             version=version,
-            agent_soul=AgentSoulConfig.model_validate(version.config_snapshot_dict),
+            agent_soul=soul,
+            include_runtime_workspace_skills=self._workbench_run_id is None,
         )
 
     @staticmethod
@@ -1255,7 +1266,7 @@ class AgentConfigService:
         target: AgentConfigTarget, *, include_runtime_workspace_skills: bool
     ) -> list[dict[str, object]]:
         items = [AgentConfigService._serialize_skill_item(skill) for skill in target.agent_soul.config_skills]
-        if not include_runtime_workspace_skills:
+        if not include_runtime_workspace_skills or not target.include_runtime_workspace_skills:
             return items
 
         seen_names = {str(item["name"]) for item in items}

@@ -46,6 +46,7 @@ class ExecutionBindingCreateSpec:
     workspace_id: str
     existing_workspace_ref: str | None
     home_snapshot_ref: str | None = None
+    workbench: bool = False
 
 
 @dataclass(frozen=True, slots=True)

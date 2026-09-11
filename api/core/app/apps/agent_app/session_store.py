@@ -34,9 +34,13 @@ class AgentAppSessionScope:
     home_snapshot_id: str | None
     agent_config_version_kind: AgentConfigVersionKind = AgentConfigVersionKind.SNAPSHOT
     build_draft_id: str | None = None
+    workbench_account_id: str | None = None
 
     @property
     def workspace_owner(self) -> WorkspaceOwnerScope:
+        if self.workbench_account_id:
+            return WorkspaceOwnerScope(tenant_id=self.tenant_id, app_id=self.app_id,
+                owner_type=AgentWorkspaceOwnerType.WORKBENCH_USER, owner_id=self.workbench_account_id)
         owner_type = (
             AgentWorkspaceOwnerType.BUILD_DRAFT if self.build_draft_id else AgentWorkspaceOwnerType.CONVERSATION
         )
@@ -63,6 +67,14 @@ class AgentAppWorkspaceStore:
     """Resolve Agent App sessions through a caller-owned Binding pointer."""
 
     def load_or_create(self, scope: AgentAppSessionScope) -> StoredAgentAppSession:
+        if scope.workbench_account_id:
+            from extensions.ext_redis import redis_client
+            key = f"workbench:workspace:{scope.tenant_id}:{scope.workbench_account_id}"
+            with redis_client.lock(key, timeout=90, blocking_timeout=60):
+                return self._load_or_create(scope)
+        return self._load_or_create(scope)
+
+    def _load_or_create(self, scope: AgentAppSessionScope) -> StoredAgentAppSession:
         with session_factory.create_session() as session:
             caller = self._load_caller(session=session, scope=scope)
             binding_id = caller.agent_workspace_binding_id

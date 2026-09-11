@@ -674,6 +674,8 @@ class AgentAppRunner:
             message_id=message_id,
         )
 
+        from services.workbench.runtime import prepare_execution
+        prepare_execution(dify_context.tenant_id, conversation_id, dify_context.user_id, runtime.request)
         create_response = self._agent_backend_client.create_run(runtime.request)
         terminal, process_recorder = self._consume_stream(
             create_response.run_id,
@@ -687,6 +689,11 @@ class AgentAppRunner:
         )
 
         if isinstance(terminal, AgentBackendDeferredToolCallInternalEvent):
+            from services.workbench.runtime import pause
+            if pause(dify_context.tenant_id, conversation_id, dify_context.user_id, terminal, runtime.binding_id):
+                self._publish_terminal_answer(queue_manager=queue_manager, model_name=model_name,
+                    answer="", query=query, usage=_llm_usage_from_agent_backend(terminal.usage))
+                return
             # ENG-635: the agent asked a human. End this turn with the question and
             # a conversation-owned HITL form; a form submission resumes the run.
             self._pause_for_ask_human(
@@ -773,13 +780,16 @@ class AgentAppRunner:
             effective_session_scope_snapshot_id: str | None = agent_config_snapshot_id
         else:
             effective_session_scope_snapshot_id = session_scope_snapshot_id
+        from services.workbench.runtime import conversation_owner
+        workbench_owner = conversation_owner(dify_context.tenant_id, conversation_id, dify_context.user_id)
         return AgentAppSessionScope(
+            workbench_account_id=workbench_owner,
             tenant_id=dify_context.tenant_id,
             app_id=dify_context.app_id,
             conversation_id=conversation_id,
             agent_id=agent_id,
             agent_config_snapshot_id=effective_session_scope_snapshot_id or agent_config_snapshot_id,
-            home_snapshot_id=home_snapshot_id,
+            home_snapshot_id=None if workbench_owner else home_snapshot_id,
             agent_config_version_kind=agent_config_version_kind,
             build_draft_id=build_draft_id,
         )
@@ -806,8 +816,11 @@ class AgentAppRunner:
             if message_id is not None
             else None
         )
+        from services.workbench.runtime import continuation, execution_run_id
+        deferred_tool_results = continuation(dify_context.tenant_id, conversation_id, dify_context.user_id) or deferred_tool_results
         return self._request_builder.build(
             AgentAppRuntimeBuildContext(
+                workbench_run_id=execution_run_id(dify_context.tenant_id, conversation_id, dify_context.user_id),
                 dify_context=dify_context,
                 agent_id=agent_id,
                 agent_config_snapshot_id=agent_config_snapshot_id,

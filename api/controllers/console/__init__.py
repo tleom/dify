@@ -32,6 +32,7 @@ def _handle_active_workspace_required_error(error: ActiveWorkspaceRequiredError)
 console_ns = Namespace("console", description="Console management API operations", path="/")
 
 RESOURCE_MODULES = (
+    "controllers.console.workbench",
     "controllers.console.app.app_import",
     "controllers.console.explore.audio",
     "controllers.console.explore.completion",

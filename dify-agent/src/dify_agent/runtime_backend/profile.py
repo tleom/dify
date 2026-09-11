@@ -47,6 +47,8 @@ class RuntimeBackendSettings(BaseSettings):
     local_sandbox_materialized_home_root: str = DEFAULT_LOCAL_MATERIALIZED_HOME_ROOT
     local_sandbox_workspace_root: str = DEFAULT_LOCAL_WORKSPACE_ROOT
     local_sandbox_home_snapshot_root: str = DEFAULT_LOCAL_HOME_SNAPSHOT_ROOT
+    workbench_manager_endpoint: str | None = None
+    workbench_manager_token: str | None = None
 
     enterprise_sandbox_gateway_endpoint: str | None = None
     enterprise_sandbox_gateway_auth_token: str | None = None
@@ -110,19 +112,25 @@ def create_runtime_backend_profile(settings: RuntimeBackendSettings) -> RuntimeB
         case "local":
             endpoint = settings.local_sandbox_endpoint or ""
             token = settings.local_sandbox_auth_token or ""
+            bindings = LocalExecutionBindingBackend(
+                endpoint=endpoint, auth_token=token,
+                materialized_home_root=settings.local_sandbox_materialized_home_root,
+                workspace_root=settings.local_sandbox_workspace_root,
+                snapshot_root=settings.local_sandbox_home_snapshot_root,
+            )
+            if settings.workbench_manager_endpoint:
+                from dify_agent.runtime_backend.workbench import WorkbenchExecutionBindingBackend
+                if not settings.workbench_manager_token:
+                    raise ValueError("workbench_manager_token is required")
+                bindings = WorkbenchExecutionBindingBackend(bindings, settings.workbench_manager_endpoint,
+                                                           settings.workbench_manager_token)
             return RuntimeBackendProfile(
                 home_snapshots=LocalHomeSnapshotBackend(
                     endpoint=endpoint,
                     auth_token=token,
                     snapshot_root=settings.local_sandbox_home_snapshot_root,
                 ),
-                execution_bindings=LocalExecutionBindingBackend(
-                    endpoint=endpoint,
-                    auth_token=token,
-                    materialized_home_root=settings.local_sandbox_materialized_home_root,
-                    workspace_root=settings.local_sandbox_workspace_root,
-                    snapshot_root=settings.local_sandbox_home_snapshot_root,
-                ),
+                execution_bindings=bindings,
             )
         case "enterprise":
             endpoint = settings.enterprise_sandbox_gateway_endpoint or ""

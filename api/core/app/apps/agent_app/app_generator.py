@@ -135,6 +135,17 @@ def _string_value(mapping: Mapping[str, object], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def args_workbench_owner(session, tenant_id, conversation):
+    if conversation is None:
+        return None
+    from models.workbench import WorkbenchChat
+    from configs import dify_config
+    if not dify_config.WORKBENCH_ENABLED:
+        return None
+    return session.scalar(select(WorkbenchChat.account_id).where(WorkbenchChat.tenant_id == tenant_id,
+        WorkbenchChat.conversation_id == conversation.id, WorkbenchChat.deleted == 0))
+
+
 class AgentAppGenerator(MessageBasedAppGenerator):
     def generate(
         self,
@@ -170,6 +181,15 @@ class AgentAppGenerator(MessageBasedAppGenerator):
             session=session,
             conversation=conversation,
         )
+        workbench_run_id = args.get("workbench_run_id")
+        if workbench_run_id:
+            if invoke_from != InvokeFrom.EXPLORE or not isinstance(user, Account):
+                raise AgentAppGeneratorError("Workbench requires an authenticated account")
+            from services.workbench.service import resolve_run_config, resolve_run_generation
+            agent_soul = resolve_run_config(workbench_run_id, app_model.tenant_id, user.id)
+            agent_config_id = resolve_run_generation(workbench_run_id, app_model.tenant_id, user.id)
+            agent_config_version_kind = "snapshot"
+
         session_scope_config_version_id = self._session_scope_config_version_id(
             invoke_from=invoke_from,
             config_version_id=agent_config_id,
@@ -219,6 +239,7 @@ class AgentAppGenerator(MessageBasedAppGenerator):
             agent_config_snapshot_id=agent_config_id,
             agent_config_version_kind=agent_config_version_kind,
             agent_session_scope_config_version_id=session_scope_config_version_id,
+            workbench_run_id=workbench_run_id,
             agent_llm_gateway_enabled=True,
         )
 
@@ -227,6 +248,10 @@ class AgentAppGenerator(MessageBasedAppGenerator):
             conversation,
             session=session,
         )
+
+        if workbench_run_id:
+            from services.workbench.runtime import attach_conversation
+            attach_conversation(workbench_run_id, app_model.tenant_id, user.id, conversation.id, application_generate_entity.task_id)
 
         queue_manager = MessageBasedAppQueueManager(
             task_id=application_generate_entity.task_id,
@@ -509,6 +534,10 @@ class AgentAppGenerator(MessageBasedAppGenerator):
                         session=session,
                     )
 
+                if application_generate_entity.workbench_run_id:
+                    from services.workbench.service import resolve_run_config
+                    agent_soul = resolve_run_config(application_generate_entity.workbench_run_id, app_config.tenant_id, application_generate_entity.user_id)
+
                 runner = self._build_runner()
                 runner.run(
                     dify_context=dify_context,
@@ -684,7 +713,7 @@ class AgentAppGenerator(MessageBasedAppGenerator):
         if conversation_binding is not None:
             AgentWorkspaceService.validate_binding_generation(
                 conversation_binding,
-                base_home_snapshot_id=snapshot.home_snapshot_id,
+                base_home_snapshot_id=(None if args_workbench_owner(session, app_model.tenant_id, conversation) else snapshot.home_snapshot_id),
                 agent_config_version_id=snapshot.id,
                 agent_config_version_kind=AgentConfigVersionKind.SNAPSHOT,
             )
@@ -703,6 +732,7 @@ class AgentAppGenerator(MessageBasedAppGenerator):
 
         if conversation is None or conversation.agent_workspace_binding_id is None:
             return None
+        workbench_owner = args_workbench_owner(session, tenant_id, conversation)
         binding = AgentWorkspaceService.get_active_binding(
             session=session,
             tenant_id=tenant_id,
@@ -710,8 +740,8 @@ class AgentAppGenerator(MessageBasedAppGenerator):
             expected_owner_scope=WorkspaceOwnerScope(
                 tenant_id=tenant_id,
                 app_id=app_id,
-                owner_type=AgentWorkspaceOwnerType.CONVERSATION,
-                owner_id=conversation.id,
+                owner_type=(AgentWorkspaceOwnerType.WORKBENCH_USER if workbench_owner else AgentWorkspaceOwnerType.CONVERSATION),
+                owner_id=workbench_owner or conversation.id,
             ),
         )
         if binding is None or binding.agent_id != agent_id:

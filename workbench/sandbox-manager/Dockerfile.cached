@@ -1,0 +1,6 @@
+FROM langgenius/dify-agent-local-sandbox:1.17.0
+USER root
+WORKDIR /app
+COPY server.py file_ops.py environment.py stop_jobs.py ./
+# Test deployment mounts the host's Docker CLI read-only at /usr/local/bin/docker.
+CMD ["python3", "/app/server.py"]

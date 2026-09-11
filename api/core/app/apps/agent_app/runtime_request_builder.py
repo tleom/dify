@@ -74,6 +74,7 @@ class AgentAppRuntimeBuildContext:
     session_snapshot: CompositorSessionSnapshot | None = None
     # ENG-638: set when resuming a chat turn after a submitted ask_human form.
     deferred_tool_results: DeferredToolResultsPayload | None = None
+    workbench_run_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +99,7 @@ class AgentAppRuntimeRequestBuilder:
 
     def build(self, context: AgentAppRuntimeBuildContext) -> AgentAppRuntimeRequest:
         agent_soul = context.agent_soul
+        workbench_run_id = context.workbench_run_id
         if agent_soul.model is None:
             raise AgentAppRuntimeRequestBuildError(
                 "agent_model_not_configured",
@@ -122,7 +124,7 @@ class AgentAppRuntimeRequestBuilder:
                 "cli_tool_count": len(agent_soul.tools.cli_tools),
             }
 
-        runtime_config_skills = load_runtime_agent_skill_configs(
+        runtime_config_skills = [] if workbench_run_id else load_runtime_agent_skill_configs(
             tenant_id=context.dify_context.tenant_id,
             agent_id=context.agent_id,
         )
@@ -133,6 +135,7 @@ class AgentAppRuntimeRequestBuilder:
             config_version_kind=context.agent_config_version_kind,
             runtime_config_skills=runtime_config_skills,
         )
+        config_layer_config.reset_materialized_assets = bool(workbench_run_id)
         append_runtime_warnings(metadata, config_warnings)
         soul_prompt_resolver = build_config_aware_soul_mention_resolver(
             agent_soul,
@@ -163,6 +166,7 @@ class AgentAppRuntimeRequestBuilder:
                     user_id=context.dify_context.user_id,
                     app_id=context.dify_context.app_id,
                     conversation_id=context.conversation_id,
+                    workbench_run_id=workbench_run_id,
                     agent_id=context.agent_id,
                     agent_config_version_id=context.agent_config_snapshot_id,
                     agent_config_version_kind=context.agent_config_version_kind,
@@ -191,6 +195,10 @@ class AgentAppRuntimeRequestBuilder:
                 metadata=metadata,
             )
         )
+        if workbench_run_id:
+            from dify_agent.protocol.schemas import RunLayerSpec
+            request.composition.layers.append(RunLayerSpec(name="workbench_environment", type="dify.workbench_environment", config={}))
+            request.rebuild_layers = context.deferred_tool_results is None
         redacted = cast(dict[str, Any], redact_for_agent_backend_log(request))
         return AgentAppRuntimeRequest(
             request=request,

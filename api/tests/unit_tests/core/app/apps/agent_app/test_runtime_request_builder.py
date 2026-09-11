@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -59,6 +60,23 @@ def _exec_ctx() -> DifyExecutionContextLayerConfig:
         invoke_from="web-app",
         agent_mode="agent_app",
     )
+
+
+def test_workbench_uses_only_frozen_skills_and_rebuilds_new_turn(monkeypatch: pytest.MonkeyPatch):
+    def unexpected_workspace_skills(**_kwargs):
+        raise AssertionError("A workbench turn must not add unselected workspace skills")
+
+    monkeypatch.setattr(
+        "core.app.apps.agent_app.runtime_request_builder.load_runtime_agent_skill_configs",
+        unexpected_workspace_skills,
+    )
+    builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_NoToolsBuilder())  # type: ignore[arg-type]
+    result = builder.build(replace(_ctx(_soul_with_model_and_skill()), workbench_run_id="run-1"))
+    config = next(layer.config for layer in result.request.composition.layers if layer.name == DIFY_CONFIG_LAYER_ID)
+    assert config.reset_materialized_assets is True
+    assert [skill.name for skill in config.skills] == ["tender-analyzer"]
+    assert result.request.rebuild_layers is True
+    assert any(layer.type == "dify.workbench_environment" for layer in result.request.composition.layers)
 
 
 class TestBuildForAgentApp:
@@ -499,6 +517,7 @@ class TestAgentAppConfigLayer:
             "note": "",
             "mentioned_skill_names": [],
             "mentioned_file_names": [],
+            "reset_materialized_assets": False,
         }
         assert layers[DIFY_SHELL_LAYER_ID].deps == {
             "execution_context": "execution_context",
@@ -529,6 +548,7 @@ class TestAgentAppConfigLayer:
             "note": "Read the proposal first.",
             "mentioned_skill_names": ["tender-analyzer"],
             "mentioned_file_names": [],
+            "reset_materialized_assets": False,
         }
 
     def test_config_layer_includes_bound_workspace_skills(self, monkeypatch: pytest.MonkeyPatch):

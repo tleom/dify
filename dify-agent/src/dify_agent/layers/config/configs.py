@@ -52,6 +52,7 @@ class DifyConfigLayerConfig(LayerConfig):
     note: str = ""
     mentioned_skill_names: list[str] = Field(default_factory=list)
     mentioned_file_names: list[str] = Field(default_factory=list)
+    reset_materialized_assets: bool = False
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 

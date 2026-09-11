@@ -128,6 +128,7 @@ class AgentWorkspaceOwnerType(StrEnum):
 
     WORKFLOW_RUN = "workflow_run"
     CONVERSATION = "conversation"
+    WORKBENCH_USER = "workbench_user"
     BUILD_DRAFT = "build_draft"
 
 

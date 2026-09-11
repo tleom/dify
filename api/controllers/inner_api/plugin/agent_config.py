@@ -33,6 +33,7 @@ class _ConfigTargetQuery(BaseModel):
     user_id: str | None = None
     config_version_id: str
     config_version_kind: AgentConfigVersionKind
+    workbench_run_id: str | None = None
 
 
 class _ConfigMutationRequest(BaseModel):
@@ -92,6 +93,7 @@ def _target_query_from_request() -> _ConfigTargetQuery:
             "user_id": request.args.get("user_id"),
             "config_version_id": request.args.get("config_version_id"),
             "config_version_kind": request.args.get("config_version_kind"),
+            "workbench_run_id": request.args.get("workbench_run_id"),
         }
     )
 
@@ -108,7 +110,7 @@ class AgentConfigManifestApi(Resource):
     def get(self, agent_id: str):
         try:
             query = _target_query_from_request()
-            return AgentConfigService().manifest(
+            return AgentConfigService(workbench_run_id=query.workbench_run_id).manifest(
                 tenant_id=query.tenant_id,
                 agent_id=agent_id,
                 user_id=query.user_id,
@@ -129,7 +131,7 @@ class AgentConfigDownloadRequestApi(Resource):
     def post(self, agent_id: str):
         try:
             body = _ConfigDownloadRequest.model_validate(request.get_json(silent=True) or {})
-            result = AgentConfigService().request_download(
+            result = AgentConfigService(workbench_run_id=body.workbench_run_id).request_download(
                 tenant_id=body.tenant_id,
                 agent_id=agent_id,
                 user_id=body.user_id,
@@ -158,7 +160,7 @@ class AgentConfigSkillInspectApi(Resource):
     def get(self, agent_id: str, name: str):
         try:
             query = _target_query_from_request()
-            return AgentConfigService().inspect_skill(
+            return AgentConfigService(workbench_run_id=query.workbench_run_id).inspect_skill(
                 tenant_id=query.tenant_id,
                 agent_id=agent_id,
                 user_id=query.user_id,

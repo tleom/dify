@@ -95,6 +95,31 @@ class DifyConfigLayer(PlainLayer[DifyConfigDeps, DifyConfigLayerConfig, DifyConf
         return None
 
     async def _initialize_context(self) -> None:
+        if self.config.reset_materialized_assets:
+            # Only the runtime-owned asset cache in this conversation's cwd is rebuilt.
+            # Directory descriptors prevent a replaced/symlinked cache escaping that cwd.
+            script = """python3 - <<'PY'
+import os, shutil
+try:
+    os.mkdir('.dify_conf')
+except FileExistsError:
+    pass
+fd = os.open('.dify_conf', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    for name in ('skills', 'files'):
+        try:
+            shutil.rmtree(name, dir_fd=fd)
+        except (NotADirectoryError, OSError):
+            try:
+                os.unlink(name, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+finally:
+    os.close(fd)
+PY"""
+            result = await self.deps.shell.run_remote_script(script, inject_agent_stub_env=False)
+            if result.exit_code:
+                raise DifyConfigLayerError("Could not rebuild the conversation config asset cache")
         self._initialize_runtime_prompt_state()
         await self._pull_mentioned_targets()
 

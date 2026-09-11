@@ -311,7 +311,16 @@ class AgentRunRunner:
         model: Any = None
         run = None
         try:
-            async with compositor.enter(configs=layer_configs, session_snapshot=self.request.session_snapshot) as run:
+            if self.request.rebuild_layers and self.request.deferred_tool_results is not None:
+                raise ValueError("Deferred continuations cannot rebuild their layer composition")
+            restore_snapshot = None if self.request.rebuild_layers else self.request.session_snapshot
+            async with compositor.enter(configs=layer_configs, session_snapshot=restore_snapshot) as run:
+                if self.request.rebuild_layers and self.request.session_snapshot is not None:
+                    from agenton_collections.layers.pydantic_ai.history import PydanticAIHistoryRuntimeState
+                    previous = next((layer for layer in self.request.session_snapshot.layers if layer.name == "history"), None)
+                    history = get_history_layer(run)
+                    if previous is not None and history is not None:
+                        history.replace_messages(PydanticAIHistoryRuntimeState.model_validate(previous.runtime_state).messages)
                 entered_run = True
                 apply_layer_exit_signals(run, self.request.on_exit)
                 user_prompts = run.user_prompts
@@ -336,6 +345,11 @@ class AgentRunRunner:
                     history_layer = get_history_layer(run)
                     message_history = history_layer.message_history if history_layer is not None else None
                     ask_human_layer = get_ask_human_layer(run)
+                    from dify_agent.layers.workbench_environment import WorkbenchEnvironmentLayer, TOOL_NAME
+                    try:
+                        environment_layer = run.get_layer("workbench_environment", WorkbenchEnvironmentLayer)
+                    except KeyError:
+                        environment_layer = None
                     llm_layer = run.get_layer(DIFY_AGENT_MODEL_LAYER_ID, DifyPluginLLMLayer)
                     compaction = build_compaction_capability(
                         context_window_tokens=llm_layer.config.context_window_tokens,
@@ -361,7 +375,7 @@ class AgentRunRunner:
                 agent = create_agent(
                     model,
                     tools=tools,
-                    output_type=_resolve_agent_output_type(output_contract.output_type, ask_human_layer is not None),
+                    output_type=_resolve_agent_output_type(output_contract.output_type, ask_human_layer is not None or environment_layer is not None),
                 )
                 run_timeout = asyncio.timeout(self.run_timeout_seconds)
                 try:
@@ -390,7 +404,8 @@ class AgentRunRunner:
                 usage = _serialize_agent_usage(complete_usage if complete_usage is not None else _result_usage(result))
                 self._terminal_usage = usage
                 if isinstance(result.output, DeferredToolRequests):
-                    if ask_human_layer is None:
+                    deferred_layer = environment_layer if (result.output.calls and result.output.calls[0].tool_name == TOOL_NAME) else ask_human_layer
+                    if deferred_layer is None:
                         raise AgentRunValidationError(
                             "Deferred tool requests were returned, but no active ask_human layer is available for validation."
                         )
@@ -398,7 +413,7 @@ class AgentRunRunner:
                         raise AgentRunValidationError(
                             "ask_human deferred tool requests require a 'history' layer so the pending tool call can be resumed."
                         )
-                    deferred_tool_call = ask_human_layer.build_deferred_tool_call_payload(result.output)
+                    deferred_tool_call = deferred_layer.build_deferred_tool_call_payload(result.output)
                     result_kind = "deferred_tool_call"
                 else:
                     output = _serialize_agent_output(result.output)

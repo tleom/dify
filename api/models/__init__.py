@@ -1,3 +1,4 @@
+from .workbench import WorkbenchChat, WorkbenchRevision, WorkbenchRun
 from .account import (
     Account,
     AccountIntegrate,

@@ -166,6 +166,7 @@ def init_app(app: DifyApp) -> Celery:
     setup_workflow_warm_shutdown_handler()
 
     imports = [
+        "tasks.workbench_tasks",
         "tasks.async_workflow_tasks",  # trigger workers
         "tasks.collect_agent_resources_task",  # retired Agent resource collection
         "tasks.trigger_processing_tasks",  # async trigger processing
@@ -182,6 +183,10 @@ def init_app(app: DifyApp) -> Celery:
 
     # if you add a new task, please add the switch to CeleryScheduleTasksConfig
     beat_schedule: dict[str, CeleryBeatScheduleEntry] = {}
+    if dify_config.WORKBENCH_ENABLED:
+        beat_schedule["workbench_reconcile"] = {"task": "tasks.workbench_tasks.reconcile", "schedule": 15.0}
+
+
     if dify_config.ENABLE_CONVERSATION_CLEANUP_TASK:
         imports.append("tasks.delete_conversation_task")
         beat_schedule["conversation_cleanup_sweeper"] = {

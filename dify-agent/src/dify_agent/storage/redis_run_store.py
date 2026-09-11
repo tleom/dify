@@ -10,6 +10,7 @@ sensitive runtime configuration.
 """
 
 from collections.abc import AsyncIterator, Awaitable
+import json
 from typing import cast
 
 from redis.asyncio import Redis
@@ -190,6 +191,43 @@ class RedisRunStore(RunEventSink):
         if isinstance(value, bytes):
             value = value.decode()
         return RunRecord.model_validate_json(value)
+
+    async def create_run_once(self, run_id: str, owner: dict[str, str] | None = None) -> tuple[RunRecord, bool]:
+        """Keep a durable ticket tombstone even after normal event retention expires."""
+        record = RunRecord(run_id=run_id, status="running")
+        created = await self.redis.eval("""
+            if redis.call('SET',KEYS[1],ARGV[3],'NX') then
+                redis.call('SET',KEYS[2],ARGV[1],'EX',ARGV[2])
+                return 1
+            end
+            return 0
+        """, 2, f"{self.prefix}:ticket:{run_id}", run_record_key(self.prefix, run_id),
+            record.model_dump_json(), self.run_retention_seconds, json.dumps(owner or 1))
+        if created:
+            return record, True
+        try:
+            return await self.get_run(run_id), False
+        except RunNotFoundError:
+            return RunRecord(run_id=run_id, status="cancelled", error="Execution ticket already consumed"), False
+
+    async def fence_run(self, run_id: str) -> RunStatus:
+        """Revoke a ticket, including when cancellation beats its delayed create request."""
+        record = RunRecord(run_id=run_id, status="cancelled", error="Admission ticket revoked")
+        created = await self.redis.eval("""
+            local previous = redis.call('GET',KEYS[1])
+            redis.call('SET',KEYS[1],'1','NX')
+            if previous and previous ~= '1' then
+                local record = cjson.decode(ARGV[1])
+                record.status = 'running'
+                redis.call('SET',KEYS[2],cjson.encode(record),'NX','EX',ARGV[2])
+                return false
+            end
+            return redis.call('SET',KEYS[2],ARGV[1],'NX','EX',ARGV[2])
+        """, 2, f"{self.prefix}:ticket:{run_id}", run_record_key(self.prefix, run_id),
+            record.model_dump_json(), self.run_retention_seconds)
+        if created:
+            return "cancelled"
+        return await self.request_cancellation(run_id, CancelRunRequest(reason="workbench_admission_revoked"))
 
     async def append_event(self, event: NonTerminalRunEvent) -> str:
         """Append a non-terminal event JSON payload with refreshed TTLs."""

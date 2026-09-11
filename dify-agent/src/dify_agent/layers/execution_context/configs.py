@@ -52,6 +52,8 @@ class DifyExecutionContextLayerConfig(LayerConfig):
     node_id: str | None = None
     node_execution_id: str | None = None
     conversation_id: str | None = None
+    # Set only by the authenticated workbench executor; signed into Agent Stub tokens.
+    workbench_run_id: str | None = None
     agent_id: str | None = None
     agent_config_version_id: str | None = None
     agent_config_version_kind: DifyExecutionContextAgentConfigVersionKind | None = None

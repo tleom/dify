@@ -148,8 +148,13 @@ class CreateRunRequest(BaseModel):
 
     composition: RunComposition
     idempotency_key: str | None = None
+    # Optional API-issued admission ticket. Repeated tickets never schedule another runner.
+    execution_ticket: str | None = Field(default=None, pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
     session_snapshot: CompositorSessionSnapshot | None = None
+    # Start a new turn with new capabilities, retaining only prior message history.
+    # Deferred continuations must retain the complete original composition instead.
+    rebuild_layers: bool = False
     deferred_tool_results: DeferredToolResultsPayload | None = None
     on_exit: LayerExitSignals = Field(default_factory=LayerExitSignals)
 

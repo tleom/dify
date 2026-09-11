@@ -44,6 +44,7 @@ class ExecutionBindingService:
                     workspace_id=request.workspace_id,
                     existing_workspace_ref=request.existing_workspace_ref,
                     home_snapshot_ref=request.home_snapshot_ref,
+                    workbench=request.workbench,
                 )
             )
         except SharedWorkspaceUnsupportedError as exc:

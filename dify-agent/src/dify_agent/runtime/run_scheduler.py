@@ -46,6 +46,8 @@ class RunStore(RunEventSink, Protocol):
         """Persist a new run record and return it with status ``running``."""
         ...
 
+    async def create_run_once(self, run_id: str, owner: dict[str, str] | None = None) -> tuple[RunRecord, bool]: ...
+
     async def request_cancellation(self, run_id: str, request: CancelRunRequest) -> RunStatus:
         """Persist the first cancellation intent and return the current status."""
         ...
@@ -147,7 +149,14 @@ class RunScheduler:
         async with self._lifecycle_lock:
             if self.stopping:
                 raise SchedulerStoppingError("run scheduler is shutting down")
-            record = await self.store.create_run()
+            if request.execution_ticket:
+                from dify_agent.runtime.workbench_recovery import execution_owner
+                owner = await execution_owner(request)
+                record, created = await self.store.create_run_once(request.execution_ticket, owner)
+                if not created:
+                    return record
+            else:
+                record = await self.store.create_run()
             task = asyncio.create_task(self._run_record(record, request), name=f"dify-agent-run-{record.run_id}")
             self.active_tasks[record.run_id] = task
             task.add_done_callback(lambda _task, run_id=record.run_id: self._discard_active_run(run_id))

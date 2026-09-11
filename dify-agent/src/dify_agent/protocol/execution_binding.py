@@ -10,6 +10,7 @@ class CreateExecutionBindingRequest(BaseModel):
     agent_id: str = Field(min_length=1)
     binding_id: str = Field(min_length=1)
     workspace_id: str = Field(min_length=1)
+    workbench: bool = False
     existing_workspace_ref: str | None = None
     home_snapshot_ref: str | None = Field(default=None, min_length=1)
 

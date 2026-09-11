@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 
 from libs.file_utils import search_file_upwards
 
+from .workbench import WorkbenchConfig
 from .deploy import DeploymentConfig
 from .enterprise import EnterpriseFeatureConfig, EnterpriseTelemetryConfig
 from .extra import ExtraServiceConfig
@@ -58,6 +59,7 @@ class RemoteSettingsSourceFactory(PydanticBaseSettingsSource):
 
 
 class DifyConfig(
+    WorkbenchConfig,
     # Packaging info
     PackagingInfo,
     # Deployment configs

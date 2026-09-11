@@ -139,6 +139,9 @@ class AgentWorkspaceService:
             home_snapshot_ref = home_snapshot.snapshot_ref
         workspace = cls.resolve_active_workspace(session=session, scope=scope)
         workspace_id = workspace.id if workspace is not None else str(uuidv7())
+        if workspace is None and scope.owner_type == AgentWorkspaceOwnerType.WORKBENCH_USER:
+            from services.workbench.files import workspace_id as workbench_workspace_id
+            workspace_id = workbench_workspace_id(scope.tenant_id, scope.owner_id)
         binding_id = str(uuidv7())
         with cls._client() as client:
             allocation = client.create_execution_binding_sync(
@@ -149,6 +152,7 @@ class AgentWorkspaceService:
                     workspace_id=workspace_id,
                     existing_workspace_ref=workspace.backend_workspace_ref if workspace is not None else None,
                     home_snapshot_ref=home_snapshot_ref,
+                    workbench=scope.owner_type == AgentWorkspaceOwnerType.WORKBENCH_USER,
                 )
             )
         if workspace is not None and allocation.workspace_ref != workspace.backend_workspace_ref:
@@ -240,7 +244,7 @@ class AgentWorkspaceService:
                     AgentWorkspaceBinding.id != binding.id,
                 )
             )
-            if other_binding is None:
+            if other_binding is None and workspace.owner_type != AgentWorkspaceOwnerType.WORKBENCH_USER:
                 workspace.status = AgentWorkingResourceStatus.RETIRED
                 workspace.active_guard = None
                 workspace.retired_at = now

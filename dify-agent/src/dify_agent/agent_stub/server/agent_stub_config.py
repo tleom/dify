@@ -207,6 +207,8 @@ class DifyApiAgentStubConfigRequestHandler:
         }
         if execution_context.user_id is not None:
             params["user_id"] = execution_context.user_id
+        if execution_context.workbench_run_id is not None:
+            params["workbench_run_id"] = execution_context.workbench_run_id
         return params
 
     async def _get_inner_api_json(self, path: str, params: Mapping[str, str]) -> object:

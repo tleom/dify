@@ -97,7 +97,7 @@ class DifyApiLLMClient:
         if missing:
             raise UserError(f"Agent LLM Gateway requires execution context fields: {', '.join(missing)}")
 
-        caller = context.model_dump(mode="json")
+        caller = context.model_dump(mode="json", exclude={"workbench_run_id"})
         caller.update(
             {
                 "invocation_id": invocation_id,

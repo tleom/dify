@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import posixpath
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, TypeVar, cast
 
 import httpx2 as httpx
@@ -108,6 +108,8 @@ class ShellctlCommands(ShellCommandProtocol):
     client: ShellctlClientProtocol
     home_dir: str | None = None
     workspace_dir: str | None = None
+    default_cwd: str | None = None
+    default_env: dict[str, str] = field(default_factory=dict)
 
     async def run(
         self,
@@ -119,11 +121,11 @@ class ShellctlCommands(ShellCommandProtocol):
         mode: ShellExecutionMode = "pty",
     ) -> ShellCommandResult:
         resolved_cwd = _resolve_lease_cwd(
-            cwd,
+            cwd or self.default_cwd,
             home_dir=self.home_dir,
             workspace_dir=self.workspace_dir,
         )
-        resolved_env = _lease_env(env, home_dir=self.home_dir)
+        resolved_env = _lease_env({**(env or {}), **self.default_env}, home_dir=self.home_dir)
         return _from_job_result(
             await _run_client_call(
                 self.client.run(

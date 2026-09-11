@@ -67,6 +67,18 @@ def create_runs_router(
             error_type=record.error_type,
         )
 
+    @router.post("/{run_id}/fence")
+    async def fence_run(run_id: str, store: Annotated[RedisRunStore, Depends(store_dep)]):
+        from uuid import UUID
+        try:
+            normalized = str(UUID(run_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid execution ticket") from exc
+        status = await store.fence_run(normalized)
+        from dify_agent.runtime.workbench_recovery import recover_fenced_run
+        status = await recover_fenced_run(store, normalized, status)
+        return {"run_id": normalized, "status": status}
+
     @router.post("/{run_id}/cancel", response_model=CancelRunResponse)
     async def cancel_run(
         run_id: str,

@@ -191,7 +191,7 @@ class WorkflowAgentDifyToolsBuilder:
         prepared_core: list[DifyCoreToolConfig] = []
         seen_names: set[str] = set()
 
-        for tool_config in self._expand_provider_entries(tenant_id=tenant_id, enabled_tools=enabled_tools):
+        for tool_config in self.expand_provider_entries(tenant_id=tenant_id, enabled_tools=enabled_tools):
             normalized_tool_config = self._normalized_tool_config(tenant_id=tenant_id, tool_config=tool_config)
             destination = self._tool_layer_destination(normalized_tool_config)
             exposed_name = self._exposed_tool_name(normalized_tool_config)
@@ -226,7 +226,7 @@ class WorkflowAgentDifyToolsBuilder:
             core_tools=DifyCoreToolsLayerConfig(tools=prepared_core) if prepared_core else None,
         )
 
-    def _expand_provider_entries(
+    def expand_provider_entries(
         self,
         *,
         tenant_id: str,

@@ -146,7 +146,13 @@ class AudioService:
 
     @classmethod
     def _invoke_speech_to_text(
-        cls, app_model: App, file: FileStorage | None, end_user: str | None = None
+        cls,
+        app_model: App,
+        file: FileStorage | None,
+        end_user: str | None = None,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
     ) -> dict[str, str]:
         if file is None:
             raise NoAudioUploadedServiceError()
@@ -170,8 +176,16 @@ class AudioService:
                 "created_by": CreditUsageCreatedBy.AUDIO,
             },
         )
-        model_instance = model_manager.get_default_model_instance(
-            tenant_id=app_model.tenant_id, model_type=ModelType.SPEECH2TEXT
+        # A server-configured composer may use an already enabled STT model without
+        # changing the workspace default. The model manager still enforces its status.
+        model_instance = (
+            model_manager.get_model_instance(
+                tenant_id=app_model.tenant_id, provider=provider, model_type=ModelType.SPEECH2TEXT, model=model
+            )
+            if provider and model
+            else model_manager.get_default_model_instance(
+                tenant_id=app_model.tenant_id, model_type=ModelType.SPEECH2TEXT
+            )
         )
         if model_instance is None:
             raise ProviderNotSupportSpeechToTextServiceError()
