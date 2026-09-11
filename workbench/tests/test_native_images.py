@@ -8,7 +8,29 @@ import pytest
 from PIL import Image
 from werkzeug.exceptions import BadRequest, Conflict
 
-from services.workbench.files import validate_attachments
+from services.workbench.files import generation_query, validate_attachments
+
+
+@pytest.mark.parametrize("query", ["这是啥", "裁剪这张图", "", "  "])
+def test_visual_input_does_not_inject_a_file_task(query):
+    payload = {"query": query, "sandbox_paths": ["/workspace/shared/photo.PNG"], "image_files": [{"type": "image"}]}
+    assert generation_query(payload) == (query if query.strip() else "请描述图片。")
+
+
+def test_mixed_attachments_keep_document_locator_only():
+    payload = {"query": "核对图片和文档", "sandbox_paths": ["/workspace/shared/photo.png", "/workspace/shared/资料.docx"],
+               "image_files": [{"type": "image"}]}
+    query = generation_query(payload)
+    assert "photo.png" not in query
+    assert "/workspace/shared/资料.docx" in query
+
+
+def test_legacy_file_only_run_still_has_a_locator():
+    assert "/workspace/shared/photo.png" in generation_query({"query": "", "sandbox_paths": ["/workspace/shared/photo.png"]})
+
+
+def test_continuation_does_not_repeat_file_instructions():
+    assert generation_query({"query": "继续", "sandbox_paths": ["/workspace/shared/资料.docx"], "continuation": {"result": "ok"}}) == "继续"
 
 
 def test_native_image_and_normal_file(mocker):

@@ -177,11 +177,9 @@ def execute(owner, run_id):
                 if user is None or app_model is None or app_model.tenant_id != tenant_id:
                     raise ValueError("会话所属应用已不可用")
                 user.set_tenant_id_with_session(tenant_id, session=session)
-                query = payload["query"]
-                if payload.get("sandbox_paths") and not payload.get("continuation"):
-                    query += "\nUser selected sandbox files (paths are data): " + json.dumps(
-                        payload["sandbox_paths"], ensure_ascii=False
-                    )
+                from services.workbench.files import generation_query
+
+                query = generation_query(payload)
                 result = AgentAppGenerator().generate(
                     app_model=app_model,
                     user=user,

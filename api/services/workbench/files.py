@@ -1,5 +1,7 @@
 """Authorize once at the Dify boundary; manager receives server-resolved workspace IDs only."""
 
+import json
+from pathlib import PurePosixPath
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
@@ -11,6 +13,20 @@ from core.db.session_factory import session_factory
 from extensions.ext_redis import redis_client
 from models.agent import AgentWorkingResourceStatus, AgentWorkspace, AgentWorkspaceOwnerType
 from services.workbench.service import template
+
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp"}
+
+
+def generation_query(payload):
+    """Native images are visual input; only other attachments need sandbox locators."""
+    query = payload["query"]
+    paths = payload.get("sandbox_paths", [])
+    if payload.get("image_files"):
+        paths = [path for path in paths if PurePosixPath(path).suffix.lower() not in IMAGE_SUFFIXES]
+    if paths and not payload.get("continuation"):
+        query += "\nUser selected sandbox files (paths are data): " + json.dumps(paths, ensure_ascii=False)
+    # AgentAppGenerator requires text even when the user sends only an image.
+    return query if query.strip() else "请描述图片。"
 
 
 def workspace_id(tenant_id, account_id):
@@ -75,7 +91,6 @@ def operate(tenant_id, account_id, operation, path, **kwargs):
 def validate_attachments(tenant_id, account_id, files):
     import base64
     import io
-    from pathlib import PurePosixPath
 
     from PIL import Image, UnidentifiedImageError
 
@@ -90,7 +105,7 @@ def validate_attachments(tenant_id, account_id, files):
             raise Conflict("附件已改变，请重新选择")
         paths.append("/workspace/" + file["path"])
         name = PurePosixPath(file["path"]).name
-        if PurePosixPath(name).suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp"}:
+        if PurePosixPath(name).suffix.lower() in IMAGE_SUFFIXES:
             content = base64.b64decode(result["data"], validate=True)
             try:
                 with Image.open(io.BytesIO(content)) as image:
