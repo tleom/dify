@@ -11,7 +11,7 @@ import time
 import uuid
 
 TOKEN = os.environ["WORKBENCH_SANDBOX_MANAGER_TOKEN"]
-IMAGE = os.environ.get("WORKBENCH_SANDBOX_IMAGE", "langgenius/dify-agent-local-sandbox:1.17.0")
+IMAGE = os.environ.get("WORKBENCH_SANDBOX_IMAGE", "langgenius/dify-agent-local-sandbox:1.17.1")
 NETWORK = os.environ.get("WORKBENCH_SANDBOX_NETWORK", "dify-workbench-sandboxes")
 PREFIX = os.environ.get("WORKBENCH_SANDBOX_PREFIX", "dify-wb-dev")
 STATE = Path(os.environ.get("WORKBENCH_MANAGER_STATE", "/state"))

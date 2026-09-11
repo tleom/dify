@@ -1,2 +1,2 @@
-FROM langgenius/dify-agent-backend:1.17.0
+FROM langgenius/dify-agent-backend:1.17.1
 COPY dify-agent/src/ /app/api/.venv/lib/python3.12/site-packages/
