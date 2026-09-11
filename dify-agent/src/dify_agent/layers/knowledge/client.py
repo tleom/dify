@@ -52,6 +52,7 @@ class _DifyKnowledgeCaller(BaseModel):
 
 
 class _DifyKnowledgeRetrieveRequest(BaseModel):
+    workbench_run_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
     caller: _DifyKnowledgeCaller
     dataset_ids: list[str]
     query: str
@@ -113,6 +114,7 @@ class DifyKnowledgeBaseClient:
         query: str,
         retrieval: DifyKnowledgeRetrievalConfig,
         metadata_filtering: DifyKnowledgeMetadataFilteringConfig,
+        workbench_run_id: str | None = None,
     ) -> DifyKnowledgeRetrieveResponse:
         """Call the inner API and return parsed retrieval results.
 
@@ -123,6 +125,7 @@ class DifyKnowledgeBaseClient:
                 those temporary-unavailable cases.
         """
         request_payload = _DifyKnowledgeRetrieveRequest(
+            workbench_run_id=workbench_run_id,
             caller=_DifyKnowledgeCaller(
                 tenant_id=tenant_id,
                 user_id=user_id,

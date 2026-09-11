@@ -158,6 +158,12 @@ class AgentAppRuntimeRequestBuilder:
             runtime_config_skills=runtime_config_skills,
         )
         knowledge_config = build_knowledge_layer_config(agent_soul)
+        if workbench_run_id and knowledge_config is not None:
+            knowledge_config.workbench_run_id = workbench_run_id
+            # Repeated questions in separate turns still retrieve; resume of the
+            # same execution can reuse its already completed eager retrieval.
+            for knowledge_set in knowledge_config.sets:
+                knowledge_set.id = f"{knowledge_set.id}:{workbench_run_id}"
         context_window_tokens = resolve_model_context_window(
             run_context=context.dify_context,
             provider_name=agent_soul.model.model_provider,

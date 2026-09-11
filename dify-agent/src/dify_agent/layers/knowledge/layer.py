@@ -222,6 +222,7 @@ class DifyKnowledgeBaseLayer(
                 query = (knowledge_set.query.value or "").strip()
                 try:
                     response = await client.retrieve(
+                        **({"workbench_run_id": self.config.workbench_run_id} if self.config.workbench_run_id else {}),
                         tenant_id=caller["tenant_id"],
                         user_id=caller["user_id"],
                         app_id=caller["app_id"],

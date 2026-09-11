@@ -12,6 +12,7 @@ from tests.unit_tests.config_override import apply_config_overrides
 
 @pytest.mark.parametrize("allowed", [True, False])
 def test_template_enforces_native_agent_run_permission(monkeypatch, allowed):
+    monkeypatch.setattr("services.workbench.knowledge.available_sets", lambda *args: [])
     apply_config_overrides(
         monkeypatch, RBAC_ENABLED=True, WORKBENCH_AGENT_TEMPLATES={"tenant": "agent"}
     )

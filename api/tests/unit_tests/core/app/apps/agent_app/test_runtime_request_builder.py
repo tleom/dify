@@ -87,6 +87,26 @@ def test_workbench_uses_only_frozen_skills_and_rebuilds_new_turn(monkeypatch: py
     assert any(layer.type == "dify.workbench_environment" for layer in result.request.composition.layers)
 
 
+def test_workbench_retrieves_same_question_again_on_new_turn():
+    data = _soul_with_model_and_skill().model_dump(mode="json")
+    data["knowledge"] = {"sets": [{
+        "id": "dataset-1", "name": "知识库", "datasets": [{"id": "dataset-1"}],
+        "query": {"mode": "user_query", "value": "相同问题"},
+        "retrieval": {"mode": "multiple", "top_k": 3, "reranking_enable": False},
+    }]}
+    soul = AgentSoulConfig.model_validate(data)
+    builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_NoToolsBuilder())
+    ids = []
+    for run_id in ["run-1", "run-2", "run-2"]:
+        result = builder.build(replace(_ctx(soul), workbench_run_id=run_id))
+        config = next(layer.config for layer in result.request.composition.layers if layer.name == "knowledge")
+        assert config.sets[0].query.value == "相同问题"
+        assert config.workbench_run_id == run_id
+        ids.append(config.sets[0].id)
+    assert ids == ["dataset-1:run-1", "dataset-1:run-2", "dataset-1:run-2"]
+    assert soul.knowledge.sets[0].id == "dataset-1"
+
+
 @pytest.mark.parametrize(("previous_prompt", "current_prompt"), [("", "New soul"), ("Old soul", "")])
 def test_workbench_rebuild_accepts_previous_composition(previous_prompt: str, current_prompt: str):
     builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_NoToolsBuilder())  # type: ignore[arg-type]

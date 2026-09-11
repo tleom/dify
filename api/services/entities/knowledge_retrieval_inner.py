@@ -135,6 +135,7 @@ class InnerKnowledgeRetrieveRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    workbench_run_id: str | None = None
     caller: InnerKnowledgeRetrieveCaller
     dataset_ids: list[str]
     query: str | None = None

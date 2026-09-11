@@ -92,6 +92,9 @@ def template(tenant_id: str, account_id: str):
                 {key: value for key, value in skill.items() if key != "id"}
             )
             names.add(skill["name"])
+    from services.workbench.knowledge import available_sets
+
+    base["soul"]["knowledge"] = {"sets": available_sets(tenant_id, account_id)}
     return base
 
 
@@ -192,6 +195,7 @@ def read_chat(tenant_id: str, account_id: str, chat_id: str):
 
 def run_dto(run):
     from services.workbench.message_actions import message_ids
+    from services.workbench.knowledge_events import run_knowledge_events
 
     payload = json.loads(run.payload)
     ids = message_ids(run)
@@ -203,7 +207,7 @@ def run_dto(run):
         "pending": payload.get("pending"),
         "status": run.status,
         "error": run.error,
-        "events": json.loads(run.event_log),
+        "events": [*run_knowledge_events(run, payload), *json.loads(run.event_log)],
         "query": payload.get("query", ""),
         "resource_mentions": payload.get("resource_mentions", {}),
         "mentioned_resources": payload.get("mentioned_resources", []),
@@ -342,6 +346,10 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload):
         })
     selected.knowledge = list(dict.fromkeys([*selected.knowledge, *mention_data["resource_mentions"]["knowledge"]]))
     effective = compile_config(tenant_id, base, selected)
+    for knowledge_set in effective.get("knowledge", {}).get("sets", []):
+        knowledge_set["query"] = {"mode": "user_query", "value": payload.get("query", "").strip()}
+    if effective.get("knowledge", {}).get("sets") and not payload.get("query", "").strip():
+        raise Conflict("请选择知识库后输入需要检索的问题")
     payload = {**payload, **mention_data}
     if payload.get("files"):
         from services.workbench.files import validate_attachments
@@ -415,7 +423,11 @@ def resolve_run_config(run_id, tenant_id, account_id):
         )
         if run is None or run.status != "running":
             raise Forbidden()
-        return AgentSoulConfig.model_validate(json.loads(run.payload)["effective_soul"])
+        soul = AgentSoulConfig.model_validate(json.loads(run.payload)["effective_soul"])
+    from services.workbench.knowledge import validate_run_knowledge
+
+    validate_run_knowledge(tenant_id, account_id, soul)
+    return soul
 
 
 def resolve_run_generation(run_id, tenant_id, account_id):
