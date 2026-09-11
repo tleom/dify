@@ -116,6 +116,7 @@ def regenerate(tenant_id, account_id, run_id, version, request_key):
             "inputs": original.get("inputs", {}),
             "files": [],
             "sandbox_paths": original.get("sandbox_paths", []),
+            "image_files": original.get("image_files", []),
             "regenerate_from": run.id,
             "parent_message_id": message.parent_message_id if message else None,
         }

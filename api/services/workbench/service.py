@@ -323,8 +323,8 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload):
     if payload.get("files"):
         from services.workbench.files import validate_attachments
 
-        paths = validate_attachments(tenant_id, account_id, payload["files"])
-        payload = {**payload, "sandbox_paths": paths, "files": []}
+        paths, images = validate_attachments(tenant_id, account_id, payload["files"])
+        payload = {**payload, "sandbox_paths": paths, "image_files": images, "files": []}
     with session_factory.get_session_maker().begin() as session:
         chat = _chat(session, tenant_id, account_id, chat_id, lock=True)
         existing = session.scalar(

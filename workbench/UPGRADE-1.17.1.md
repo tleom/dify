@@ -17,7 +17,7 @@
 ## 构建与部署
 
 ```sh
-docker build -f workbench/Dockerfile.api -t dify-workbench-api:1.17.1-20260911.2 .
+docker build -f workbench/Dockerfile.api -t dify-workbench-api:1.17.1-20260911.3 .
 docker build -f workbench/Dockerfile.agent -t dify-workbench-agent:1.17.1-20260911.1 .
 docker build -f workbench/sandbox-manager/Dockerfile.cached -t dify-workbench-manager:1.17.1-20260911.1 workbench/sandbox-manager
 ```
@@ -30,11 +30,15 @@ docker build -f workbench/sandbox-manager/Dockerfile.cached -t dify-workbench-ma
 
 ## 升级验证
 
-隔离镜像测试通过：API 89 项、Agent 27 项。覆盖工作台配置、模板运行权限的允许与拒绝、附件、停止后历史、消息操作、并发准入、幂等票据、上游请求构建及配置层。
+隔离镜像测试通过：API 92 项、Agent 27 项。覆盖工作台配置、模板运行权限的允许与拒绝、原生图片及普通附件、停止后历史、消息操作、并发准入、幂等票据、上游请求构建及配置层。
 
 生产备份恢复到临时 PostgreSQL 后，迁移到 `wb20260911u171` 成功；账号、会话、消息、工作台会话/任务/修订和上传文件数量保持一致。规范化邮箱及知识库 Token 绑定表检查通过，再次执行升级成功。
 
 独立前端的类型检查、lint、生产构建和工作台交互单元检查通过。lint 保留原组件中的既有警告。完整上游 CI 未运行。
+
+生产已部署 1.17.1，迁移版本为 `wb20260911u171`。切换时账号、会话、消息和工作台记录数量保持一致。实际验证了停止后继续发送、上下文、反馈、重新生成、账号隔离、Shell、原生代码工具及 Tavily 插件。当前发布模板没有 MCP 工具，本轮没有执行真实 MCP 调用。
+
+图片经账号所属沙箱及文件版本校验后，进入 Dify 原生上传文件与多模态消息通道；普通附件仍使用沙箱路径。重新生成保留原图片引用。浏览器实测即时预览和粘贴阶段无上传，发送时才上传；桌面与移动端缩略图均为 44px 高，上传失败保留草稿。线上模型直接识别测试图片中的颜色、形状和数字，未调用工具读取图片。
 
 ## 同步下一版官方代码
 

@@ -189,7 +189,7 @@ def execute(owner, run_id):
                     args={
                         "inputs": payload.get("inputs", {}),
                         "query": query,
-                        "files": [],
+                        "files": payload.get("image_files", []) if not payload.get("continuation") else [],
                         "conversation_id": conversation_id,
                         "workbench_run_id": run_id,
                         **(

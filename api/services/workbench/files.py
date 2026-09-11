@@ -73,10 +73,41 @@ def operate(tenant_id, account_id, operation, path, **kwargs):
 
 
 def validate_attachments(tenant_id, account_id, files):
+    import base64
+    import io
+    from pathlib import PurePosixPath
+
+    from PIL import Image, UnidentifiedImageError
+
+    from models.account import Account
+    from services.file_service import FileService
+
     paths = []
+    images = []
     for file in files:
         result = operate(tenant_id, account_id, "get", file["path"])
         if result["version"] != file["version"]:
             raise Conflict("附件已改变，请重新选择")
         paths.append("/workspace/" + file["path"])
-    return paths
+        name = PurePosixPath(file["path"]).name
+        if PurePosixPath(name).suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp"}:
+            content = base64.b64decode(result["data"], validate=True)
+            try:
+                with Image.open(io.BytesIO(content)) as image:
+                    mimetype = Image.MIME[image.format]
+                    image.verify()
+            except (UnidentifiedImageError, OSError, ValueError, KeyError) as error:
+                raise BadRequest("图片内容无效，请重新选择") from error
+            images.append((name, content, mimetype))
+    native_files = []
+    if images:
+        with session_factory.create_session() as session:
+            user = session.get(Account, account_id)
+            if user is None:
+                raise BadRequest("账号已不可用")
+            for name, content, mimetype in images:
+                uploaded = FileService(session_factory.get_session_maker()).upload_file(
+                    filename=name, content=content, mimetype=mimetype, user=user, tenant_id=tenant_id
+                )
+                native_files.append({"type": "image", "transfer_method": "local_file", "upload_file_id": uploaded.id})
+    return paths, native_files
