@@ -204,7 +204,8 @@ class AgentAppRuntimeRequestBuilder:
                 agent_soul_prompt=expand_prompt_mentions(agent_soul.prompt.system_prompt, soul_prompt_resolver).strip()
                 or None,
                 agent_config_version_kind=context.agent_config_version_kind,
-                user_prompt=context.user_query,
+                user_prompt=(expand_prompt_mentions(context.user_query, soul_prompt_resolver)
+                             if workbench_run_id else context.user_query),
                 user_files=user_files,
                 tools=tool_layers.plugin_tools,
                 core_tools=tool_layers.core_tools,

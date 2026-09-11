@@ -6,8 +6,8 @@ from flask import Flask
 import pytest
 
 
-@pytest.mark.parametrize('lease,expected', [(123.0,'stopping'), (None,'cancelled')])
-def test_cancelled_response_waits_for_remote_lease_release(monkeypatch,lease,expected):
+@pytest.mark.parametrize('lease,expected', [(123.0,'cancelled'), (None,'cancelled')])
+def test_cancelled_response_is_terminal_during_remote_cleanup(monkeypatch,lease,expected):
     from extensions import ext_redis
     from services.workbench.message_actions import with_feedback
 

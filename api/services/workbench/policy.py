@@ -127,6 +127,7 @@ def public_resources(soul: dict[str, Any], tool_parameter_rules: dict | None = N
                 "name": tool.get("tool_name") or tool.get("provider") or tool.get("provider_id"),
                 "group": tool.get("provider_type"),
                 "provider": tool.get("provider_id") or tool.get("provider"),
+                "plugin_id": tool.get("plugin_id"),
                 "tool_name": tool.get("tool_name"),
                 "description": tool.get("description"),
                 "parameters": parameters,

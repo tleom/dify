@@ -131,6 +131,8 @@ def prepare_execution(tenant_id, conversation_id, account_id, request):
     with session_factory.get_session_maker().begin() as session:
         run = current_run(session, tenant_id, conversation_id, account_id)
         if run is None:
+            if conversation_owner(tenant_id, conversation_id, account_id):
+                raise Forbidden("Workbench task was stopped")
             return
         if not heartbeat(f"{tenant_id}:{account_id}", run.id):
             raise Forbidden("Workbench execution lease expired")

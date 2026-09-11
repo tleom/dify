@@ -20,6 +20,8 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp"}
 def generation_query(payload):
     """Native images are visual input; only other attachments need sandbox locators."""
     query = payload["query"]
+    if not payload.get("continuation"):
+        query += payload.get("mention_prompt", "")
     paths = payload.get("sandbox_paths", [])
     if payload.get("image_files"):
         paths = [path for path in paths if PurePosixPath(path).suffix.lower() not in IMAGE_SUFFIXES]

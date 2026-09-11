@@ -53,6 +53,29 @@ def fence_remote(ticket):
 
 
 @shared_task(queue="workbench_control")
+def force_stop(run_id, account_id):
+    """Cancel the remote runner directly; cleanup does not block the composer."""
+    from uuid import NAMESPACE_URL, uuid5
+
+    stop_native(run_id, account_id)
+    with session_factory.create_session() as session:
+        run = session.get(WorkbenchRun, run_id)
+        if run is None or run.account_id != account_id:
+            return
+        ticket = run.backend_run_id or str(uuid5(
+            NAMESPACE_URL, f"dify-workbench-run:{run.id}:{json.loads(run.payload).get('attempt', 0)}"
+        ))
+        owner = f"{run.tenant_id}:{account_id}"
+    try:
+        if fence_remote(ticket):
+            scheduler.release(owner, run_id)
+    except Exception:
+        logger.warning("Remote cancellation will be retried: %s", run_id, exc_info=True)
+    event(run_id, {"event": "workbench_end", "status": "cancelled", "error": None})
+    reconcile.delay()
+
+
+@shared_task(queue="workbench_control")
 def dispatch():
     if not dify_config.WORKBENCH_ENABLED:
         return
@@ -128,6 +151,18 @@ def reconcile():
 @shared_task(queue="workbench", acks_late=False, reject_on_worker_lost=False)
 def execute(owner, run_id):
     tenant_id, account_id = owner.split(":", 1)
+    # A newly submitted turn may queue immediately while its predecessor cleans up.
+    with session_factory.create_session() as session:
+        current = session.get(WorkbenchRun, run_id)
+        if current is not None and current.status == "queued":
+            previous_ids = session.scalars(select(WorkbenchRun.id).where(
+                WorkbenchRun.chat_id == current.chat_id,
+                WorkbenchRun.created_at < current.created_at,
+            ))
+            if any(redis_client.zscore(scheduler.PREFIX + "active", prior) is not None for prior in previous_ids):
+                if scheduler.heartbeat(owner, run_id):
+                    execute.apply_async(args=[owner, run_id], countdown=1)
+                return
     done = threading.Event()
     claimed = False
     completed_stream = False

@@ -25,9 +25,6 @@ def message_ids(run):
 
 
 def with_feedback(session, runs, dtos):
-    from extensions.ext_redis import redis_client
-    from services.workbench.scheduler import PREFIX
-
     ids = {dto.get("message_id") for dto in dtos} - {None}
     owners = {run.account_id for run in runs}
     ratings = (
@@ -47,14 +44,6 @@ def with_feedback(session, runs, dtos):
     )
     for dto in dtos:
         dto["feedback"] = ratings.get(dto.get("message_id"))
-    cancelled = [dto for dto in dtos if dto["status"] == "cancelled"]
-    if cancelled:
-        with redis_client.pipeline(transaction=False) as pipeline:
-            for dto in cancelled:
-                pipeline.zscore(PREFIX + "active", dto["id"])
-            for dto, lease in zip(cancelled, pipeline.execute(), strict=True):
-                if lease is not None:
-                    dto["status"], dto["error"] = "stopping", None
     return dtos
 
 
@@ -120,6 +109,7 @@ def regenerate(tenant_id, account_id, run_id, version, request_key, *, query=Non
             "files": [],
             "sandbox_paths": original.get("sandbox_paths", []),
             "image_files": original.get("image_files", []),
+            "resource_mentions": original.get("resource_mentions", {}),
             "regenerate_from": run.id,
             "parent_message_id": message.parent_message_id if message else None,
         }

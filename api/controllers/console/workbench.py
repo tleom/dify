@@ -24,6 +24,7 @@ from models.model import AppMode
 from models.workbench import WorkbenchRun
 from services.app_task_service import AppTaskService
 from services.workbench import scheduler, service
+from services.workbench.mentions import ResourceMentions
 from services.workbench.policy import Selection
 
 
@@ -57,6 +58,7 @@ class WorkbenchRunPayload(BaseModel):
     request_key: str = Field(min_length=1, max_length=128)
     query: str = Field(max_length=100000)
     inputs: dict = Field(default_factory=dict)
+    resource_mentions: ResourceMentions = Field(default_factory=ResourceMentions)
     parent_message_id: str | None = Field(default=None, pattern=r"^[0-9a-fA-F-]{36}$")
     files: list[WorkbenchSandboxFilePayload] = Field(default_factory=list, max_length=20)
 
@@ -99,6 +101,7 @@ class WorkbenchResourceResponse(ResponseModel):
     group: str | None = None
     provider: str | None = None
     provider_name: str | None = None
+    plugin_id: str | None = None
     tool_name: str | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
 
@@ -131,6 +134,8 @@ class WorkbenchRunResponse(ResponseModel):
     revision_id: str
     version: int
     query: str
+    resource_mentions: ResourceMentions = Field(default_factory=ResourceMentions)
+    mentioned_resources: list[dict[str, str]] = Field(default_factory=list)
     attachments: list[WorkbenchAttachmentResponse] = Field(default_factory=list)
     message_id: str | None = None
     feedback: Literal["like", "dislike"] | None = None
@@ -228,7 +233,7 @@ class WorkbenchDeletedEnvelopeResponse(ResponseModel):
 
 
 class WorkbenchStopResponse(ResponseModel):
-    status: Literal["stopping"]
+    status: Literal["cancelled"]
 
 
 class WorkbenchStopEnvelopeResponse(ResponseModel):
@@ -530,14 +535,14 @@ class Stop(WorkbenchResource):
         redis_client.setex(scheduler.PREFIX + "stop:" + str(run_id), 86400, "1")
         with session_factory.get_session_maker().begin() as session:
             run = session.get(WorkbenchRun, str(run_id))
-            if run.status in ("queued", "waiting_input", "environment_update"):
+            if run.status in ("queued", "running", "waiting_input", "environment_update", "environment_installing"):
                 run.status = "cancelled"
         if task_id:
             AppTaskService.stop_task(task_id, InvokeFrom.EXPLORE, account_id, AppMode.AGENT)
-        from tasks.workbench_tasks import update_environment
+        from tasks.workbench_tasks import force_stop
 
-        update_environment.delay(tenant_id, account_id)
-        return dump_response(WorkbenchStopEnvelopeResponse, {"data": {"status": "stopping"}})
+        force_stop.delay(str(run_id), account_id)
+        return dump_response(WorkbenchStopEnvelopeResponse, {"data": {"status": "cancelled"}})
 
 
 @console_ns.route("/workbench/runs/<uuid:run_id>/events")

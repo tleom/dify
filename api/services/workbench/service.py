@@ -205,6 +205,8 @@ def run_dto(run):
         "error": run.error,
         "events": json.loads(run.event_log),
         "query": payload.get("query", ""),
+        "resource_mentions": payload.get("resource_mentions", {}),
+        "mentioned_resources": payload.get("mentioned_resources", []),
         "message_id": ids[-1] if ids else None,
         "regenerate_from": payload.get("regenerate_from"),
         "parent_run_id": payload.get("branch_parent_run_id"),
@@ -265,8 +267,10 @@ def create_chat(tenant_id, account_id):
                 model=f"{model.get('model_provider')}::{model.get('model')}",
                 **{key: list(resources[key]) for key in resources},
             )
-    # Retain personal choices still allowed; newly published resources remain unchecked.
+    from services.workbench.mentions import default_capabilities
+
     selection = prune_unavailable_selection(base["soul"], selection)
+    selection = default_capabilities(base["soul"], selection, new_chat=True)
     chat_id, revision_id = str(uuid4()), str(uuid4())
     with session_factory.get_session_maker().begin() as session:
         session.add(
@@ -322,10 +326,23 @@ def update_config(tenant_id, account_id, chat_id, version, selection):
 
 
 def enqueue(tenant_id, account_id, chat_id, version, request_key, payload):
+    from services.workbench.mentions import default_capabilities, resolve_mentions
+
     base = template(tenant_id, account_id)
     # External provider discovery happens outside the write transaction.
     current = read_chat(tenant_id, account_id, chat_id)
-    effective = compile_config(tenant_id, base, Selection.model_validate(current["selection"]))
+    selected = default_capabilities(base["soul"], Selection.model_validate(current["selection"]))
+    mention_data = resolve_mentions(base["soul"], payload.get("resource_mentions"))
+    mentioned_tools = mention_data["resource_mentions"]["tools"]
+    if mentioned_tools:
+        display_tools = [tool for tool in public_resources(base["soul"])["tools"] if tool["id"] in mentioned_tools]
+        enrich_tool_labels(tenant_id, display_tools)
+        mention_data = resolve_mentions(base["soul"], payload.get("resource_mentions"), provider_names={
+            tool["id"]: tool["provider_name"] for tool in display_tools if tool.get("provider_name")
+        })
+    selected.knowledge = list(dict.fromkeys([*selected.knowledge, *mention_data["resource_mentions"]["knowledge"]]))
+    effective = compile_config(tenant_id, base, selected)
+    payload = {**payload, **mention_data}
     if payload.get("files"):
         from services.workbench.files import validate_attachments
 
@@ -352,12 +369,6 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload):
         )
         if active:
             raise Conflict("此会话已有任务，请等待完成或停止")
-        from extensions.ext_redis import redis_client
-        from services.workbench.scheduler import PREFIX
-
-        prior_ids = session.scalars(select(WorkbenchRun.id).where(WorkbenchRun.chat_id == chat.id))
-        if any(redis_client.zscore(PREFIX + "active", prior_id) is not None for prior_id in prior_ids):
-            raise Conflict("上一个任务仍在确认停止，请稍后再发送")
         revision = session.scalar(
             select(WorkbenchRevision).where(WorkbenchRevision.chat_id == chat.id, WorkbenchRevision.version == version)
         )
