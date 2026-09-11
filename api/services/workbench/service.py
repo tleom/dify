@@ -61,14 +61,13 @@ def template(tenant_id: str, account_id: str):
         if snapshot is None:
             raise Conflict("通用 Agent 发布版本不可用")
         app = AgentRosterService(session).get_agent_runtime_app_model(tenant_id=tenant_id, agent_id=agent.id)
-        from controllers.common.wraps import RBACPermission, RBACResourceScope, enforce_rbac_access
+        from controllers.common.rbac import AgentId, RBACCheck, RBACPermission, enforce_rbac_checks
 
-        enforce_rbac_access(
+        enforce_rbac_checks(
             tenant_id=tenant_id,
             account_id=account_id,
-            resource_type=RBACResourceScope.APP,
-            scene=RBACPermission.APP_TEST_AND_RUN,
-            path_args={"app_id": app.id},
+            checks=[RBACCheck(RBACPermission.AGENT_TEST_AND_RUN, AgentId())],
+            path_args={"agent_id": agent.id},
         )
         base = {
             "agent_id": agent.id,
