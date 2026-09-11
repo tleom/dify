@@ -57,6 +57,7 @@ class WorkbenchRunPayload(BaseModel):
     request_key: str = Field(min_length=1, max_length=128)
     query: str = Field(max_length=100000)
     inputs: dict = Field(default_factory=dict)
+    parent_message_id: str | None = Field(default=None, pattern=r"^[0-9a-fA-F-]{36}$")
     files: list[WorkbenchSandboxFilePayload] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
@@ -88,6 +89,7 @@ class WorkbenchRegeneratePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     version: int = Field(ge=1)
     request_key: str = Field(min_length=1, max_length=128)
+    query: str | None = Field(default=None, max_length=100000)
 
 
 class WorkbenchResourceResponse(ResponseModel):
@@ -133,6 +135,9 @@ class WorkbenchRunResponse(ResponseModel):
     message_id: str | None = None
     feedback: Literal["like", "dislike"] | None = None
     regenerate_from: str | None = None
+    edited_from: str | None = None
+    parent_run_id: str | None = None
+    parent_message_id: str | None = None
     status: Literal[
         "queued",
         "running",
@@ -387,7 +392,7 @@ class Runs(WorkbenchResource):
                     str(chat_id),
                     payload.version,
                     payload.request_key,
-                    payload.model_dump(exclude={"version", "request_key"}),
+                    payload.model_dump(exclude={"version", "request_key"}, exclude_unset=True),
                 )
             },
         ), 202
@@ -486,7 +491,7 @@ class Regenerate(WorkbenchResource):
 
         payload = WorkbenchRegeneratePayload.model_validate(console_ns.payload or {})
         return dump_response(WorkbenchRunEnvelopeResponse, {
-            "data": regenerate(*self.owner(), str(run_id), payload.version, payload.request_key),
+            "data": regenerate(*self.owner(), str(run_id), payload.version, payload.request_key, query=payload.query),
         }), 202
 
 

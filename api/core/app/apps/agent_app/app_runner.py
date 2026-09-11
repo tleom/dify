@@ -790,10 +790,12 @@ class AgentAppRunner:
             effective_session_scope_snapshot_id: str | None = agent_config_snapshot_id
         else:
             effective_session_scope_snapshot_id = session_scope_snapshot_id
-        from services.workbench.runtime import conversation_owner
+        from services.workbench.runtime import conversation_owner, execution_run_id
         workbench_owner = conversation_owner(dify_context.tenant_id, conversation_id, dify_context.user_id)
         return AgentAppSessionScope(
             workbench_account_id=workbench_owner,
+            workbench_run_id=(execution_run_id(dify_context.tenant_id, conversation_id, workbench_owner)
+                              if workbench_owner else None),
             tenant_id=dify_context.tenant_id,
             app_id=dify_context.app_id,
             conversation_id=conversation_id,
@@ -829,7 +831,9 @@ class AgentAppRunner:
             else None
         )
         from services.workbench.runtime import continuation, execution_run_id
-        deferred_tool_results = continuation(dify_context.tenant_id, conversation_id, dify_context.user_id) or deferred_tool_results
+        deferred_tool_results = (
+            continuation(dify_context.tenant_id, conversation_id, dify_context.user_id) or deferred_tool_results
+        )
         return self._request_builder.build(
             AgentAppRuntimeBuildContext(
                 workbench_run_id=execution_run_id(dify_context.tenant_id, conversation_id, dify_context.user_id),

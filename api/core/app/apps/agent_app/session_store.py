@@ -35,6 +35,7 @@ class AgentAppSessionScope:
     agent_config_version_kind: AgentConfigVersionKind = AgentConfigVersionKind.SNAPSHOT
     build_draft_id: str | None = None
     workbench_account_id: str | None = None
+    workbench_run_id: str | None = None
 
     @property
     def workspace_owner(self) -> WorkspaceOwnerScope:
@@ -166,6 +167,11 @@ class AgentAppWorkspaceStore:
             pending_form_id=pending_form_id,
             pending_tool_call_id=pending_tool_call_id,
         )
+        if scope.workbench_run_id and scope.workbench_account_id:
+            from services.workbench.runtime import capture_run_history
+
+            capture_run_history(scope.tenant_id, scope.workbench_account_id, scope.conversation_id,
+                                scope.workbench_run_id, snapshot)
 
     @staticmethod
     def _stored(scope: AgentAppSessionScope, binding: AgentWorkspaceBinding) -> StoredAgentAppSession:

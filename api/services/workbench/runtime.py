@@ -104,6 +104,22 @@ def continuation(tenant_id, conversation_id, account_id):
     return None
 
 
+def capture_run_history(tenant_id, account_id, conversation_id, run_id, snapshot):
+    from services.workbench.history import history_state
+
+    with session_factory.get_session_maker().begin() as session:
+        run = session.scalar(select(WorkbenchRun).join(WorkbenchChat, WorkbenchChat.id == WorkbenchRun.chat_id).where(
+            WorkbenchRun.id == run_id, WorkbenchRun.tenant_id == tenant_id, WorkbenchRun.account_id == account_id,
+            WorkbenchChat.conversation_id == conversation_id, WorkbenchChat.tenant_id == tenant_id,
+            WorkbenchChat.account_id == account_id,
+        ).with_for_update())
+        if run is None:
+            raise Forbidden()
+        payload = json.loads(run.payload)
+        payload["output_history"] = history_state(snapshot)
+        run.payload = json.dumps(payload)
+
+
 def prepare_execution(tenant_id, conversation_id, account_id, request):
     """Persist the remote ticket before any network call so recovery can revoke delayed requests."""
     if not dify_config.WORKBENCH_ENABLED:
@@ -122,7 +138,18 @@ def prepare_execution(tenant_id, conversation_id, account_id, request):
         if not payload.get("continuation"):
             from services.workbench.history import history_before_message, history_state, restore_history
 
-            if payload.get("regenerate_from"):
+            if "branch_parent_run_id" in payload:
+                from services.workbench.branches import output_history
+
+                parent_id = payload["branch_parent_run_id"]
+                parent = session.get(WorkbenchRun, parent_id) if parent_id else None
+                if parent_id and (parent is None or parent.chat_id != run.chat_id or parent.account_id != account_id
+                                  or parent.tenant_id != tenant_id):
+                    raise Forbidden()
+                request.session_snapshot = restore_history(
+                    request.session_snapshot, output_history(session, parent) if parent else None
+                )
+            elif payload.get("regenerate_from"):
                 from models.model import Message
                 from services.workbench.message_actions import message_ids
 
@@ -139,7 +166,7 @@ def prepare_execution(tenant_id, conversation_id, account_id, request):
                         request.session_snapshot = history_before_message(
                             request.session_snapshot, message.query, message.created_at
                         )
-            previous = session.scalar(
+            previous = parent if "branch_parent_run_id" in payload else session.scalar(
                 select(WorkbenchRun)
                 .where(WorkbenchRun.chat_id == run.chat_id, WorkbenchRun.id != run.id)
                 .order_by(WorkbenchRun.created_at.desc())

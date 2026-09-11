@@ -100,19 +100,22 @@ def feedback(tenant_id, account_id, run_id, rating):
         return with_feedback(session, [run], [service.run_dto(run)])[0]
 
 
-def regenerate(tenant_id, account_id, run_id, version, request_key):
+def regenerate(tenant_id, account_id, run_id, version, request_key, *, query=None):
     service.authorize(tenant_id, account_id)
     with session_factory.create_session() as session:
         run, chat = _owned(session, tenant_id, account_id, run_id)
         if run.status not in ("completed", "failed", "cancelled", "interrupted"):
             raise Conflict("请先等待任务结束或停止任务")
         original = json.loads(run.payload)
+        if query is not None and not query.strip() and not original.get("sandbox_paths"):
+            raise Conflict("请输入问题或保留附件")
         ids = message_ids(run)
         message = session.get(Message, ids[0]) if ids else None
         if message is not None and (message.app_id != chat.app_id or message.from_account_id != account_id):
             raise NotFound()
         payload = {
-            "query": original["query"],
+            "query": original["query"] if query is None else query,
+            "edited_from": run.id if query is not None else None,
             "inputs": original.get("inputs", {}),
             "files": [],
             "sandbox_paths": original.get("sandbox_paths", []),

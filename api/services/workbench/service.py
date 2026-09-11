@@ -161,6 +161,7 @@ def _chat(session, tenant_id, account_id, chat_id, lock=False):
 
 
 def read_chat(tenant_id: str, account_id: str, chat_id: str):
+    from services.workbench.branches import annotate
     from services.workbench.message_actions import with_feedback
 
     authorize(tenant_id, account_id)
@@ -173,7 +174,9 @@ def read_chat(tenant_id: str, account_id: str, chat_id: str):
         )
         runs = list(
             session.scalars(
-                select(WorkbenchRun).where(WorkbenchRun.chat_id == chat.id).order_by(WorkbenchRun.created_at)
+                select(WorkbenchRun)
+                .where(WorkbenchRun.chat_id == chat.id)
+                .order_by(WorkbenchRun.created_at, WorkbenchRun.id)
             )
         )
         return {
@@ -183,7 +186,7 @@ def read_chat(tenant_id: str, account_id: str, chat_id: str):
             "version": chat.version,
             "template_snapshot_id": revision.template_snapshot_id or chat.base_snapshot_id,
             "selection": json.loads(revision.selection),
-            "runs": with_feedback(session, runs, [run_dto(run) for run in runs]),
+            "runs": annotate(runs, with_feedback(session, runs, [run_dto(run) for run in runs])),
         }
 
 
@@ -204,6 +207,9 @@ def run_dto(run):
         "query": payload.get("query", ""),
         "message_id": ids[-1] if ids else None,
         "regenerate_from": payload.get("regenerate_from"),
+        "parent_run_id": payload.get("branch_parent_run_id"),
+        "parent_message_id": payload.get("parent_message_id"),
+        "edited_from": payload.get("edited_from"),
         "attachments": [
             {"path": path.removeprefix("/workspace/"), "name": path.rsplit("/", 1)[-1]}
             for path in payload.get("sandbox_paths", [])
@@ -356,8 +362,12 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload):
             select(WorkbenchRevision).where(WorkbenchRevision.chat_id == chat.id, WorkbenchRevision.version == version)
         )
         # The task's effective configuration is frozen independently of future template edits.
+        from services.workbench.branches import resolve_parent
+
+        parent = resolve_parent(session, chat, payload)
         payload = {
             **payload,
+            **parent,
             "effective_soul": effective,
             "version": version,
             "attempt": 0,
