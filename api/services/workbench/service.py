@@ -346,8 +346,6 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload):
         })
     selected.knowledge = list(dict.fromkeys([*selected.knowledge, *mention_data["resource_mentions"]["knowledge"]]))
     effective = compile_config(tenant_id, base, selected)
-    for knowledge_set in effective.get("knowledge", {}).get("sets", []):
-        knowledge_set["query"] = {"mode": "user_query", "value": payload.get("query", "").strip()}
     if effective.get("knowledge", {}).get("sets") and not payload.get("query", "").strip():
         raise Conflict("请选择知识库后输入需要检索的问题")
     payload = {**payload, **mention_data}

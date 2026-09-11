@@ -346,6 +346,9 @@ class AgentRunRunner:
                 deferred_tool_results = _resolve_deferred_tool_results(self.request)
                 if deferred_tool_results is None and not has_non_blank_user_prompt(user_prompts):
                     raise AgentRunValidationError(EMPTY_USER_PROMPTS_ERROR)
+                knowledge_layer = next((slot.layer for slot in run.slots.values()
+                                        if isinstance(slot.layer, DifyKnowledgeBaseLayer)
+                                        and slot.layer.config.workbench_run_id), None)
 
                 async def handle_events(_ctx: object, events: AsyncIterable[AgentStreamEvent]) -> None:
                     published_events = coalesce_agent_stream_events(
@@ -358,6 +361,8 @@ class AgentRunRunner:
                         if self.is_cancelled():
                             raise asyncio.CancelledError
                         text_delta = _extract_agent_message_delta(event)
+                        if text_delta is not None and knowledge_layer is not None and knowledge_layer.missing_searches:
+                            continue
                         _ = await emit_pydantic_ai_event(
                             self.sink,
                             run_id=self.run_id,
@@ -397,11 +402,14 @@ class AgentRunRunner:
                         "Deferred tool results require a 'history' layer with prior message history."
                     )
 
+                from dify_agent.runtime.knowledge import prepare_knowledge_tools, require_knowledge_before_answer
+
                 agent = create_agent(
                     model,
-                    tools=tools,
+                    tools=prepare_knowledge_tools(tools, knowledge_layer),
                     output_type=_resolve_agent_output_type(output_contract.output_type, ask_human_layer is not None or environment_layer is not None),
                 )
+                require_knowledge_before_answer(agent, knowledge_layer)
                 run_timeout = asyncio.timeout(self.run_timeout_seconds)
                 try:
                     with capture_run_messages() as captured_messages:

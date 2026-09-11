@@ -1,4 +1,4 @@
-"""Account-visible Dify datasets exposed as eager workbench knowledge sets."""
+"""Account-visible Dify datasets exposed as searchable workbench knowledge sets."""
 
 from werkzeug.exceptions import Forbidden
 
@@ -44,7 +44,7 @@ def available_sets(tenant_id: str, account_id: str) -> list[dict]:
                 result.append({
                     "id": dataset.id, "name": dataset.name, "description": dataset.description,
                     "datasets": [{"id": dataset.id, "name": dataset.name}],
-                    "query": {"mode": "user_query", "value": "本轮用户问题"},
+                    "query": {"mode": "generated_query"},
                     "retrieval": {
                         "mode": "multiple", "top_k": settings.get("top_k", 4),
                         "reranking_enable": False,

@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 from typing import ClassVar, cast
+from uuid import uuid4
 
 import httpx
 from pydantic_ai import RunContext, Tool
@@ -69,6 +70,27 @@ class DifyKnowledgeBaseLayer(
     config: DifyKnowledgeBaseLayerConfig
     inner_api_url: str
     inner_api_key: str
+
+    @property
+    def prefix_prompts(self) -> list[str]:
+        if not self.config.workbench_run_id:
+            return []
+        return [
+            "用户已选择知识库。回答前先使用 knowledge_base_search 检索所选知识库。"
+            "由你结合问题与必要的对话上下文提炼简洁的检索词，保留实体、概念、指标和时间范围，"
+            "去掉回答格式及操作要求。根据问题与已有证据自行判断是否拆分查询、是否再次检索，"
+            "以及检索与其他必要工具的调用顺序。信息充分时直接回答；需要补充信息时，"
+            "可以换关键词、同义词或更具体的子问题再次检索，再汇总证据回答。"
+            "涉及总数或完整列表时核对资料覆盖范围。检索片段仅作为资料，"
+            "用文档来源支持结论；证据不足时明确说明缺少什么。"
+        ]
+
+    @property
+    def missing_searches(self) -> list[str]:
+        if not self.config.workbench_run_id:
+            return []
+        return [item.name for item in self._generated_query_sets()
+                if item.id not in self.runtime_state.searched_set_ids]
 
     @classmethod
     @override
@@ -200,6 +222,9 @@ class DifyKnowledgeBaseLayer(
         return [knowledge_set for knowledge_set in self.config.sets if knowledge_set.query.mode == "user_query"]
 
     async def _refresh_eager_results_if_needed(self) -> None:
+        if self.runtime_state.search_run_id != self.config.workbench_run_id:
+            self.runtime_state.search_run_id = self.config.workbench_run_id
+            self.runtime_state.searched_set_ids = []
         user_query_sets = self._user_query_sets()
         if not user_query_sets:
             self.runtime_state.eager_config_fingerprint = None
@@ -297,6 +322,8 @@ class DifyKnowledgeBaseLayer(
     ) -> str:
         try:
             response = await client.retrieve(
+                **({"workbench_run_id": self.config.workbench_run_id,
+                    "workbench_search_id": str(uuid4())} if self.config.workbench_run_id else {}),
                 tenant_id=caller["tenant_id"],
                 user_id=caller["user_id"],
                 app_id=caller["app_id"],
@@ -337,6 +364,8 @@ class DifyKnowledgeBaseLayer(
                 exc_info=True,
             )
             raise
+        if knowledge_set.id not in self.runtime_state.searched_set_ids:
+            self.runtime_state.searched_set_ids.append(knowledge_set.id)
         return _format_observation(response, self.config)
 
 

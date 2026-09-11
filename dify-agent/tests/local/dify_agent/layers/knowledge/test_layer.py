@@ -177,6 +177,43 @@ def test_knowledge_layer_exposes_no_tool_when_all_sets_are_user_query(monkeypatc
     asyncio.run(scenario())
 
 
+def test_workbench_generated_searches_can_repeat_with_independent_records(monkeypatch: pytest.MonkeyPatch):
+    requests = []
+
+    async def retrieve(self, **kwargs):
+        requests.append(kwargs)
+        return DifyKnowledgeRetrieveResponse.model_validate({"results": [], "usage": {}})
+
+    monkeypatch.setattr(DifyKnowledgeBaseClient, "retrieve", retrieve)
+
+    async def scenario():
+        compositor = Compositor([
+            LayerNode("execution_context", _execution_context_provider()),
+            LayerNode("knowledge", _knowledge_provider(), deps={"execution_context": "execution_context"}),
+        ])
+        async with httpx.AsyncClient() as client, compositor.enter(configs={
+            "execution_context": _execution_context_config(),
+            "knowledge": _knowledge_config(workbench_run_id="run-1"),
+        }) as run:
+            layer = run.get_layer("knowledge", DifyKnowledgeBaseLayer)
+            assert not requests
+            assert layer.missing_searches == ["Support KB"]
+            tool = (await layer.get_tools(http_client=client))[0]
+            for query in ["使用人数", "累计使用次数"]:
+                await tool.function_schema.call({"set_name": "Support KB", "query": query}, None)
+            assert layer.missing_searches == []
+            await layer.on_context_resume()
+            assert layer.missing_searches == []
+            layer.config.workbench_run_id = "run-2"
+            await layer.on_context_resume()
+            assert layer.missing_searches == ["Support KB"]
+        assert [r["query"] for r in requests] == ["使用人数", "累计使用次数"]
+        assert all(r["workbench_run_id"] == "run-1" for r in requests)
+        assert len({r["workbench_search_id"] for r in requests}) == 2
+
+    asyncio.run(scenario())
+
+
 def test_knowledge_layer_fetches_user_query_sets_on_context_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     seen_requests: list[dict[str, object]] = []
 

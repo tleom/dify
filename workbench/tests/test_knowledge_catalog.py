@@ -7,7 +7,7 @@ from werkzeug.exceptions import Forbidden
 from services.workbench import knowledge
 
 
-def test_catalog_paginates_visible_datasets_and_builds_eager_sets(monkeypatch):
+def test_catalog_paginates_visible_datasets_and_exposes_generated_queries(monkeypatch):
     account = SimpleNamespace(current_tenant_id="tenant", set_tenant_id_with_session=lambda *a, **k: None)
     session = MagicMock()
     session.get.return_value = account
@@ -25,7 +25,7 @@ def test_catalog_paginates_visible_datasets_and_builds_eager_sets(monkeypatch):
     result = knowledge.available_sets("tenant", "account")
     assert calls == [1, 2]
     assert result[0]["datasets"] == [{"id": "dataset-1", "name": "知识库"}]
-    assert result[0]["query"]["mode"] == "user_query"
+    assert result[0]["query"] == {"mode": "generated_query"}
     assert result[0]["retrieval"]["top_k"] == 3
 
 

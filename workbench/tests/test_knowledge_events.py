@@ -10,7 +10,7 @@ from services.workbench import knowledge_events as events
 
 def fixture(monkeypatch, *, query="问题", status="running"):
     run = SimpleNamespace(id="run", status=status, payload=json.dumps({"effective_soul": {"knowledge": {"sets": [{
-        "id": "kb", "name": "知识库", "datasets": [{"id": "kb"}], "query": {"value": "问题"},
+        "id": "kb", "name": "知识库", "datasets": [{"id": "kb"}], "query": {"mode": "user_query", "value": "问题"},
     }]}}}))
     session = MagicMock()
     session.__enter__.return_value = session
@@ -19,7 +19,7 @@ def fixture(monkeypatch, *, query="问题", status="running"):
     monkeypatch.setattr(events.dify_config, "WORKBENCH_ENABLED", True)
     redis = MagicMock()
     monkeypatch.setattr(events, "redis_client", redis)
-    request = SimpleNamespace(workbench_run_id="run", query=query, dataset_ids=["kb"],
+    request = SimpleNamespace(workbench_run_id="run", workbench_search_id=None, query=query, dataset_ids=["kb"],
                               caller=SimpleNamespace(tenant_id="tenant", user_id="account", app_id="app"))
     return run, request, redis
 
@@ -47,3 +47,21 @@ def test_unrelated_or_stopped_retrieval_is_rejected(monkeypatch, query, status):
 
 def test_old_run_without_knowledge_does_not_query_snapshot():
     assert events.run_knowledge_events(SimpleNamespace(), {}) == []
+
+
+def test_generated_queries_keep_each_search_and_reject_unselected_datasets(monkeypatch):
+    run, request, redis = fixture(monkeypatch)
+    payload = json.loads(run.payload)
+    payload["effective_soul"]["knowledge"]["sets"][0]["query"] = {"mode": "generated_query"}
+    run.payload = json.dumps(payload)
+    for search_id, query in [("first", "使用人数"), ("second", "累计使用次数")]:
+        request.workbench_search_id, request.query = search_id, query
+        events.retrieval_event(request, "running")
+        events.retrieval_event(request, "returned", results=[{"content": query}])
+    saved = json.loads(run.payload)["knowledge_events"]
+    assert [item["query"] for item in saved] == ["使用人数", "累计使用次数"]
+    assert len({item["id"] for item in saved}) == 2
+    request.dataset_ids = ["not-selected"]
+    with pytest.raises(Forbidden):
+        events.retrieval_event(request, "running")
+    assert redis.xadd.call_count == 4

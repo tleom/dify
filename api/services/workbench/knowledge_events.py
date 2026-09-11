@@ -1,4 +1,4 @@
-"""Persist and stream the retrieval performed before the model starts answering."""
+"""Persist and stream each knowledge search within an account-owned run."""
 
 import json
 
@@ -28,12 +28,14 @@ def retrieval_event(request, status: str, *, results=None):
         payload = json.loads(run.payload)
         matching = [item for item in payload["effective_soul"].get("knowledge", {}).get("sets", [])
                     if {d["id"] for d in item["datasets"]} == set(request.dataset_ids)
-                    and item["query"]["value"] == request.query]
+                    and (item["query"]["mode"] == "generated_query"
+                         or item["query"].get("value") == request.query)]
         if len(matching) != 1:
             raise Forbidden("知识库检索请求与任务配置不一致")
         item = matching[0]
         event = {
-            "event": "workbench_knowledge", "id": f"knowledge:{run.id}:{item['id']}",
+            "event": "workbench_knowledge",
+            "id": f"knowledge:{run.id}:{request.workbench_search_id or item['id']}",
             "workbench_run_id": run.id, "name": item["name"], "query": request.query,
             "status": status, "results": results or [],
         }

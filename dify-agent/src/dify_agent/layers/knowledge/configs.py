@@ -243,6 +243,8 @@ class DifyKnowledgeRuntimeState(BaseModel):
 
     eager_config_fingerprint: str | None = None
     eager_results: list[DifyKnowledgeEagerResult] = Field(default_factory=list)
+    search_run_id: str | None = None
+    searched_set_ids: list[str] = Field(default_factory=list)
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", validate_assignment=True)
 
