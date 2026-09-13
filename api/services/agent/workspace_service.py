@@ -147,6 +147,7 @@ class AgentWorkspaceService:
         base_home_snapshot_id: str | None,
         agent_config_version_id: str,
         agent_config_version_kind: AgentConfigVersionKind,
+        binding_id: str | None = None,
     ) -> AgentWorkspaceBinding:
         """Allocate one new participant in the caller-owned transaction.
 
@@ -175,7 +176,7 @@ class AgentWorkspaceService:
         if workspace is None and scope.owner_type == AgentWorkspaceOwnerType.WORKBENCH_USER:
             from services.workbench.files import workspace_id as workbench_workspace_id
             workspace_id = workbench_workspace_id(scope.tenant_id, scope.owner_id)
-        binding_id = str(uuidv7())
+        binding_id = binding_id or str(uuidv7())
         with cls._client() as client:
             allocation = client.create_execution_binding_sync(
                 CreateExecutionBindingRequest(

@@ -4,12 +4,42 @@ import logging
 
 from sqlalchemy import select
 
+from core.tools.builtin_tool.provider import BuiltinToolProviderController
+from core.tools.custom_tool.provider import ApiToolProviderController
+from core.tools.mcp_tool.provider import MCPToolProviderController
+from core.tools.plugin_tool.provider import PluginToolProviderController
 from core.tools.tool_manager import ToolManager
 from core.tools.workflow_as_tool.provider import WorkflowToolProviderController
 from extensions.ext_database import db
+from models.agent import Agent
+from models.skill import AgentSkillBindingSnapshot, Skill, SkillVersion
 from models.tools import WorkflowToolProvider
 
 logger = logging.getLogger(__name__)
+
+
+def enrich_skill_labels(tenant_id, agent_id, skills):
+    if not skills:
+        return
+    rows = db.session.execute(
+        select(Skill, SkillVersion)
+        .join(AgentSkillBindingSnapshot, AgentSkillBindingSnapshot.skill_id == Skill.id)
+        .join(Agent, Agent.id == AgentSkillBindingSnapshot.agent_id)
+        .join(SkillVersion, SkillVersion.id == Skill.latest_published_version_id)
+        .where(
+            Skill.tenant_id == tenant_id,
+            AgentSkillBindingSnapshot.tenant_id == tenant_id,
+            Agent.tenant_id == tenant_id,
+            Agent.id == agent_id,
+            AgentSkillBindingSnapshot.config_snapshot_id == Agent.active_config_snapshot_id,
+        )
+    ).all()
+    names = {
+        version.manifest.name or skill.name: skill.display_name or version.manifest.display_name or skill.name
+        for skill, version in rows
+    }
+    for skill in skills:
+        skill["name"] = names.get(skill["id"], skill["name"])
 
 
 def localized(value, fallback=""):
@@ -21,6 +51,13 @@ def localized(value, fallback=""):
 
 
 def provider_metadata(tenant_id, kind, provider_id):
+    controller: (
+        PluginToolProviderController
+        | BuiltinToolProviderController
+        | MCPToolProviderController
+        | ApiToolProviderController
+        | WorkflowToolProviderController
+    )
     if kind == "plugin":
         controller = ToolManager.get_plugin_provider(provider_id, tenant_id)
     elif kind == "builtin":
@@ -41,11 +78,15 @@ def provider_metadata(tenant_id, kind, provider_id):
     else:
         return None
     identity = controller.entity.identity
-    tools = controller.get_tools(tenant_id) if kind in ("api", "workflow") else controller.get_tools()
+    tools = (
+        controller.get_tools(tenant_id)
+        if isinstance(controller, ApiToolProviderController | WorkflowToolProviderController)
+        else controller.get_tools()
+    )
     return localized(identity.label, identity.name), {
         tool.entity.identity.name: {
             "name": localized(tool.entity.identity.label, tool.entity.identity.name),
-            "description": localized(tool.entity.description.human),
+            "description": localized(tool.entity.description.human) if tool.entity.description else "",
         }
         for tool in tools or []
     }

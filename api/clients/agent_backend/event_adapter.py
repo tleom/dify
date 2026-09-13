@@ -130,6 +130,8 @@ class AgentBackendRunEventAdapter:
 
     def adapt(self, event: RunEvent) -> list[AgentBackendInternalEvent]:
         """Return zero or more API-internal events derived from one public run event."""
+        if event.type == "context_status":
+            return []
         match event:
             case RunStartedEvent():
                 return [

@@ -184,8 +184,10 @@ def init_app(app: DifyApp) -> Celery:
     # if you add a new task, please add the switch to CeleryScheduleTasksConfig
     beat_schedule: dict[str, CeleryBeatScheduleEntry] = {}
     if dify_config.WORKBENCH_ENABLED:
-        beat_schedule["workbench_reconcile"] = {"task": "tasks.workbench_tasks.reconcile", "schedule": 15.0}
-
+        beat_schedule["workbench_reconcile"] = {
+            "task": "tasks.workbench_tasks.reconcile",
+            "schedule": timedelta(seconds=15),
+        }
 
     if dify_config.ENABLE_CONVERSATION_CLEANUP_TASK:
         imports.append("tasks.delete_conversation_task")

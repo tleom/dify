@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -127,6 +128,9 @@ class DockerComposeStack:
             self._warm_up()
             return
 
+        # pytest's session-start traceback does not display CalledProcessError.output.
+        # Keep image-pull and container-start failures visible in CI logs.
+        sys.stderr.write(combined_output)
         raise subprocess.CalledProcessError(
             returncode=completed.returncode,
             cmd=wait_command,

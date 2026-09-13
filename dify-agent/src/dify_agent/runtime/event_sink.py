@@ -10,7 +10,7 @@ implements the same contract with Redis streams in
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Protocol, TypeAlias, cast
+from typing import Protocol, cast
 
 from pydantic import JsonValue
 from pydantic_ai.messages import AgentStreamEvent
@@ -18,6 +18,7 @@ from pydantic_ai.messages import AgentStreamEvent
 from agenton.compositor import CompositorSessionSnapshot
 from dify_agent.protocol.schemas import (
     AgentRunUsage,
+    ContextStatusRunEvent,
     DeferredToolCallPayload,
     EmptyRunEventData,
     PydanticAIStreamRunEvent,
@@ -32,10 +33,9 @@ from dify_agent.protocol.schemas import (
     utc_now,
 )
 
-
 _UNSET = object()
-TerminalRunEvent: TypeAlias = RunSucceededEvent | RunFailedEvent
-NonTerminalRunEvent: TypeAlias = RunStartedEvent | PydanticAIStreamRunEvent
+type TerminalRunEvent = RunSucceededEvent | RunFailedEvent
+type NonTerminalRunEvent = RunStartedEvent | PydanticAIStreamRunEvent | ContextStatusRunEvent
 
 
 @dataclass(frozen=True, slots=True)

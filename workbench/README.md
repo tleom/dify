@@ -1,6 +1,6 @@
 # Dify Agent 工作台
 
-当前维护基线为 Dify `1.17.1`，定制分支为 `workbench/main`。本目录维护 Dify 工作台 API、任务调度、Agent 和沙盒管理能力。升级过程见 [1.17.1 升级记录](UPGRADE-1.17.1.md)。
+当前维护基线为 Dify `1.17.1`，定制分支为 `main`。本目录维护 Dify 工作台 API、任务调度、Agent 和沙盒管理能力。升级过程见 [1.17.1 升级记录](UPGRADE-1.17.1.md)。
 
 ## 入口与身份
 
@@ -12,13 +12,13 @@
 
 ## 模块与数据
 
-| 模块 | 职责 |
-| --- | --- |
-| `api/controllers/console/workbench.py` | 工作台请求、响应及 OpenAPI |
-| `api/services/workbench` | 权限、配置、文件路由、历史与公平队列 |
-| `api/tasks/workbench_tasks.py` | 任务执行和恢复 |
-| `dify-agent` | 模型、工具、技能、知识检索与任务运行 |
-| `workbench/sandbox-manager` | 按工作区和账号管理容器、目录和共享环境 |
+| 模块                                   | 职责                                   |
+| -------------------------------------- | -------------------------------------- |
+| `api/controllers/console/workbench.py` | 工作台请求、响应及 OpenAPI             |
+| `api/services/workbench`               | 权限、配置、文件路由、历史与公平队列   |
+| `api/tasks/workbench_tasks.py`         | 任务执行和恢复                         |
+| `dify-agent`                           | 模型、工具、技能、知识检索与任务运行   |
+| `workbench/sandbox-manager`            | 按工作区和账号管理容器、目录和共享环境 |
 
 聊天、修订和任务分别保存在 `workbench_chats`、`workbench_revisions`、`workbench_runs`。新一轮按当前配置重建运行层并恢复历史；暂停续跑使用原配置。已排队任务保留入队时的配置快照。
 
@@ -30,18 +30,18 @@
 
 私有配置文件为 `api.env`、`worker.env`、`control.env`、`beat.env`、`agent.env`、`manager.env`。环境文件、账号密码、模型凭据和数据库导出不得提交到仓库。
 
-| 配置 | 说明 |
-| --- | --- |
-| `WORKBENCH_ENABLED` | API 与 Celery 服务一致配置 |
-| `WORKBENCH_AGENT_TEMPLATES` | 工作区到已发布公共 Agent 的映射 |
-| `WORKBENCH_ALLOWED_ACCOUNTS` | 工作区灰度账号列表 |
-| `WORKBENCH_TOOL_PARAMETERS` | 可配置工具参数的 JSON Schema |
-| `WORKBENCH_PER_USER_RUNS` / `WORKBENCH_GLOBAL_RUNS` | 用户及全局运行额度 |
-| `WORKBENCH_MAX_ACTIVE_USERS` | 同时运行任务的用户数上限 |
-| `WORKBENCH_SANDBOX_MANAGER_URL` / `WORKBENCH_SANDBOX_MANAGER_TOKEN` | 内网管理服务及鉴权 |
-| `DIFY_AGENT_WORKBENCH_MANAGER_ENDPOINT` / `DIFY_AGENT_WORKBENCH_MANAGER_TOKEN` | Agent 使用的管理服务 |
-| `WORKBENCH_RUNTIME_CONTAINER` | 固定单进程执行器容器名 |
-| `WORKBENCH_SANDBOX_CPUS` / `WORKBENCH_SANDBOX_MEMORY` | 用户容器资源限制 |
+| 配置                                                                           | 说明                            |
+| ------------------------------------------------------------------------------ | ------------------------------- |
+| `WORKBENCH_ENABLED`                                                            | API 与 Celery 服务一致配置      |
+| `WORKBENCH_AGENT_TEMPLATES`                                                    | 工作区到已发布公共 Agent 的映射 |
+| `WORKBENCH_ALLOWED_ACCOUNTS`                                                   | 工作区灰度账号列表              |
+| `WORKBENCH_TOOL_PARAMETERS`                                                    | 可配置工具参数的 JSON Schema    |
+| `WORKBENCH_PER_USER_RUNS` / `WORKBENCH_GLOBAL_RUNS`                            | 用户及全局运行额度              |
+| `WORKBENCH_MAX_ACTIVE_USERS`                                                   | 同时运行任务的用户数上限        |
+| `WORKBENCH_SANDBOX_MANAGER_URL` / `WORKBENCH_SANDBOX_MANAGER_TOKEN`            | 内网管理服务及鉴权              |
+| `DIFY_AGENT_WORKBENCH_MANAGER_ENDPOINT` / `DIFY_AGENT_WORKBENCH_MANAGER_TOKEN` | Agent 使用的管理服务            |
+| `WORKBENCH_RUNTIME_CONTAINER`                                                  | 固定单进程执行器容器名          |
+| `WORKBENCH_SANDBOX_CPUS` / `WORKBENCH_SANDBOX_MEMORY`                          | 用户容器资源限制                |
 
 Agent 使用的 Redis、任务记录、数据库和用户持久卷属于执行服务。维护时保留这些数据，按目标版本核对连接池预算、并发额度和迁移顺序。
 

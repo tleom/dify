@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from agenton.compositor import CompositorSessionSnapshot
+from dify_agent.layers.ask_human import DifyAskHumanLayerConfig
 from dify_agent.layers.execution_context import (
     DifyExecutionContextInvokeFrom,
     DifyExecutionContextLayerConfig,
@@ -217,7 +218,12 @@ class AgentAppRuntimeRequestBuilder:
                 core_tools=tool_layers.core_tools,
                 knowledge=knowledge_config,
                 config_layer_config=config_layer_config,
-                ask_human_config=build_ask_human_layer_config(agent_soul),
+                ask_human_config=(DifyAskHumanLayerConfig(
+                    max_fields=3, allowed_field_types=["paragraph", "select"],
+                    tool_description=("Ask the current user for missing information needed to continue. "
+                        "Use 1-3 concise fields, prefer select choices when useful, and use paragraph for free text. "
+                        "Only ask when the answer materially affects the task. The run pauses until the user submits."),
+                ) if workbench_run_id else build_ask_human_layer_config(agent_soul)),
                 include_shell=dify_config.AGENT_SHELL_ENABLED,
                 shell_config=build_shell_layer_config(agent_soul),
                 session_snapshot=context.session_snapshot,

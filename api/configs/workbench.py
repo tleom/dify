@@ -3,6 +3,12 @@ from pydantic_settings import BaseSettings
 
 
 class WorkbenchConfig(BaseSettings):
+    # Server-to-server identity assertions; these do not issue console login tokens.
+    GXZS_WORKBENCH_ENABLED: bool = False
+    GXZS_WORKBENCH_ISSUER: str = "gxzs"
+    GXZS_WORKBENCH_SIGNING_KEY: str = ""
+    # gxzs tenant id -> existing Dify workspace id. Missing tenants fail closed.
+    GXZS_WORKBENCH_TENANTS: dict[str, str] = Field(default_factory=dict)
     WORKBENCH_ENABLED: bool = False
     # Missing tenant/empty list means all its members; staging can open named accounts only.
     WORKBENCH_ALLOWED_ACCOUNTS: dict[str, list[str]] = Field(default_factory=dict)

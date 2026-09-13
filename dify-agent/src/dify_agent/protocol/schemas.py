@@ -35,10 +35,10 @@ composition and the runtime can rebuild the same structured output contract.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated, ClassVar, Final, Literal, TypeAlias
+from typing import Annotated, ClassVar, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, model_serializer, model_validator
 from pydantic_ai.messages import AgentStreamEvent
@@ -47,12 +47,12 @@ from pydantic_ai.tools import DeferredToolResults
 from agenton.compositor import CompositorConfig, CompositorSessionSnapshot, LayerConfigInput, LayerNodeConfig
 from agenton.layers import ExitIntent
 
-
 DIFY_AGENT_MODEL_LAYER_ID: Final[str] = "llm"
 DIFY_AGENT_HISTORY_LAYER_ID: Final[str] = "history"
 DIFY_AGENT_OUTPUT_LAYER_ID: Final[str] = "output"
 RunStatus = Literal["running", "succeeded", "failed", "cancelled"]
 RunEventType = Literal[
+    "context_status",
     "run_started",
     "pydantic_ai_event",
     "run_succeeded",
@@ -73,7 +73,7 @@ class RunFailureType(StrEnum):
 
 def utc_now() -> datetime:
     """Return the timezone-aware timestamp format used by public schemas."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class LayerExitSignals(BaseModel):
@@ -149,7 +149,9 @@ class CreateRunRequest(BaseModel):
     composition: RunComposition
     idempotency_key: str | None = None
     # Optional API-issued admission ticket. Repeated tickets never schedule another runner.
-    execution_ticket: str | None = Field(default=None, pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
+    execution_ticket: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+    )
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
     session_snapshot: CompositorSessionSnapshot | None = None
     # Start a new turn with new capabilities, retaining only prior message history.
@@ -377,6 +379,25 @@ class PydanticAIStreamRunEvent(BaseRunEvent):
     agent_message_delta: str | None = None
 
 
+class ContextStatusData(BaseModel):
+    """Current request occupancy, separate from cumulative billable run usage."""
+
+    phase: Literal["usage", "compacting", "compacted", "failed"]
+    used_tokens: int | None = Field(default=None, ge=0)
+    window_tokens: int | None = Field(default=None, gt=0)
+    before_tokens: int | None = Field(default=None, ge=0)
+    estimated: bool = True
+    compaction_id: str | None = None
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+
+class ContextStatusRunEvent(BaseRunEvent):
+    """Observable context occupancy and native compaction lifecycle."""
+
+    type: Literal["context_status"] = "context_status"
+    data: ContextStatusData
+
+
 class RunSucceededEvent(BaseRunEvent):
     """Terminal success event carrying the complete successful run result."""
 
@@ -398,8 +419,13 @@ class RunCancelledEvent(BaseRunEvent):
     data: RunCancelledEventData = Field(default_factory=RunCancelledEventData)
 
 
-RunEvent: TypeAlias = Annotated[
-    RunStartedEvent | PydanticAIStreamRunEvent | RunSucceededEvent | RunFailedEvent | RunCancelledEvent,
+type RunEvent = Annotated[
+    RunStartedEvent
+    | PydanticAIStreamRunEvent
+    | ContextStatusRunEvent
+    | RunSucceededEvent
+    | RunFailedEvent
+    | RunCancelledEvent,
     Field(discriminator="type"),
 ]
 RUN_EVENT_ADAPTER: TypeAdapter[RunEvent] = TypeAdapter(RunEvent)
@@ -416,21 +442,23 @@ class RunEventsResponse(BaseModel):
 
 
 __all__ = [
-    "BaseRunEvent",
+    "DIFY_AGENT_HISTORY_LAYER_ID",
+    "DIFY_AGENT_MODEL_LAYER_ID",
+    "DIFY_AGENT_OUTPUT_LAYER_ID",
+    "RUN_EVENT_ADAPTER",
     "AgentRunUsage",
+    "BaseRunEvent",
     "CancelRunRequest",
     "CancelRunResponse",
+    "ContextStatusData",
+    "ContextStatusRunEvent",
     "CreateRunRequest",
     "CreateRunResponse",
     "DeferredToolCallPayload",
     "DeferredToolResultsPayload",
-    "DIFY_AGENT_HISTORY_LAYER_ID",
-    "DIFY_AGENT_MODEL_LAYER_ID",
-    "DIFY_AGENT_OUTPUT_LAYER_ID",
     "EmptyRunEventData",
     "LayerExitSignals",
     "PydanticAIStreamRunEvent",
-    "RUN_EVENT_ADAPTER",
     "RunCancelledEvent",
     "RunCancelledEventData",
     "RunComposition",
@@ -440,12 +468,12 @@ __all__ = [
     "RunFailedEvent",
     "RunFailedEventData",
     "RunFailureType",
+    "RunLayerSpec",
     "RunStartedEvent",
     "RunStatus",
     "RunStatusResponse",
     "RunSucceededEvent",
     "RunSucceededEventData",
-    "RunLayerSpec",
     "normalize_composition",
     "utc_now",
 ]
