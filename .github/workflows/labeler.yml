@@ -1,9 +1,14 @@
 name: 'Pull Request Labeler'
 on:
+  pull_request:
   pull_request_target:
 
 jobs:
   labeler:
+    # Internal PRs validate their updated workflow; fork PRs use the trusted base.
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository)
     permissions:
       contents: read
       pull-requests: write
