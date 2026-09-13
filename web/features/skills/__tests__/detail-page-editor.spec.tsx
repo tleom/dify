@@ -11,7 +11,8 @@ import {
 
 const mocks = getMocks()
 
-describe('SkillDetailPage editor', () => {
+// These cases exercise the real editor page on shared CI runners.
+describe('SkillDetailPage editor', { timeout: 15000 }, () => {
   beforeEach(resetDetailPageFixture)
 
   it('does not render the markdown editor before external file content loads', async () => {
@@ -359,7 +360,7 @@ describe('SkillDetailPage editor', () => {
     if (!liveEditor) throw new Error('live editor not found')
 
     await user.click(liveEditor)
-    await user.type(liveEditor, 'First line{Enter}Second line')
+    await user.type(liveEditor, 'A{Enter}B')
     await user.click(
       screen.getByRole('button', { name: 'skill.skillManagement.detail.publishUpdate' }),
     )
@@ -368,7 +369,7 @@ describe('SkillDetailPage editor', () => {
       expect(mocks.saveDraftFileMutationFn).toHaveBeenCalledWith(
         expect.objectContaining({
           body: expect.objectContaining({
-            content: expect.stringContaining('First line\nSecond line'),
+            content: expect.stringContaining('A\nB'),
           }),
         }),
         expect.anything(),

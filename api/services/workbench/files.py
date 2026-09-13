@@ -111,6 +111,8 @@ def validate_attachments(tenant_id, account_id, files):
             content = base64.b64decode(result["data"], validate=True)
             try:
                 with Image.open(io.BytesIO(content)) as image:
+                    if image.format is None:
+                        raise ValueError("Image format is unavailable")
                     mimetype = Image.MIME[image.format]
                     image.verify()
             except (UnidentifiedImageError, OSError, ValueError, KeyError) as error:

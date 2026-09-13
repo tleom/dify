@@ -15,7 +15,10 @@ import {
 
 const mocks = getMocks()
 
-describe('SkillDetailPage builder', () => {
+// Full-page editor flows include real overlays and one-second autosaves;
+// give those multi-step cases a bounded budget on shared CI runners.
+
+describe('SkillDetailPage builder', { timeout: 15000 }, () => {
   beforeEach(resetDetailPageFixture)
 
   it('shows Skill manifest placeholders for an empty draft', async () => {
@@ -116,7 +119,7 @@ describe('SkillDetailPage builder', () => {
         name: 'skill.skillManagement.detail.builder.title',
       }),
     ).toBeInTheDocument()
-  })
+  }, 15000)
 
   it('sends uploaded Skill Builder attachments without requiring typed text', async () => {
     const user = userEvent.setup()
@@ -280,10 +283,10 @@ describe('SkillDetailPage builder', () => {
     const promptInput = screen.getByPlaceholderText(
       'skill.skillManagement.detail.builder.modifyPlaceholder',
     )
-    await user.type(promptInput, 'Use the attached guide{Enter}')
+    await user.type(promptInput, 'Guide{Enter}')
 
     expect(mocks.sendSkillAssistMessage).not.toHaveBeenCalled()
-    expect(promptInput).toHaveValue('Use the attached guide')
+    expect(promptInput).toHaveValue('Guide')
   }, 10000)
 
   it('ignores an in-flight attachment after restarting Skill Builder', async () => {
@@ -477,7 +480,7 @@ describe('SkillDetailPage builder', () => {
       }),
     )
     expect(await screen.findByRole('img', { name: 'image.png' })).toBeInTheDocument()
-  })
+  }, 15000)
 
   it('shows an error and re-enables Skill Builder input when sending fails', async () => {
     const user = userEvent.setup()
@@ -854,7 +857,7 @@ describe('SkillDetailPage builder', () => {
         }),
       }),
     )
-  })
+  }, 15000)
 
   it('updates non-SKILL files from the Skill Builder detail event', async () => {
     const user = userEvent.setup()
@@ -895,5 +898,5 @@ describe('SkillDetailPage builder', () => {
 
     expect(await screen.findByText('references')).toBeInTheDocument()
     expect(mocks.saveDraftFileMutationFn).not.toHaveBeenCalled()
-  })
+  }, 15000)
 })

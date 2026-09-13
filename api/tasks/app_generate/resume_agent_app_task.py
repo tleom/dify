@@ -19,6 +19,7 @@ from extensions.ext_database import db
 from models.account import Account
 from models.human_input import HumanInputForm
 from models.model import App, Conversation, EndUser
+from services.workbench import runtime as workbench_runtime
 from tasks.app_generate.workflow_execute_task import WORKFLOW_BASED_APP_EXECUTION_QUEUE
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ def resume_agent_app_execution(*, conversation_id: str, form_id: str) -> None:
         return
 
     try:
-        AgentAppGenerator().resume_after_form_submission(
+        AgentAppGenerator(workbench=workbench_runtime).resume_after_form_submission(
             app_model=app_model,
             user=user,
             conversation_id=conversation_id,

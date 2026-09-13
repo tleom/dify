@@ -1,3 +1,4 @@
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -173,3 +174,18 @@ def test_save_snapshot_targets_binding(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert save.call_args.kwargs["binding_id"] == "binding-1"
     assert save.call_args.kwargs["session_snapshot"] == snapshot.model_dump_json()
+
+
+def test_save_workbench_snapshot_captures_history_for_exact_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    save = MagicMock()
+    workbench = MagicMock()
+    monkeypatch.setattr(AgentWorkspaceService, "save_binding_session_snapshot", save)
+    snapshot = CompositorSessionSnapshot(layers=[])
+    scope = replace(_scope(), workbench_account_id="account-1", workbench_run_id="run-1")
+
+    AgentAppWorkspaceStore(workbench=workbench).save_active_snapshot(
+        scope=scope, binding_id="binding-1", snapshot=snapshot
+    )
+
+    workbench.capture_run_history.assert_called_once_with("tenant-1", "account-1", "conversation-1", "run-1", snapshot)
+    assert save.call_args.kwargs["binding_id"] == "binding-1"

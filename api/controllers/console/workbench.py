@@ -2,6 +2,7 @@
 
 import base64
 import json
+from collections.abc import Iterator
 from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
@@ -286,7 +287,7 @@ class WorkbenchResource(Resource):
     method_decorators = [account_initialization_required, login_required, setup_required]
 
     @staticmethod
-    def owner():
+    def owner() -> tuple[str, str]:
         account, tenant_id = current_account_with_tenant()
         service.authorize(tenant_id, account.id)
         return tenant_id, account.id
@@ -480,9 +481,12 @@ class Feedback(WorkbenchResource):
         from services.workbench.message_actions import feedback
 
         payload = WorkbenchFeedbackPayload.model_validate(console_ns.payload or {})
-        return dump_response(WorkbenchRunEnvelopeResponse, {
-            "data": feedback(*self.owner(), str(run_id), payload.rating),
-        })
+        return dump_response(
+            WorkbenchRunEnvelopeResponse,
+            {
+                "data": feedback(*self.owner(), str(run_id), payload.rating),
+            },
+        )
 
 
 @console_ns.route("/workbench/runs/<uuid:run_id>/regenerate")
@@ -495,9 +499,14 @@ class Regenerate(WorkbenchResource):
         from services.workbench.message_actions import regenerate
 
         payload = WorkbenchRegeneratePayload.model_validate(console_ns.payload or {})
-        return dump_response(WorkbenchRunEnvelopeResponse, {
-            "data": regenerate(*self.owner(), str(run_id), payload.version, payload.request_key, query=payload.query),
-        }), 202
+        return dump_response(
+            WorkbenchRunEnvelopeResponse,
+            {
+                "data": regenerate(
+                    *self.owner(), str(run_id), payload.version, payload.request_key, query=payload.query
+                ),
+            },
+        ), 202
 
 
 @console_ns.route("/workbench/runs/<uuid:run_id>")
@@ -535,6 +544,8 @@ class Stop(WorkbenchResource):
         redis_client.setex(scheduler.PREFIX + "stop:" + str(run_id), 86400, "1")
         with session_factory.get_session_maker().begin() as session:
             run = session.get(WorkbenchRun, str(run_id))
+            if run is None:
+                raise NotFound()
             if run.status in ("queued", "running", "waiting_input", "environment_update", "environment_installing"):
                 run.status = "cancelled"
         if task_id:
@@ -557,8 +568,7 @@ class Events(WorkbenchResource):
         )
         cursor = query.cursor
 
-        @stream_with_context
-        def generate():
+        def generate() -> Iterator[str]:
             nonlocal cursor
             while True:
                 items = redis_client.xread({scheduler.event_key(str(run_id)): cursor}, count=100, block=1000)
@@ -569,16 +579,22 @@ class Events(WorkbenchResource):
                     if json.loads(text).get("event") == "workbench_end":
                         state, _ = owned_run(*owner, str(run_id))
                         if state["status"] == "stopping":
-                            yield f"id: {cursor}\ndata: " + json.dumps(
-                                {"event": "workbench_status", "status": "stopping"}
-                            ) + "\n\n"
+                            yield (
+                                f"id: {cursor}\ndata: "
+                                + json.dumps({"event": "workbench_status", "status": "stopping"})
+                                + "\n\n"
+                            )
                             continue
                     yield f"id: {cursor}\ndata: {text}\n\n"
                     if json.loads(text).get("event") == "workbench_end":
                         return
                 state, _ = owned_run(*owner, str(run_id))
                 if state["status"] not in (
-                    "queued", "running", "environment_update", "environment_installing", "stopping"
+                    "queued",
+                    "running",
+                    "environment_update",
+                    "environment_installing",
+                    "stopping",
                 ):
                     if cursor == "0-0":
                         for event in state["events"]:
@@ -592,5 +608,8 @@ class Events(WorkbenchResource):
                 yield ": keepalive\n\n"
 
         return Response(
-            generate(), mimetype="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
+            # Flask accepts Iterator[str]; its AnyStr overload is not resolved by pyrefly.
+            stream_with_context(generate()),  # pyrefly: ignore[no-matching-overload]
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )

@@ -27,6 +27,7 @@ def test_execution_binding_request_uses_opaque_backend_refs() -> None:
         "workspace_id": "workspace-1",
         "existing_workspace_ref": "opaque-workspace",
         "home_snapshot_ref": "opaque-home",
+        "workbench": False,
     }
 
 

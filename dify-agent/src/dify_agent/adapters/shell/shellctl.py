@@ -13,8 +13,6 @@ from dataclasses import dataclass, field
 from typing import Protocol, TypeVar, cast
 
 import httpx2 as httpx
-from shellctl.client import ShellctlClientError
-from shellctl.shared import HealthResponse, JobMode
 
 from dify_agent.adapters.shell.protocols import (
     ShellCommandProtocol,
@@ -23,6 +21,8 @@ from dify_agent.adapters.shell.protocols import (
     ShellExecutionMode,
     ShellProviderError,
 )
+from shellctl.client import ShellctlClientError
+from shellctl.shared import HealthResponse, JobMode
 
 ResultT = TypeVar("ResultT")
 
@@ -125,7 +125,8 @@ class ShellctlCommands(ShellCommandProtocol):
             home_dir=self.home_dir,
             workspace_dir=self.workspace_dir,
         )
-        resolved_env = _lease_env({**(env or {}), **self.default_env}, home_dir=self.home_dir)
+        command_env = {**(env or {}), **self.default_env} if self.default_env else env
+        resolved_env = _lease_env(command_env, home_dir=self.home_dir)
         return _from_job_result(
             await _run_client_call(
                 self.client.run(

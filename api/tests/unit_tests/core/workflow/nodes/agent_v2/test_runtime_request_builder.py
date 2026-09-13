@@ -1466,6 +1466,7 @@ def test_build_config_layer_config_returns_empty_config_for_empty_agent_soul():
         "note": "",
         "mentioned_skill_names": [],
         "mentioned_file_names": [],
+        "reset_materialized_assets": False,
     }
     assert warnings == []
 
@@ -1486,6 +1487,7 @@ def test_workflow_run_request_has_config_layer_with_empty_agent_soul(monkeypatch
         "note": "",
         "mentioned_skill_names": [],
         "mentioned_file_names": [],
+        "reset_materialized_assets": False,
     }
     assert layers[DIFY_SHELL_LAYER_ID]["deps"] == {
         "execution_context": DIFY_EXECUTION_CONTEXT_LAYER_ID,
@@ -1525,6 +1527,7 @@ def test_workflow_run_request_contains_config_layer():
         "note": "Read the proposal first.",
         "mentioned_skill_names": ["tender-analyzer"],
         "mentioned_file_names": ["sample.pdf"],
+        "reset_materialized_assets": False,
     }
     warnings = result.metadata["runtime_support"]["unsupported_runtime_warnings"]
     assert warnings == []

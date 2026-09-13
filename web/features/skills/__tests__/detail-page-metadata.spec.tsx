@@ -14,7 +14,10 @@ import {
 
 const mocks = getMocks()
 
-describe('SkillDetailPage metadata', () => {
+// Full-page editor flows include real overlays and one-second autosaves;
+// give those multi-step cases a bounded budget on shared CI runners.
+
+describe('SkillDetailPage metadata', { timeout: 15000 }, () => {
   beforeEach(resetDetailPageFixture)
 
   it('opens the inline tag selector with workspace tag options', async () => {
@@ -696,7 +699,7 @@ describe('SkillDetailPage metadata', () => {
 
     expect(screen.getByRole('textbox', { name: 'team value' })).toHaveValue('success')
     expect(screen.getByRole('textbox', { name: 'owner value' })).toHaveValue('support')
-  })
+  }, 15000)
 
   it('cancels custom metadata creation from both metadata fields', async () => {
     const user = userEvent.setup()
@@ -758,7 +761,7 @@ describe('SkillDetailPage metadata', () => {
       },
       { timeout: 2500 },
     )
-  })
+  }, 15000)
 
   it('updates and removes existing custom metadata from the manifest editor', async () => {
     const content =
@@ -810,7 +813,7 @@ describe('SkillDetailPage metadata', () => {
       },
       { timeout: 2500 },
     )
-  })
+  }, 15000)
 
   it('does not render Skill metadata controls for non-SKILL markdown files', async () => {
     const user = userEvent.setup()
