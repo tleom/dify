@@ -42,6 +42,7 @@ from core.app.apps.agent_app.session_store import (
     AgentAppWorkspaceStore,
     StoredAgentAppSession,
 )
+from core.app.apps.agent_app.workbench_runtime import AgentAppWorkbenchRuntime
 from core.app.apps.base_app_queue_manager import AppQueueManager, PublishFrom
 from core.app.apps.exc import GenerateTaskStoppedError
 from core.app.entities.app_invoke_entities import DifyRunContext
@@ -628,12 +629,14 @@ class AgentAppRunner:
         event_adapter: AgentBackendRunEventAdapter,
         session_store: AgentAppWorkspaceStore,
         text_delta_debounce_seconds: float,
+        workbench: AgentAppWorkbenchRuntime | None = None,
     ) -> None:
         self._request_builder = request_builder
         self._agent_backend_client = agent_backend_client
         self._event_adapter = event_adapter
         self._session_store = session_store
         self._text_delta_debounce_seconds = text_delta_debounce_seconds
+        self._workbench = workbench
 
     def run(
         self,
@@ -684,8 +687,10 @@ class AgentAppRunner:
             message_id=message_id,
         )
 
-        from services.workbench.runtime import prepare_execution
-        prepare_execution(dify_context.tenant_id, conversation_id, dify_context.user_id, runtime.request)
+        if self._workbench is not None:
+            self._workbench.prepare_execution(
+                dify_context.tenant_id, conversation_id, dify_context.user_id, runtime.request
+            )
         create_response = self._agent_backend_client.create_run(runtime.request)
         terminal, process_recorder = self._consume_stream(
             create_response.run_id,
@@ -699,10 +704,16 @@ class AgentAppRunner:
         )
 
         if isinstance(terminal, AgentBackendDeferredToolCallInternalEvent):
-            from services.workbench.runtime import pause
-            if pause(dify_context.tenant_id, conversation_id, dify_context.user_id, terminal, runtime.binding_id):
-                self._publish_terminal_answer(queue_manager=queue_manager, model_name=model_name,
-                    answer="", query=query, usage=_llm_usage_from_agent_backend(terminal.usage))
+            if self._workbench is not None and self._workbench.pause(
+                dify_context.tenant_id, conversation_id, dify_context.user_id, terminal, runtime.binding_id
+            ):
+                self._publish_terminal_answer(
+                    queue_manager=queue_manager,
+                    model_name=model_name,
+                    answer="",
+                    query=query,
+                    usage=_llm_usage_from_agent_backend(terminal.usage),
+                )
                 return
             # ENG-635: the agent asked a human. End this turn with the question and
             # a conversation-owned HITL form; a form submission resumes the run.
@@ -790,12 +801,18 @@ class AgentAppRunner:
             effective_session_scope_snapshot_id: str | None = agent_config_snapshot_id
         else:
             effective_session_scope_snapshot_id = session_scope_snapshot_id
-        from services.workbench.runtime import conversation_owner, execution_run_id
-        workbench_owner = conversation_owner(dify_context.tenant_id, conversation_id, dify_context.user_id)
+        workbench_owner = (
+            self._workbench.conversation_owner(dify_context.tenant_id, conversation_id, dify_context.user_id)
+            if self._workbench is not None
+            else None
+        )
         return AgentAppSessionScope(
             workbench_account_id=workbench_owner,
-            workbench_run_id=(execution_run_id(dify_context.tenant_id, conversation_id, workbench_owner)
-                              if workbench_owner else None),
+            workbench_run_id=(
+                self._workbench.execution_run_id(dify_context.tenant_id, conversation_id, workbench_owner)
+                if self._workbench is not None and workbench_owner
+                else None
+            ),
             tenant_id=dify_context.tenant_id,
             app_id=dify_context.app_id,
             conversation_id=conversation_id,
@@ -830,13 +847,18 @@ class AgentAppRunner:
             if message_id is not None
             else None
         )
-        from services.workbench.runtime import continuation, execution_run_id
-        deferred_tool_results = (
-            continuation(dify_context.tenant_id, conversation_id, dify_context.user_id) or deferred_tool_results
-        )
+        if self._workbench is not None:
+            deferred_tool_results = (
+                self._workbench.continuation(dify_context.tenant_id, conversation_id, dify_context.user_id)
+                or deferred_tool_results
+            )
         return self._request_builder.build(
             AgentAppRuntimeBuildContext(
-                workbench_run_id=execution_run_id(dify_context.tenant_id, conversation_id, dify_context.user_id),
+                workbench_run_id=(
+                    self._workbench.execution_run_id(dify_context.tenant_id, conversation_id, dify_context.user_id)
+                    if self._workbench is not None
+                    else None
+                ),
                 dify_context=dify_context,
                 agent_id=agent_id,
                 agent_config_snapshot_id=agent_config_snapshot_id,

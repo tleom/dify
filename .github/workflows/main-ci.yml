@@ -1,10 +1,10 @@
 name: Main CI Pipeline
 
 on:
+  # Stacked pull requests need the same validation before their base is merged.
   pull_request:
-    branches: ['main', 'workbench/main']
   merge_group:
-    branches: ['main', 'workbench/main']
+    branches: ['main']
     types: [checks_requested]
 
 permissions:

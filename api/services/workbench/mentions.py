@@ -1,5 +1,7 @@
 """Resolve explicit resource mentions against the published Agent allowlist."""
+
 import json
+from typing import TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,15 +15,24 @@ class ResourceMentions(BaseModel):
     knowledge: list[str] = Field(default_factory=list, max_length=200)
 
 
+class ResolvedMentions(TypedDict):
+    resource_mentions: dict[str, list[str]]
+    mentioned_resources: list[dict[str, str]]
+    mention_prompt: str
+
+
 def default_capabilities(soul, selection, *, new_chat=False):
     resources = template_resources(soul)
-    return selection.model_copy(update={
-        "tools": list(resources["tools"]), "skills": list(resources["skills"]),
-        "knowledge": [] if new_chat else selection.knowledge,
-    })
+    return selection.model_copy(
+        update={
+            "tools": list(resources["tools"]),
+            "skills": list(resources["skills"]),
+            "knowledge": [] if new_chat else selection.knowledge,
+        }
+    )
 
 
-def resolve_mentions(soul, value, *, provider_names=None):
+def resolve_mentions(soul, value, *, provider_names=None) -> ResolvedMentions:
     refs = ResourceMentions.model_validate(value or {}).model_dump()
     resources = template_resources(soul)
     badges, tokens, seen = [], [], set()
@@ -45,8 +56,7 @@ def resolve_mentions(soul, value, *, provider_names=None):
             tokens.append({"kind": kind, "resource": token})
     prompt = ""
     if tokens:
-        prompt = (
-            "\n本轮明确指定使用以下资源，请调用这些资源处理请求；缺少必要参数时先询问：\n"
-            + json.dumps(tokens, ensure_ascii=False)
+        prompt = "\n本轮明确指定使用以下资源，请调用这些资源处理请求；缺少必要参数时先询问：\n" + json.dumps(
+            tokens, ensure_ascii=False
         )
     return {"resource_mentions": refs, "mentioned_resources": badges, "mention_prompt": prompt}

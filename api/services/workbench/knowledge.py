@@ -6,10 +6,10 @@ from configs import dify_config
 from core.db.session_factory import session_factory
 from models import Account
 from services.dataset_service import DatasetService
+from services.workbench.authorization import can_retrieve_dataset
 
 
 def available_sets(tenant_id: str, account_id: str) -> list[dict]:
-    from controllers.common.rbac import DatasetId, RBACCheck, RBACPermission, enforce_rbac_checks
     from services.enterprise.rbac_service import RBACService
 
     with session_factory.create_session() as session:
@@ -24,35 +24,39 @@ def available_sets(tenant_id: str, account_id: str) -> list[dict]:
             scope = RBACService.DatasetAccess.whitelist_resources(tenant_id, account_id)
             if not scope.unrestricted:
                 accessible_ids = list(scope.resource_ids)
-        result = []
+        result: list[dict] = []
         page = 1
         while True:
             datasets, total = DatasetService.get_datasets(
-                page, 100, session, tenant_id, account,
+                page,
+                100,
+                session,
+                tenant_id,
+                account,
                 accessible_dataset_ids=accessible_ids,
             )
             for dataset in datasets:
-                try:
-                    enforce_rbac_checks(
-                        tenant_id=tenant_id, account_id=account_id,
-                        checks=[RBACCheck(RBACPermission.DATASET_RETRIEVAL_RECALL, DatasetId())],
-                        path_args={"dataset_id": dataset.id},
-                    )
-                except Forbidden:
+                if not can_retrieve_dataset(tenant_id, account_id, dataset.id):
                     continue
                 settings = dataset.retrieval_model or {}
-                result.append({
-                    "id": dataset.id, "name": dataset.name, "description": dataset.description,
-                    "datasets": [{"id": dataset.id, "name": dataset.name}],
-                    "query": {"mode": "generated_query"},
-                    "retrieval": {
-                        "mode": "multiple", "top_k": settings.get("top_k", 4),
-                        "reranking_enable": False,
-                        "score_threshold": settings.get("score_threshold")
-                        if settings.get("score_threshold_enabled") else None,
-                    },
-                    "metadata_filtering": {"mode": "disabled"},
-                })
+                result.append(
+                    {
+                        "id": dataset.id,
+                        "name": dataset.name,
+                        "description": dataset.description,
+                        "datasets": [{"id": dataset.id, "name": dataset.name}],
+                        "query": {"mode": "generated_query"},
+                        "retrieval": {
+                            "mode": "multiple",
+                            "top_k": settings.get("top_k", 4),
+                            "reranking_enable": False,
+                            "score_threshold": settings.get("score_threshold")
+                            if settings.get("score_threshold_enabled")
+                            else None,
+                        },
+                        "metadata_filtering": {"mode": "disabled"},
+                    }
+                )
             if page * 100 >= total:
                 names = [item["name"].strip().casefold() for item in result]
                 for item in result:

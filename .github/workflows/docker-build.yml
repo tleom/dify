@@ -4,7 +4,6 @@ on:
   pull_request:
     branches:
       - 'main'
-      - 'workbench/main'
     paths:
       - api/Dockerfile
       - api/Dockerfile.dockerignore

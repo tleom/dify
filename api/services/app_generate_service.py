@@ -34,6 +34,7 @@ from services.errors.app import (
 )
 from services.errors.llm import InvokeRateLimitError
 from services.quota_service import QuotaService, unlimited
+from services.workbench import runtime as workbench_runtime
 from services.workflow_service import WorkflowService
 from tasks.app_generate.workflow_execute_task import AppExecutionParams, workflow_based_app_execution_task
 
@@ -217,7 +218,7 @@ class AppGenerateService:
             case AppMode.AGENT:
                 return rate_limit.generate(
                     AgentAppGenerator.convert_to_event_stream(
-                        AgentAppGenerator().generate(
+                        AgentAppGenerator(workbench=workbench_runtime).generate(
                             app_model=app_model,
                             user=user,
                             args=args,

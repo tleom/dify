@@ -4,18 +4,26 @@ import pytest
 from pydantic import ValidationError
 from pydantic_ai.messages import FinalResultEvent
 
+import dify_agent.protocol as protocol_exports
 from agenton.compositor import CompositorSessionSnapshot
 from agenton.layers import ExitIntent
 from agenton_collections.layers.plain import PLAIN_PROMPT_LAYER_TYPE_ID, PromptLayerConfig
-import dify_agent.protocol as protocol_exports
 from dify_agent.layers.ask_human import DifyAskHumanLayerConfig
-from dify_agent.layers.execution_context import DIFY_EXECUTION_CONTEXT_LAYER_TYPE_ID, DifyExecutionContextLayerConfig
 from dify_agent.layers.dify_plugin import DIFY_PLUGIN_LLM_LAYER_TYPE_ID, DIFY_PLUGIN_TOOLS_LAYER_TYPE_ID
+from dify_agent.layers.dify_plugin.configs import (
+    DifyPluginLLMLayerConfig,
+    DifyPluginToolConfig,
+    DifyPluginToolParameter,
+    DifyPluginToolParameterForm,
+    DifyPluginToolParameterType,
+    DifyPluginToolsLayerConfig,
+)
+from dify_agent.layers.execution_context import DIFY_EXECUTION_CONTEXT_LAYER_TYPE_ID, DifyExecutionContextLayerConfig
 from dify_agent.layers.output import DIFY_OUTPUT_LAYER_TYPE_ID, DifyOutputLayerConfig
 from dify_agent.protocol import DIFY_AGENT_HISTORY_LAYER_ID, DIFY_AGENT_MODEL_LAYER_ID, DIFY_AGENT_OUTPUT_LAYER_ID
 from dify_agent.protocol.schemas import (
-    AgentRunUsage,
     RUN_EVENT_ADAPTER,
+    AgentRunUsage,
     CreateRunRequest,
     DeferredToolCallPayload,
     LayerExitSignals,
@@ -31,14 +39,6 @@ from dify_agent.protocol.schemas import (
     RunSucceededEvent,
     RunSucceededEventData,
     normalize_composition,
-)
-from dify_agent.layers.dify_plugin.configs import (
-    DifyPluginLLMLayerConfig,
-    DifyPluginToolConfig,
-    DifyPluginToolParameter,
-    DifyPluginToolParameterForm,
-    DifyPluginToolParameterType,
-    DifyPluginToolsLayerConfig,
 )
 
 
@@ -234,6 +234,7 @@ def test_create_run_request_accepts_dto_first_public_composition_and_normalizes_
         "node_id": "node-1",
         "node_execution_id": "node-execution-1",
         "conversation_id": None,
+        "workbench_run_id": None,
         "agent_id": None,
         "agent_config_version_id": None,
         "agent_config_version_kind": None,

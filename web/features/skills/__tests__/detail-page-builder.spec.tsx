@@ -15,6 +15,9 @@ import {
 
 const mocks = getMocks()
 
+// Full-page editor flows include real overlays and one-second autosaves;
+// give those multi-step cases a bounded budget on shared CI runners.
+
 describe('SkillDetailPage builder', () => {
   beforeEach(resetDetailPageFixture)
 
@@ -477,7 +480,7 @@ describe('SkillDetailPage builder', () => {
       }),
     )
     expect(await screen.findByRole('img', { name: 'image.png' })).toBeInTheDocument()
-  })
+  }, 15000)
 
   it('shows an error and re-enables Skill Builder input when sending fails', async () => {
     const user = userEvent.setup()
@@ -854,7 +857,7 @@ describe('SkillDetailPage builder', () => {
         }),
       }),
     )
-  })
+  }, 15000)
 
   it('updates non-SKILL files from the Skill Builder detail event', async () => {
     const user = userEvent.setup()
@@ -895,5 +898,5 @@ describe('SkillDetailPage builder', () => {
 
     expect(await screen.findByText('references')).toBeInTheDocument()
     expect(mocks.saveDraftFileMutationFn).not.toHaveBeenCalled()
-  })
+  }, 15000)
 })

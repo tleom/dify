@@ -10,6 +10,18 @@ from core.db.session_factory import session_factory
 from models.workbench import WorkbenchChat, WorkbenchRun
 
 
+def resolve_run_config(run_id, tenant_id, account_id):
+    from services.workbench.service import resolve_run_config as resolve
+
+    return resolve(run_id, tenant_id, account_id)
+
+
+def resolve_run_generation(run_id, tenant_id, account_id):
+    from services.workbench.service import resolve_run_generation as resolve
+
+    return resolve(run_id, tenant_id, account_id)
+
+
 def attach_conversation(run_id, tenant_id, account_id, conversation_id, task_id):
     with session_factory.get_session_maker().begin() as session:
         run = session.scalar(
@@ -20,6 +32,8 @@ def attach_conversation(run_id, tenant_id, account_id, conversation_id, task_id)
         if run is None:
             raise Forbidden()
         chat = session.get(WorkbenchChat, run.chat_id)
+        if chat is None:
+            raise Forbidden()
         if chat.conversation_id and chat.conversation_id != conversation_id:
             raise Forbidden()
         chat.conversation_id = conversation_id
@@ -108,11 +122,19 @@ def capture_run_history(tenant_id, account_id, conversation_id, run_id, snapshot
     from services.workbench.history import history_state
 
     with session_factory.get_session_maker().begin() as session:
-        run = session.scalar(select(WorkbenchRun).join(WorkbenchChat, WorkbenchChat.id == WorkbenchRun.chat_id).where(
-            WorkbenchRun.id == run_id, WorkbenchRun.tenant_id == tenant_id, WorkbenchRun.account_id == account_id,
-            WorkbenchChat.conversation_id == conversation_id, WorkbenchChat.tenant_id == tenant_id,
-            WorkbenchChat.account_id == account_id,
-        ).with_for_update())
+        run = session.scalar(
+            select(WorkbenchRun)
+            .join(WorkbenchChat, WorkbenchChat.id == WorkbenchRun.chat_id)
+            .where(
+                WorkbenchRun.id == run_id,
+                WorkbenchRun.tenant_id == tenant_id,
+                WorkbenchRun.account_id == account_id,
+                WorkbenchChat.conversation_id == conversation_id,
+                WorkbenchChat.tenant_id == tenant_id,
+                WorkbenchChat.account_id == account_id,
+            )
+            .with_for_update()
+        )
         if run is None:
             raise Forbidden()
         payload = json.loads(run.payload)
@@ -138,6 +160,7 @@ def prepare_execution(tenant_id, conversation_id, account_id, request):
             raise Forbidden("Workbench execution lease expired")
         payload = json.loads(run.payload)
         if not payload.get("continuation"):
+            parent = None
             from services.workbench.history import history_before_message, history_state, restore_history
 
             if "branch_parent_run_id" in payload:
@@ -145,8 +168,12 @@ def prepare_execution(tenant_id, conversation_id, account_id, request):
 
                 parent_id = payload["branch_parent_run_id"]
                 parent = session.get(WorkbenchRun, parent_id) if parent_id else None
-                if parent_id and (parent is None or parent.chat_id != run.chat_id or parent.account_id != account_id
-                                  or parent.tenant_id != tenant_id):
+                if parent_id and (
+                    parent is None
+                    or parent.chat_id != run.chat_id
+                    or parent.account_id != account_id
+                    or parent.tenant_id != tenant_id
+                ):
                     raise Forbidden()
                 request.session_snapshot = restore_history(
                     request.session_snapshot, output_history(session, parent) if parent else None
@@ -168,11 +195,15 @@ def prepare_execution(tenant_id, conversation_id, account_id, request):
                         request.session_snapshot = history_before_message(
                             request.session_snapshot, message.query, message.created_at
                         )
-            previous = parent if "branch_parent_run_id" in payload else session.scalar(
-                select(WorkbenchRun)
-                .where(WorkbenchRun.chat_id == run.chat_id, WorkbenchRun.id != run.id)
-                .order_by(WorkbenchRun.created_at.desc())
-                .limit(1)
+            previous = (
+                parent
+                if "branch_parent_run_id" in payload
+                else session.scalar(
+                    select(WorkbenchRun)
+                    .where(WorkbenchRun.chat_id == run.chat_id, WorkbenchRun.id != run.id)
+                    .order_by(WorkbenchRun.created_at.desc())
+                    .limit(1)
+                )
             )
             if previous is not None and previous.status in ("cancelled", "failed", "interrupted"):
                 from services.workbench.history import mark_interrupted_history

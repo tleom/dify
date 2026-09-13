@@ -4,11 +4,15 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Mapping
+from typing import cast
 
 import httpx
 from celery import shared_task
-from flask import current_app
+from flask import Flask, current_app
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
+from werkzeug.local import LocalProxy
 
 from configs import dify_config
 from core.app.apps.agent_app.app_generator import AgentAppGenerator
@@ -19,6 +23,7 @@ from models import Account
 from models.model import App, AppMode
 from models.workbench import WorkbenchChat, WorkbenchRun
 from services.app_task_service import AppTaskService
+from services.workbench import runtime as workbench_runtime
 from services.workbench import scheduler
 from services.workbench.service import authorize
 
@@ -42,10 +47,12 @@ def fence_remote(ticket):
     """Do not release capacity until cancellation has reached a terminal remote state."""
     if not ticket:
         return True
-    headers = {"Authorization": "Bearer " + dify_config.AGENT_BACKEND_API_TOKEN}
-    with httpx.Client(
-        base_url=dify_config.AGENT_BACKEND_BASE_URL, headers=headers, timeout=10, trust_env=False
-    ) as client:
+    endpoint = dify_config.AGENT_BACKEND_BASE_URL
+    token = dify_config.AGENT_BACKEND_API_TOKEN
+    if not endpoint or not token:
+        raise RuntimeError("Agent backend endpoint and token are required to fence a Workbench run")
+    headers = {"Authorization": "Bearer " + token}
+    with httpx.Client(base_url=endpoint, headers=headers, timeout=10, trust_env=False) as client:
         result = client.post(f"/runs/{ticket}/fence", json={})
         result.raise_for_status()
         # running means the remote owner still needs to finish cleanup.
@@ -62,9 +69,9 @@ def force_stop(run_id, account_id):
         run = session.get(WorkbenchRun, run_id)
         if run is None or run.account_id != account_id:
             return
-        ticket = run.backend_run_id or str(uuid5(
-            NAMESPACE_URL, f"dify-workbench-run:{run.id}:{json.loads(run.payload).get('attempt', 0)}"
-        ))
+        ticket = run.backend_run_id or str(
+            uuid5(NAMESPACE_URL, f"dify-workbench-run:{run.id}:{json.loads(run.payload).get('attempt', 0)}")
+        )
         owner = f"{run.tenant_id}:{account_id}"
     try:
         if fence_remote(ticket):
@@ -83,7 +90,7 @@ def dispatch():
         claimed = scheduler.claim()
         if not claimed:
             break
-        execute.apply_async(args=claimed, task_id="workbench-" + claimed[1])
+        execute.apply_async(args=tuple(claimed), task_id="workbench-" + claimed[1])
 
 
 @shared_task(queue="workbench_control")
@@ -155,36 +162,47 @@ def execute(owner, run_id):
     with session_factory.create_session() as session:
         current = session.get(WorkbenchRun, run_id)
         if current is not None and current.status == "queued":
-            previous_ids = session.scalars(select(WorkbenchRun.id).where(
-                WorkbenchRun.chat_id == current.chat_id,
-                WorkbenchRun.created_at < current.created_at,
-            ))
+            previous_ids = session.scalars(
+                select(WorkbenchRun.id).where(
+                    WorkbenchRun.chat_id == current.chat_id,
+                    WorkbenchRun.created_at < current.created_at,
+                )
+            )
             if any(redis_client.zscore(scheduler.PREFIX + "active", prior) is not None for prior in previous_ids):
                 if scheduler.heartbeat(owner, run_id):
-                    execute.apply_async(args=[owner, run_id], countdown=1)
+                    execute.apply_async(args=(owner, run_id), countdown=1)
                 return
     done = threading.Event()
     claimed = False
     completed_stream = False
     events = []
     status, error = "completed", None
-    app = current_app._get_current_object()
+    app = cast(LocalProxy[Flask], current_app)._get_current_object()
     try:
         with session_factory.get_session_maker().begin() as session:
-            claimed = session.execute(
-                update(WorkbenchRun)
-                .where(
-                    WorkbenchRun.id == run_id,
-                    WorkbenchRun.tenant_id == tenant_id,
-                    WorkbenchRun.account_id == account_id,
-                    WorkbenchRun.status == "queued",
-                )
-                .values(status="running")
-            ).rowcount
+            claimed = bool(
+                cast(
+                    CursorResult,
+                    session.execute(
+                        update(WorkbenchRun)
+                        .where(
+                            WorkbenchRun.id == run_id,
+                            WorkbenchRun.tenant_id == tenant_id,
+                            WorkbenchRun.account_id == account_id,
+                            WorkbenchRun.status == "queued",
+                        )
+                        .values(status="running")
+                    ),
+                ).rowcount
+            )
             if not claimed:
                 return
             run = session.get(WorkbenchRun, run_id)
+            if run is None:
+                raise ValueError("Workbench run is unavailable")
             chat = session.get(WorkbenchChat, run.chat_id)
+            if chat is None:
+                raise ValueError("Workbench conversation is unavailable")
             payload, conversation_id, app_id = json.loads(run.payload), chat.conversation_id, chat.app_id
             events = json.loads(run.event_log)
         authorize(tenant_id, account_id)
@@ -215,7 +233,7 @@ def execute(owner, run_id):
                 from services.workbench.files import generation_query
 
                 query = generation_query(payload)
-                result = AgentAppGenerator().generate(
+                result = AgentAppGenerator(workbench=workbench_runtime).generate(
                     app_model=app_model,
                     user=user,
                     session=session,
@@ -227,7 +245,8 @@ def execute(owner, run_id):
                         "workbench_run_id": run_id,
                         **(
                             {"parent_message_id": payload["parent_message_id"]}
-                            if "parent_message_id" in payload else {}
+                            if "parent_message_id" in payload
+                            else {}
                         ),
                     },
                     invoke_from=InvokeFrom.EXPLORE,
@@ -236,8 +255,8 @@ def execute(owner, run_id):
                 session.close()
                 buffer = ""
                 for chunk in result:
-                    if isinstance(chunk, dict):
-                        frames = [chunk]
+                    if isinstance(chunk, Mapping):
+                        frames = [dict(chunk)]
                     else:
                         buffer += chunk.decode() if isinstance(chunk, bytes) else chunk
                         frames = []
@@ -263,6 +282,8 @@ def execute(owner, run_id):
         if claimed:
             with session_factory.get_session_maker().begin() as session:
                 run = session.get(WorkbenchRun, run_id)
+                if run is None:
+                    raise ValueError("Claimed Workbench run is unavailable during cleanup")
                 ticket = run.backend_run_id
                 if redis_client.get(scheduler.PREFIX + "stop:" + run_id):
                     status, error = "cancelled", None
@@ -344,6 +365,8 @@ def update_environment(tenant_id, account_id):
             return
         with session_factory.get_session_maker().begin() as session:
             run = session.get(WorkbenchRun, run_id)
+            if run is None:
+                raise ValueError("Workbench run is unavailable after environment update")
             if run.status == "environment_installing":
                 if redis_client.get(scheduler.PREFIX + "stop:" + run_id):
                     run.status = "cancelled"
