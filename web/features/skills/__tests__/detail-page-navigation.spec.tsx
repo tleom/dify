@@ -34,7 +34,8 @@ function TestGotoAnythingDialog() {
   )
 }
 
-describe('SkillDetailPage navigation', () => {
+// Full editor interactions include real debounce waits on shared CI runners.
+describe('SkillDetailPage navigation', { timeout: 15000 }, () => {
   beforeEach(resetDetailPageFixture)
 
   it('opens Go to Anything from the sidebar search action', async () => {

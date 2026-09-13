@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from unittest.mock import MagicMock
 
 import pytest
@@ -39,9 +40,14 @@ def test_agent_run_permission_uses_exact_tenant_account_and_agent(
     ],
 )
 def test_dataset_permission_preserves_maintainer_and_rbac_policy(
-    monkeypatch: pytest.MonkeyPatch, enabled: bool, owner: str, allowed: bool, expected: bool
+    monkeypatch: pytest.MonkeyPatch,
+    config_overrides: Callable[..., None],
+    enabled: bool,
+    owner: str,
+    allowed: bool,
+    expected: bool,
 ) -> None:
-    monkeypatch.setattr(authorization.dify_config, "RBAC_ENABLED", enabled)
+    config_overrides(RBAC_ENABLED=enabled)
     maintainer = MagicMock(return_value=owner)
     check = MagicMock(return_value=allowed)
     monkeypatch.setattr(authorization.RBACResourceService, "get_dataset_maintainer", maintainer)
