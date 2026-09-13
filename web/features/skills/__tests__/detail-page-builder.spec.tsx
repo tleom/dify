@@ -18,7 +18,7 @@ const mocks = getMocks()
 // Full-page editor flows include real overlays and one-second autosaves;
 // give those multi-step cases a bounded budget on shared CI runners.
 
-describe('SkillDetailPage builder', () => {
+describe('SkillDetailPage builder', { timeout: 15000 }, () => {
   beforeEach(resetDetailPageFixture)
 
   it('shows Skill manifest placeholders for an empty draft', async () => {
