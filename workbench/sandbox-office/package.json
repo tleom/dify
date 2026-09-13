@@ -1,0 +1,22 @@
+{
+  "name": "workbench-office-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "pptxgenjs": "latest",
+    "docx": "latest",
+    "mammoth": "latest",
+    "docx-preview": "latest",
+    "exceljs": "latest",
+    "pdf-lib": "latest",
+    "pdfjs-dist": "latest",
+    "sharp": "latest",
+    "@resvg/resvg-js": "latest",
+    "@fortawesome/fontawesome-svg-core": "latest",
+    "@fortawesome/free-solid-svg-icons": "latest",
+    "playwright": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-icons": "latest"
+  }
+}
