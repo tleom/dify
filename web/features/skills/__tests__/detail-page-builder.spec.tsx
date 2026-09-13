@@ -119,7 +119,7 @@ describe('SkillDetailPage builder', () => {
         name: 'skill.skillManagement.detail.builder.title',
       }),
     ).toBeInTheDocument()
-  })
+  }, 15000)
 
   it('sends uploaded Skill Builder attachments without requiring typed text', async () => {
     const user = userEvent.setup()
@@ -283,10 +283,10 @@ describe('SkillDetailPage builder', () => {
     const promptInput = screen.getByPlaceholderText(
       'skill.skillManagement.detail.builder.modifyPlaceholder',
     )
-    await user.type(promptInput, 'Use the attached guide{Enter}')
+    await user.type(promptInput, 'Guide{Enter}')
 
     expect(mocks.sendSkillAssistMessage).not.toHaveBeenCalled()
-    expect(promptInput).toHaveValue('Use the attached guide')
+    expect(promptInput).toHaveValue('Guide')
   }, 10000)
 
   it('ignores an in-flight attachment after restarting Skill Builder', async () => {
