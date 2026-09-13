@@ -4,6 +4,8 @@
 
 ## 入口与身份
 
+此入口依赖 [公信签名身份接入](https://github.com/tleom/dify/pull/1)。部署前须先包含该变更并验证 gxzs 登录用户能通过 `/ai/workbench/**` 读取自己的会话，再应用本目录的独立网页移除配置。仅使用旧版 Dify console-session 鉴权的 API 不满足此部署前提。
+
 用户从 gxzs 的智能问答页面使用工作台。Vue 页面调用 gxzs `/ai/workbench/**`，gxzs 后端核对登录状态、租户与权限后签署请求，Dify 根据签名身份访问当前用户的聊天和文件。
 
 独立网页已于 2026-09-13 卸载，源码保存在 [GitHub 归档仓库](https://github.com/tleom/webapp-conversation)。站内前端由 [gxzs-frontend](https://github.com/tleom/gxzs-frontend) 维护，身份代理由 [gxzs-backend](https://github.com/tleom/gxzs-backend) 维护。Dify 管理入口继续用于配置模型、Agent、工具与知识库。
