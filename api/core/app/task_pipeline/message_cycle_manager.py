@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from collections.abc import Callable
 from threading import Thread, Timer
 from typing import Union
 
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 from configs import dify_config
 from core.app.entities.app_invoke_entities import (
     AdvancedChatAppGenerateEntity,
+    AgentAppGenerateEntity,
     AgentChatAppGenerateEntity,
     ChatAppGenerateEntity,
     CompletionAppGenerateEntity,
@@ -53,9 +55,11 @@ class MessageCycleManager:
             AdvancedChatAppGenerateEntity,
         ],
         task_state: Union[EasyUITaskState, WorkflowTaskState],
+        on_conversation_name_generated: Callable[[str, str], None] | None = None,
     ):
         self._application_generate_entity = application_generate_entity
         self._task_state = task_state
+        self._on_conversation_name_generated = on_conversation_name_generated
         self._message_has_file: set[str] = set()
 
     def get_message_event_type(self, message_id: str) -> StreamEvent:
@@ -149,6 +153,12 @@ class MessageCycleManager:
                                 conversation_id,
                                 conversation.app_id,
                                 message_id=message_id,
+                                **(
+                                    {"plain_title": True}
+                                    if isinstance(self._application_generate_entity, AgentAppGenerateEntity)
+                                    and self._application_generate_entity.workbench_run_id
+                                    else {}
+                                ),
                             )
                             redis_client.setex(cache_key, 3600, name)
                         except Exception:
@@ -159,6 +169,11 @@ class MessageCycleManager:
                             name = query[:47] + "..." if len(query) > 50 else query
                     conversation.name = name
                     session.commit()
+                    if self._on_conversation_name_generated is not None:
+                        try:
+                            self._on_conversation_name_generated(app_model.tenant_id, conversation_id)
+                        except Exception:
+                            logger.exception("Unable to mirror generated workbench title")
 
     def handle_annotation_reply(self, event: QueueAnnotationReplyEvent, session: Session) -> MessageAnnotation | None:
         """

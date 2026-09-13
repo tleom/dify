@@ -235,8 +235,15 @@ class LLMGenerator:
         conversation_id: str | None = None,
         app_id: str | None = None,
         message_id: str | None = None,
+        *,
+        plain_title: bool = False,
     ):
         prompt = CONVERSATION_TITLE_PROMPT
+        if plain_title:
+            prompt = prompt.replace(
+                "- If the input is a direct question to the model, you may add an emoji at the end.",
+                "- Use plain text only. Do not include emoji, pictograms, or decorative symbols.",
+            )
 
         if len(query) > 2000:
             query = query[:300] + "...[TRUNCATED]..." + query[-300:]
@@ -251,10 +258,12 @@ class LLMGenerator:
             model_type=ModelType.LLM,
         )
         prompts: list[PromptMessage] = [UserPromptMessage(content=prompt)]
+        from core.llm_generator.name_parameters import conversation_name_parameters
 
+        parameters = conversation_name_parameters(model_instance.get_model_schema().parameter_rules)
         with measure_time() as timer:
             response: LLMResult = model_instance.invoke_llm(
-                prompt_messages=list(prompts), model_parameters={"max_tokens": 500, "temperature": 1}, stream=False
+                prompt_messages=list(prompts), model_parameters=parameters, stream=False
             )
         answer = response.message.get_text_content()
         if not answer.strip():

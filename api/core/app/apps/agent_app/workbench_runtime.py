@@ -7,13 +7,19 @@ the Agent App runtime does not import Workbench orchestration services.
 from typing import Protocol
 
 from agenton.compositor import CompositorSessionSnapshot
-from dify_agent.protocol import CreateRunRequest, DeferredToolResultsPayload
+from dify_agent.protocol import ContextStatusRunEvent, CreateRunRequest, DeferredToolResultsPayload
 
 from clients.agent_backend import AgentBackendDeferredToolCallInternalEvent
 from models.agent_config_entities import AgentSoulConfig
 
 
 class AgentAppWorkbenchRuntime(Protocol):
+    def sync_native_title(self, tenant_id: str, conversation_id: str) -> None: ...
+
+    def record_context_status(
+        self, tenant_id: str, conversation_id: str, account_id: str, public_event: ContextStatusRunEvent
+    ) -> None: ...
+
     def resolve_run_config(self, run_id: str, tenant_id: str, account_id: str) -> AgentSoulConfig: ...
 
     def resolve_run_generation(self, run_id: str, tenant_id: str, account_id: str) -> str: ...

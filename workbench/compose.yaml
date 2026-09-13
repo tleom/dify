@@ -44,14 +44,6 @@ services:
       - /usr/bin/docker:/usr/local/bin/docker:ro
       - ${WORKBENCH_CONFIG_DIR}/manager-state:/state
     networks: [backend]
-  wb-web:
-    image: dify-workbench-web:1.17.1-20260911.2
-    container_name: wb-web
-    restart: unless-stopped
-    env_file: ${WORKBENCH_CONFIG_DIR}/frontend.env
-    ports: ['${WORKBENCH_BIND_IP:-127.0.0.1}:3100:3100']
-    networks: [backend]
-
 networks:
   backend:
     external: true

@@ -20,4 +20,6 @@ def test_environment_instructions_are_accepted_by_pydantic_ai_prompt_registratio
         for part in message.parts
         if isinstance(part, SystemPromptPart)
     ]
-    assert any("update_shared_environment" in prompt and "/workspace/shared" in prompt for prompt in prompts)
+    assert any(
+        "update_shared_environment" in prompt and "current conversation directory" in prompt for prompt in prompts
+    )

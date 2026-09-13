@@ -5,6 +5,7 @@ from pydantic import ValidationError
 from pydantic_ai.messages import FinalResultEvent
 
 import dify_agent.protocol as protocol_exports
+import dify_agent.protocol.schemas as protocol_schemas
 from agenton.compositor import CompositorSessionSnapshot
 from agenton.layers import ExitIntent
 from agenton_collections.layers.plain import PLAIN_PROMPT_LAYER_TYPE_ID, PromptLayerConfig
@@ -529,11 +530,11 @@ def test_run_succeeded_event_round_trips_complete_pricing_usage() -> None:
             session_snapshot=CompositorSessionSnapshot(layers=[]),
             usage=AgentRunUsage(
                 prompt_tokens=10,
-                prompt_unit_price=Decimal("5"),
+                prompt_unit_price=Decimal(5),
                 prompt_price_unit=Decimal("0.000001"),
                 prompt_price=Decimal("0.000050"),
                 completion_tokens=2,
-                completion_unit_price=Decimal("30"),
+                completion_unit_price=Decimal(30),
                 completion_price_unit=Decimal("0.000001"),
                 completion_price=Decimal("0.000060"),
                 total_tokens=12,
@@ -609,3 +610,10 @@ def test_layer_exit_signals_reject_extra_fields() -> None:
 def test_removed_non_terminal_payload_events_are_rejected(event_type: str) -> None:
     with pytest.raises(ValidationError):
         _ = RUN_EVENT_ADAPTER.validate_python({"run_id": "run-1", "type": event_type, "data": {}})
+
+
+def test_context_status_event_has_public_package_exports():
+    assert protocol_exports.ContextStatusData is protocol_schemas.ContextStatusData
+    assert protocol_exports.ContextStatusRunEvent is protocol_schemas.ContextStatusRunEvent
+    assert {"ContextStatusData", "ContextStatusRunEvent"} <= set(protocol_schemas.__all__)
+    assert {"ContextStatusData", "ContextStatusRunEvent"} <= set(protocol_exports.__all__)

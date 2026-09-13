@@ -11,6 +11,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  workbench-manager:
+    name: Workbench Manager Tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup UV and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: '3.12'
+
+      - name: Test workspace files and container migration
+        run: >-
+          uv run --no-project --with pytest==9.0.2 python -m pytest
+          workbench/tests/test_file_ops.py
+          workbench/tests/test_file_directories.py
+          workbench/tests/test_manager_migration.py -q
+
   sandbox-runtime-unit:
     name: Sandbox Runtime Unit Tests
     runs-on: ubuntu-24.04

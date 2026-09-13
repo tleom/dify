@@ -10,6 +10,19 @@ from core.db.session_factory import session_factory
 from models.workbench import WorkbenchChat, WorkbenchRun
 
 
+def sync_native_title(tenant_id, conversation_id):
+    from services.workbench.titles import sync_native_title as sync
+
+    if dify_config.WORKBENCH_ENABLED:
+        sync(tenant_id, conversation_id)
+
+
+def record_context_status(tenant_id, conversation_id, account_id, public_event):
+    from services.workbench.context_status import record_context_status as record
+
+    record(tenant_id, conversation_id, account_id, public_event)
+
+
 def resolve_run_config(run_id, tenant_id, account_id):
     from services.workbench.service import resolve_run_config as resolve
 

@@ -254,6 +254,7 @@ class AgentAppGenerator(MessageBasedAppGenerator):
             message=message,
             user=user,
             stream=streaming,
+            on_conversation_name_generated=self._workbench.sync_native_title if self._workbench is not None else None,
         )
         return AgentAppGenerateResponseConverter.convert(response=response, invoke_from=invoke_from)
 
@@ -388,6 +389,7 @@ class AgentAppGenerator(MessageBasedAppGenerator):
             message=message,
             user=user,
             stream=False,
+            on_conversation_name_generated=self._workbench.sync_native_title if self._workbench is not None else None,
         )
 
     @staticmethod

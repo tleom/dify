@@ -1,10 +1,11 @@
 """Route only API-owned workbench bindings to per-user sandbox containers."""
+
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import shlex
 import time
+from dataclasses import dataclass
 from uuid import UUID
 
 import httpx
@@ -12,8 +13,11 @@ import httpx
 from dify_agent.adapters.shell.shellctl import ShellctlCommands
 from dify_agent.runtime_backend.local import LocalExecutionBindingBackend, _parse_local_binding_ref
 from dify_agent.runtime_backend.protocols import (
-    ExecutionBindingAllocation, ExecutionBindingCreateSpec, ExecutionBindingDestroySpec,
-    RuntimeLayout, RuntimeLease,
+    ExecutionBindingAllocation,
+    ExecutionBindingCreateSpec,
+    ExecutionBindingDestroySpec,
+    RuntimeLayout,
+    RuntimeLease,
 )
 from dify_agent.runtime_backend.shellctl import ShellctlRuntimeLease, run_shellctl_control_command
 
@@ -43,8 +47,11 @@ class WorkbenchExecutionBindingBackend:
     async def _manager(self, workspace: str, operation: str, payload: dict | None = None):
         workspace = str(UUID(workspace))
         async with httpx.AsyncClient(timeout=90, trust_env=False) as client:
-            response = await client.post(f"{self.manager_endpoint.rstrip('/')}/sandboxes/{workspace}/{operation}",
-                headers={"Authorization": "Bearer " + self.manager_token}, json=payload or {})
+            response = await client.post(
+                f"{self.manager_endpoint.rstrip('/')}/sandboxes/{workspace}/{operation}",
+                headers={"Authorization": "Bearer " + self.manager_token},
+                json=payload or {},
+            )
             response.raise_for_status()
             return response.json()
 
@@ -76,14 +83,16 @@ class WorkbenchExecutionBindingBackend:
         allocation = await backend.create_binding(spec)
         control = backend._control_lease(allocation.binding_ref)
         try:
-            result = await run_shellctl_control_command(control.commands,
-                "mkdir -p /workspace/shared /workspace/conversations/" + shlex.quote(spec.binding_id))
+            result = await run_shellctl_control_command(
+                control.commands, "mkdir -p /workspace/conversations/" + shlex.quote(spec.binding_id)
+            )
             if result.exit_code:
                 raise RuntimeError("Failed to create conversation work directory")
         finally:
             await control.close()
-        return ExecutionBindingAllocation(binding_ref="wb:" + allocation.binding_ref,
-                                          workspace_ref=allocation.workspace_ref)
+        return ExecutionBindingAllocation(
+            binding_ref="wb:" + allocation.binding_ref, workspace_ref=allocation.workspace_ref
+        )
 
     async def acquire(self, binding_ref: str) -> RuntimeLease:
         if not binding_ref.startswith("wb:"):
@@ -92,18 +101,39 @@ class WorkbenchExecutionBindingBackend:
         binding, workspace = _parse_local_binding_ref(raw_ref)
         backend = await self._backend(workspace)
         lease = await backend.acquire(raw_ref)
-        lease.layout = RuntimeLayout(home_dir=lease.layout.home_dir, workspace_dir="/workspace/conversations/" + binding)
-        # Both shared and per-conversation directories belong to the same user container.
-        lease.commands = ShellctlCommands(client=lease.client, home_dir=lease.layout.home_dir,
-            workspace_dir="/workspace", default_cwd=lease.layout.workspace_dir,
+        lease.layout = RuntimeLayout(
+            home_dir=lease.layout.home_dir, workspace_dir="/workspace/conversations/" + binding
+        )
+        # Restrict every shell process to the current conversation, including absolute paths.
+        control = backend._control_lease(raw_ref)
+        temporary = lease.layout.home_dir + "/tmp"
+        try:
+            result = await run_shellctl_control_command(
+                control.commands, "mkdir -p " + shlex.quote(temporary) + " " + shlex.quote(lease.layout.workspace_dir)
+            )
+            if result.exit_code:
+                raise RuntimeError("Failed to prepare the conversation directory")
+        finally:
+            await control.close()
+        lease.commands = ShellctlCommands(
+            client=lease.client,
+            home_dir=lease.layout.home_dir,
+            workspace_dir=lease.layout.workspace_dir,
+            default_cwd=lease.layout.workspace_dir,
             default_env={
-                "SHELLCTL_LANDLOCK_RW_PATHS": "/workspace,/tmp",
-                "SHELLCTL_LANDLOCK_RO_PATHS": "/usr,/bin,/sbin,/lib,/lib64,/etc,/proc,/opt/dify-agent-tools,/opt/homebrew,/snap,/opt/user-env",
-            })
+                "SHELLCTL_LANDLOCK_RW_PATHS": lease.layout.workspace_dir + "," + temporary,
+                "TMPDIR": temporary,
+                "TMP": temporary,
+                "TEMP": temporary,
+                "SHELLCTL_LANDLOCK_RO_PATHS": "/usr,/bin,/sbin,/lib,/lib64,/etc,/proc,/opt/dify-agent-tools,/opt/homebrew,/snap,/opt/user-env,/opt/office,/opt/google/chrome",
+            },
+        )
+
         async def pulse():
             while True:
                 await asyncio.sleep(30)
                 await self._manager(workspace, "touch")
+
         return WorkbenchRuntimeLease(lease, asyncio.create_task(pulse()), workspace, binding)
 
     async def release(self, lease: RuntimeLease) -> None:
@@ -127,5 +157,5 @@ class WorkbenchExecutionBindingBackend:
         binding, workspace = _parse_local_binding_ref(spec.binding_ref[3:])
         if spec.workspace_ref is not None and spec.workspace_ref != workspace:
             raise ValueError("Workspace ref does not match binding")
-        # Account-level shared files and dependencies outlive every conversation.
+        # Shared read-only dependencies outlive every conversation.
         await self._manager(workspace, "clean-binding", {"binding_id": binding})

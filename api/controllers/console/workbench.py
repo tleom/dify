@@ -14,13 +14,14 @@ from werkzeug.exceptions import Conflict, NotFound
 
 from controllers.common.schema import query_params_from_model, register_response_schema_models, register_schema_models
 from controllers.console import console_ns
+from controllers.console.workbench_auth import workbench_login_required
 from controllers.console.wraps import account_initialization_required, setup_required
 from core.app.entities.app_invoke_entities import InvokeFrom
 from core.db.session_factory import session_factory
 from extensions.ext_redis import redis_client
 from fields.base import ResponseModel
 from libs.helper import dump_response
-from libs.login import current_account_with_tenant, login_required
+from libs.login import current_account_with_tenant
 from models.model import AppMode
 from models.workbench import WorkbenchRun
 from services.app_task_service import AppTaskService
@@ -33,6 +34,24 @@ class WorkbenchConfigPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     version: int = Field(ge=1)
     selection: Selection
+
+
+class WorkbenchIdentityUserResponse(ResponseModel):
+    id: str
+    name: str
+    email: str
+
+
+class WorkbenchIdentityWorkspaceResponse(ResponseModel):
+    id: str
+    name: str
+    current: bool
+
+
+class WorkbenchIdentityResponse(ResponseModel):
+    user: WorkbenchIdentityUserResponse
+    workspaces: list[WorkbenchIdentityWorkspaceResponse]
+    workspaceId: str
 
 
 class WorkbenchChatPayload(BaseModel):
@@ -61,6 +80,7 @@ class WorkbenchRunPayload(BaseModel):
     inputs: dict = Field(default_factory=dict)
     resource_mentions: ResourceMentions = Field(default_factory=ResourceMentions)
     parent_message_id: str | None = Field(default=None, pattern=r"^[0-9a-fA-F-]{36}$")
+    parent_run_id: str | None = Field(default=None, pattern=r"^[0-9a-fA-F-]{36}$")
     files: list[WorkbenchSandboxFilePayload] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
@@ -114,6 +134,7 @@ class WorkbenchModelResponse(ResponseModel):
 
 
 class WorkbenchCatalogResponse(ResponseModel):
+    default_selection: Selection
     models: list[WorkbenchModelResponse]
     tools: list[WorkbenchResourceResponse]
     skills: list[WorkbenchResourceResponse]
@@ -158,6 +179,7 @@ class WorkbenchRunResponse(ResponseModel):
     ]
     error: str | None = None
     events: list[dict[str, Any]]
+    context_usage: dict[str, Any] | None = None
     pending: dict[str, Any] | None = None
 
 
@@ -166,6 +188,7 @@ class WorkbenchRunEnvelopeResponse(ResponseModel):
 
 
 class WorkbenchChatSummaryResponse(ResponseModel):
+    file_directory: str | None = None
     id: str
     title: str
     version: int
@@ -250,7 +273,7 @@ class WorkbenchModelQuery(BaseModel):
 
 
 class WorkbenchFileQuery(BaseModel):
-    path: str = Field(default="shared", min_length=1, max_length=1024)
+    path: str = Field(default="conversations", min_length=1, max_length=1024)
 
 
 class WorkbenchEventsQuery(BaseModel):
@@ -269,6 +292,7 @@ register_schema_models(
 )
 register_response_schema_models(
     console_ns,
+    WorkbenchIdentityResponse,
     WorkbenchCatalogEnvelopeResponse,
     WorkbenchRunEnvelopeResponse,
     WorkbenchChatEnvelopeResponse,
@@ -284,13 +308,32 @@ register_response_schema_models(
 
 
 class WorkbenchResource(Resource):
-    method_decorators = [account_initialization_required, login_required, setup_required]
+    method_decorators = [account_initialization_required, workbench_login_required, setup_required]
 
     @staticmethod
     def owner() -> tuple[str, str]:
         account, tenant_id = current_account_with_tenant()
         service.authorize(tenant_id, account.id)
         return tenant_id, account.id
+
+
+@console_ns.route("/workbench/identity")
+class Identity(WorkbenchResource):
+    @console_ns.response(200, "Current workbench identity", console_ns.models[WorkbenchIdentityResponse.__name__])
+    def get(self):
+        tenant_id, _ = self.owner()
+        account, _ = current_account_with_tenant()
+        tenant = account.current_tenant
+        if tenant is None:
+            raise NotFound("工作台租户已不可用")
+        return dump_response(
+            WorkbenchIdentityResponse,
+            {
+                "user": {"id": account.id, "name": account.name, "email": account.email},
+                "workspaces": [{"id": tenant_id, "name": tenant.name, "current": True}],
+                "workspaceId": tenant_id,
+            },
+        )
 
 
 @console_ns.route("/workbench/catalog")
@@ -351,6 +394,7 @@ class Chat(WorkbenchResource):
         return "", 204
 
 
+@console_ns.route("/workbench/chats/draft/audio", defaults={"chat_id": None})
 @console_ns.route("/workbench/chats/<uuid:chat_id>/audio")
 class ChatAudio(WorkbenchResource):
     @console_ns.doc(
@@ -364,7 +408,7 @@ class ChatAudio(WorkbenchResource):
 
         return dump_response(
             WorkbenchTranscriptEnvelopeResponse,
-            {"data": transcribe(*self.owner(), str(chat_id), request.files.get("file"))},
+            {"data": transcribe(*self.owner(), str(chat_id) if chat_id else None, request.files.get("file"))},
         )
 
 

@@ -60,13 +60,25 @@ def ensure(key):
     name, token = identity(key)
     with lock(key):
         info = docker("inspect", name, check=False)
+        if not info.returncode:
+            existing = json.loads(info.stdout)[0]
+            if existing["Config"]["Image"] != IMAGE and not existing["State"]["Running"]:
+                # Keep the stopped container as a rollback reference and reuse all owner volumes.
+                docker("rename", name, name + "-previous-" + existing["Id"][:12])
+                info = docker("inspect", name, check=False)
         if info.returncode:
             for suffix in ("home", "files", "env"):
                 docker("volume", "create", "--label", "workbench=" + PREFIX, name + "-" + suffix)
             docker("run", "--rm", "--user", "0", "--network", "none", "--entrypoint", "python",
                    "-v", name + "-home:/home/dify", "-v", name + "-files:/workspace", "-v", name + "-env:/opt/user-env",
-                   IMAGE, "-c", "import os; paths=['/home/dify','/workspace','/workspace/shared','/workspace/conversations','/workspace/" + key + "','/opt/user-env']; "
+                   IMAGE, "-c", "import os; paths=['/home/dify','/workspace','/workspace/conversations','/workspace/" + key + "','/opt/user-env']; "
                    "[(os.makedirs(p,exist_ok=True),os.chown(p,1000,1000)) for p in paths]")
+            # Existing personal venvs gain the immutable office fallback without replacing their packages.
+            docker("run", "--rm", "--user", "1000", "--network", "none", "--entrypoint", "/usr/local/bin/python",
+                   "-v", name + "-env:/opt/user-env", IMAGE, "-c",
+                   "from pathlib import Path; site=Path('/opt/user-env/current/python/lib/python3.12/site-packages'); "
+                   "base=Path('/opt/office/python/lib/python3.12/site-packages'); "
+                   "(site/'workbench_office.pth').write_text(str(base)+'\\n') if site.exists() and base.exists() else None")
             docker("create", "--name", name, "--label", "workbench=" + PREFIX, "--network", NETWORK,
                    "--cpus", os.environ.get("WORKBENCH_SANDBOX_CPUS", "2"),
                    "--memory", os.environ.get("WORKBENCH_SANDBOX_MEMORY", "4g"), "--pids-limit", "512",
@@ -74,8 +86,8 @@ def ensure(key):
                    "-v", name + "-home:/home/dify", "-v", name + "-files:/workspace",
                    "-v", name + "-env:/opt/user-env:ro",
                    "-e", "SHELLCTL_AUTH_TOKEN=" + token,
-                   "-e", "PATH=/opt/user-env/current/python/bin:/opt/user-env/current/node/node_modules/.bin:/usr/local/bin:/usr/bin:/bin",
-                   "-e", "NODE_PATH=/opt/user-env/current/node/node_modules", IMAGE)
+                   "-e", "PATH=/opt/user-env/current/python/bin:/opt/office/python/bin:/opt/user-env/current/node/node_modules/.bin:/opt/office/node/node_modules/.bin:/usr/local/bin:/usr/bin:/bin",
+                   "-e", "NODE_PATH=/opt/user-env/current/node/node_modules:/opt/office/node/node_modules", IMAGE)
         docker("start", name)
         touch(key)
         return {"endpoint": "http://" + name + ":5004", "auth_token": token}
@@ -152,7 +164,9 @@ def operation(key, action, payload):
             except subprocess.TimeoutExpired:
                 # The installer may still be running. Keep the gate closed until its outcome is known.
                 return {"status": "installing"}
-            except Exception:
+            except Exception as error:
+                # Installer stderr contains package diagnostics, never sandbox credentials.
+                record.with_suffix(".error.log").write_text(str(error)[-12000:])
                 output = {"status": "failed", "message": "安装失败，原共享环境已保留。"}
             save_operation(record, output)
             return output

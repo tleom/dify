@@ -1,20 +1,24 @@
 """Executed as the sandbox user. All traversal uses directory descriptors, never symlinks."""
 import base64
 import hashlib
+import io
 import json
 import os
 import stat
 import sys
 import uuid
+import zipfile
 
 MAX_BYTES = 20 * 1024 * 1024
+MAX_TREE_BYTES = 50 * 1024 * 1024
+MAX_TREE_ITEMS = 10000
 
 
 def parent_fd(root, path):
     parts = path.split("/")
     if not path or any(part in ("", ".", "..") or "\\" in part or "\x00" in part for part in parts):
         raise ValueError("Invalid file path")
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fd = os.dup(root) if isinstance(root, int) else os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         for part in parts[:-1]:
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
@@ -45,13 +49,81 @@ def version(data):
     return hashlib.sha256(data).hexdigest() if data is not None else None
 
 
+def tree_entries(fd, prefix="", result=None):
+    """Fingerprint metadata without following links or reading every file on listing."""
+    result = [] if result is None else result
+    for name in sorted(os.listdir(fd)):
+        if len(result) >= MAX_TREE_ITEMS:
+            raise ValueError("Folder contains too many entries")
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        path = prefix + name
+        result.append((path, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ino))
+        if stat.S_ISDIR(info.st_mode):
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            try:
+                tree_entries(child, path + "/", result)
+            finally:
+                os.close(child)
+    return result
+
+
+def tree_version(fd):
+    return version(json.dumps(tree_entries(fd), separators=(",", ":")).encode())
+
+
+def archive(fd):
+    entries = tree_entries(fd)
+    total = sum(size for _, mode, size, _, _ in entries if stat.S_ISREG(mode))
+    if total > MAX_TREE_BYTES:
+        raise ValueError("Folder download exceeds 50 MiB; download its files separately")
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
+        for path, mode, _, _, _ in entries:
+            if stat.S_ISDIR(mode):
+                zipped.writestr(path + "/", b"")
+            elif stat.S_ISREG(mode):
+                parent, name = parent_fd(fd, path)
+                try:
+                    zipped.writestr(path, read_file(parent, name))
+                finally:
+                    os.close(parent)
+            else:
+                raise ValueError("Folder contains an unsupported link or special file")
+    return output.getvalue()
+
+
+def remove_contents(fd):
+    for name in os.listdir(fd):
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if stat.S_ISDIR(info.st_mode):
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            try:
+                remove_contents(child)
+            finally:
+                os.close(child)
+            os.rmdir(name, dir_fd=fd)
+        else:
+            os.unlink(name, dir_fd=fd)
+
+
 def operate(payload, root="/workspace"):
     operation = payload["operation"]
-    path = payload.get("path", "shared")
-    if path.split("/")[0] not in ("shared", "conversations"):
-        raise ValueError("Path must be in shared or conversations")
+    path = payload.get("path", "conversations")
+    if path.split("/")[0] != "conversations":
+        raise ValueError("Path must be in conversations")
     fd, name = parent_fd(root, path)
     try:
+        if operation == "mkdir":
+            if len(path.split("/")) != 2 or not path.startswith("conversations/"):
+                raise ValueError("Only a conversation folder can be created")
+            uuid.UUID(name)
+            try:
+                os.mkdir(name, mode=0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(child)
+            return {"path": path}
         if operation == "list":
             child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             try:
@@ -60,11 +132,43 @@ def operate(payload, root="/workspace"):
                     info = os.stat(entry, dir_fd=child, follow_symlinks=False)
                     kind = "directory" if stat.S_ISDIR(info.st_mode) else "file" if stat.S_ISREG(info.st_mode) else "blocked"
                     data = read_file(child, entry) if kind == "file" and info.st_size <= MAX_BYTES else None
+                    fingerprint = version(data)
+                    if kind == "directory":
+                        nested = os.open(entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=child)
+                        try:
+                            fingerprint = tree_version(nested)
+                        finally:
+                            os.close(nested)
                     result.append({"name": entry, "path": path + "/" + entry, "kind": kind,
-                                   "size": info.st_size, "modified": info.st_mtime, "version": version(data)})
+                                   "size": info.st_size, "modified": info.st_mtime, "version": fingerprint})
                 return {"path": path, "entries": result}
             finally:
                 os.close(child)
+        try:
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            info = None
+        if info is not None and stat.S_ISDIR(info.st_mode):
+            if len(path.split("/")) < 2:
+                raise ValueError("The conversation root cannot be downloaded or deleted")
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            try:
+                fingerprint = tree_version(child)
+                if operation == "get":
+                    data = archive(child)
+                    if fingerprint != tree_version(child):
+                        return {"conflict": True}
+                    return {"data": base64.b64encode(data).decode(), "version": fingerprint,
+                            "kind": "directory", "name": name + ".zip"}
+                if operation != "delete":
+                    raise ValueError("A folder cannot be overwritten by an uploaded file")
+                if payload.get("version") != fingerprint:
+                    return {"conflict": True}
+                remove_contents(child)
+            finally:
+                os.close(child)
+            os.rmdir(name, dir_fd=fd)
+            return {"deleted": True}
         old = read_file(fd, name)
         if operation == "get":
             if old is None:

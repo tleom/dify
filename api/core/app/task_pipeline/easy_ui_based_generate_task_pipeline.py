@@ -1,7 +1,7 @@
 import json
 import logging
 import time
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from threading import Thread
 from typing import Any, cast
 
@@ -84,6 +84,7 @@ class EasyUIBasedGenerateTaskPipeline(BasedGenerateTaskPipeline[EasyUIAppGenerat
         conversation: Conversation,
         message: Message,
         stream: bool,
+        on_conversation_name_generated: Callable[[str, str], None] | None = None,
     ):
         super().__init__(
             application_generate_entity=application_generate_entity,
@@ -111,6 +112,7 @@ class EasyUIBasedGenerateTaskPipeline(BasedGenerateTaskPipeline[EasyUIAppGenerat
         self._message_cycle_manager = MessageCycleManager(
             application_generate_entity=application_generate_entity,
             task_state=self._task_state,
+            on_conversation_name_generated=on_conversation_name_generated,
         )
 
         self._conversation_name_generate_thread: Thread | None = None

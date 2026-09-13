@@ -1028,6 +1028,16 @@ class AgentAppRunner:
                         message_id=message_id,
                     )
                     raise GenerateTaskStoppedError()
+                if public_event.type == "context_status":
+                    flush_pending_agent_message_text()
+                    if self._workbench is not None:
+                        self._workbench.record_context_status(
+                            dify_context.tenant_id,
+                            session_scope.conversation_id,
+                            dify_context.user_id,
+                            public_event,
+                        )
+                    continue
                 for internal_event in self._event_adapter.adapt(public_event):
                     if queue_manager.is_stopped():
                         flush_pending_agent_message_text()
