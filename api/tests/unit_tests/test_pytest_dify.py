@@ -2,6 +2,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tests.pytest_dify import (
     DEFAULT_LOG_FORMAT,
     DockerComposeStack,
@@ -100,6 +102,27 @@ def test_stack_up_uses_waiting_compose_command(monkeypatch, tmp_path: Path):
             "redis",
         ]
     ]
+
+
+def test_stack_up_reports_compose_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    def fail_start(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args, returncode=1, stdout="Pulling vector store\n", stderr="image not found\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fail_start)
+    stack = build_vdb_stack(tmp_path, ["chroma"])
+
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        stack.up()
+
+    assert error.value.returncode == 1
+    captured = capsys.readouterr()
+    assert "Pulling vector store" in captured.err
+    assert "image not found" in captured.err
+    assert error.value.stderr == "image not found\n"
 
 
 def test_builders_use_expected_compose_files(tmp_path: Path):
