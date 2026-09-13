@@ -139,6 +139,8 @@ jobs:
             sandbox-runtime:
               - 'dify-agent-runtime/**'
               - '.github/workflows/sandbox-runtime-tests.yml'
+              - 'workbench/sandbox-manager/**'
+              - 'workbench/tests/**'
             dify-agent:
               - 'dify-agent/**'
               - '.github/workflows/dify-agent-tests.yml'

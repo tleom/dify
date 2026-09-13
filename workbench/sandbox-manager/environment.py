@@ -9,6 +9,7 @@ import sys
 import uuid
 
 ROOT = Path("/opt/user-env")
+BASE_SITE = Path("/opt/office/python/lib/python3.12/site-packages")
 PACKAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*(?:\[[A-Za-z0-9_,.-]+\])?(?:(?:==|~=|>=|<=|>|<)[A-Za-z0-9_.+*-]+)?$")
 NODE_PACKAGE = re.compile(r"^(?:@[a-z0-9_.-]+/)?[a-z0-9][a-z0-9_.-]*(?:@[a-zA-Z0-9_.^~*-]+)?$")
 
@@ -34,8 +35,11 @@ def install(payload):
     try:
         run([sys.executable, "-m", "venv", str(stage / "python")])
         py = str(stage / "python/bin/python")
+        if BASE_SITE.exists():
+            site = stage / "python/lib/python3.12/site-packages"
+            (site / "workbench_office.pth").write_text(str(BASE_SITE) + "\n")
         if current.exists():
-            frozen = subprocess.check_output([str(current / "python/bin/python"), "-m", "pip", "freeze"], text=True)
+            frozen = subprocess.check_output([str(current / "python/bin/python"), "-m", "pip", "freeze", "--local"], text=True)
             if frozen.strip():
                 requirements = stage / "requirements.txt"
                 requirements.write_text(frozen)
