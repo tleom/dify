@@ -62,9 +62,9 @@ def force_stop(run_id, account_id):
         run = session.get(WorkbenchRun, run_id)
         if run is None or run.account_id != account_id:
             return
-        ticket = run.backend_run_id or str(uuid5(
-            NAMESPACE_URL, f"dify-workbench-run:{run.id}:{json.loads(run.payload).get('attempt', 0)}"
-        ))
+        ticket = run.backend_run_id or str(
+            uuid5(NAMESPACE_URL, f"dify-workbench-run:{run.id}:{json.loads(run.payload).get('attempt', 0)}")
+        )
         owner = f"{run.tenant_id}:{account_id}"
     try:
         if fence_remote(ticket):
@@ -157,10 +157,12 @@ def execute(owner, run_id):
     with session_factory.create_session() as session:
         current = session.get(WorkbenchRun, run_id)
         if current is not None and current.status == "queued":
-            previous_ids = session.scalars(select(WorkbenchRun.id).where(
-                WorkbenchRun.chat_id == current.chat_id,
-                WorkbenchRun.created_at < current.created_at,
-            ))
+            previous_ids = session.scalars(
+                select(WorkbenchRun.id).where(
+                    WorkbenchRun.chat_id == current.chat_id,
+                    WorkbenchRun.created_at < current.created_at,
+                )
+            )
             if any(redis_client.zscore(scheduler.PREFIX + "active", prior) is not None for prior in previous_ids):
                 if scheduler.heartbeat(owner, run_id):
                     execute.apply_async(args=[owner, run_id], countdown=1)
@@ -229,7 +231,8 @@ def execute(owner, run_id):
                         "workbench_run_id": run_id,
                         **(
                             {"parent_message_id": payload["parent_message_id"]}
-                            if "parent_message_id" in payload else {}
+                            if "parent_message_id" in payload
+                            else {}
                         ),
                     },
                     invoke_from=InvokeFrom.EXPLORE,
@@ -318,18 +321,19 @@ def update_environment(tenant_id, account_id):
                 .with_for_update()
                 .limit(1)
             )
-            if run is None:
-                try:
-                    if not maintenance.cancelled_installations_finished(session, tenant_id, account_id, manager):
-                        return
-                except Exception:
-                    logger.warning("Cancelled installer cleanup will be retried: %s", owner, exc_info=True)
+            if run is not None:
+                run_id, previous_status, payload = run.id, run.status, json.loads(run.payload)
+                run.status = "environment_installing"
+        if run is None:
+            try:
+                if not maintenance.cancelled_installations_finished(tenant_id, account_id, manager):
                     return
-                redis_client.delete(maintenance_key)
-                dispatch.delay()
+            except Exception:
+                logger.warning("Cancelled installer cleanup will be retried: %s", owner, exc_info=True)
                 return
-            run_id, previous_status, payload = run.id, run.status, json.loads(run.payload)
-            run.status = "environment_installing"
+            redis_client.delete(maintenance_key)
+            dispatch.delay()
+            return
         result = None
         try:
             if previous_status != "environment_installing":

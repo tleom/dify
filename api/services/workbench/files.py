@@ -104,7 +104,9 @@ def operate(tenant_id, account_id, operation, path, *, chat_id=None, **kwargs):
             select(WorkbenchRun.id)
             .where(
                 WorkbenchRun.chat_id == chat.id,
-                WorkbenchRun.status.in_(["queued", "running", "stopping", "environment_installing"]),
+                WorkbenchRun.status.in_(
+                    ["queued", "running", "stopping", "waiting_input", "environment_update", "environment_installing"]
+                ),
             )
             .limit(1)
         ):
