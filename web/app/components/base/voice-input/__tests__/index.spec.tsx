@@ -287,7 +287,8 @@ describe('VoiceInput', () => {
   // The ten-minute limit is a local timer transition, not a render-time side effect.
   describe('Duration limit', () => {
     beforeEach(() => {
-      vi.useFakeTimers()
+      // Preserve the animation-frame mock while advancing the recording interval.
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
     })
 
     afterEach(() => {
