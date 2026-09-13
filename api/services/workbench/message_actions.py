@@ -74,6 +74,8 @@ def feedback(tenant_id, account_id, run_id, rating):
             raise Conflict("这条结果还没有可评价的消息")
         app_model = session.get(App, chat.app_id)
         user = session.get(Account, account_id)
+        if app_model is None or app_model.tenant_id != tenant_id or user is None:
+            raise NotFound()
         message = MessageService.get_message(app_model=app_model, user=user, message_id=ids[-1], session=session)
         if message.conversation_id != chat.conversation_id or app_model.tenant_id != tenant_id:
             raise NotFound()

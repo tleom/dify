@@ -12,7 +12,8 @@ import {
 
 const mocks = getMocks()
 
-describe('SkillDetailPage autosave', () => {
+// Full editor interactions include real debounce waits on shared CI runners.
+describe('SkillDetailPage autosave', { timeout: 15000 }, () => {
   beforeEach(resetDetailPageFixture)
 
   it('sends only one autosave request while the first save is pending', async () => {

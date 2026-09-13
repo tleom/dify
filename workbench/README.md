@@ -1,6 +1,6 @@
 # Dify Agent 工作台
 
-当前维护基线为 Dify `1.17.1`（`8387590ace4a094de812b7847fc6a4c3a27cd52b`）。升级合并、数据库迁移和后续同步方式见 [1.17.1 升级记录](UPGRADE-1.17.1.md)。定制分支为 `workbench/main`；独立前端位于 [tleom/webapp-conversation](https://github.com/tleom/webapp-conversation/tree/workbench/main)。下文保留首次部署的实现说明和历史记录。
+当前维护基线为 Dify `1.17.1`（`8387590ace4a094de812b7847fc6a4c3a27cd52b`）。升级合并、数据库迁移和后续同步方式见 [1.17.1 升级记录](UPGRADE-1.17.1.md)。定制分支为 `main`；独立前端位于 [tleom/webapp-conversation](https://github.com/tleom/webapp-conversation/tree/workbench/main)。下文保留首次部署的实现说明和历史记录。
 
 2026-09-11 并发、会话菜单、上传与语音功能更新见 [最新更新记录](CAPACITY-20260911.md)。
 
@@ -40,21 +40,21 @@
 
 关键配置：
 
-| 配置 | 说明 |
-| --- | --- |
-| `WORKBENCH_ENABLED` | 默认关闭，API 与 Celery 服务一致配置 |
-| `WORKBENCH_AGENT_TEMPLATES` | JSON：工作区 ID → 已发布的公共 Agent ID |
-| `WORKBENCH_ALLOWED_ACCOUNTS` | JSON：工作区 ID → 灰度账号列表；空列表或未配置表示该工作区全部成员 |
-| `WORKBENCH_TOOL_PARAMETERS` | JSON：工作区 → 工具 ID → 参数 → JSON Schema；默认不开放任何工具参数 |
-| `WORKBENCH_PER_USER_RUNS` / `WORKBENCH_GLOBAL_RUNS` | 每人同时 2 个任务、全局同时 20 个任务；工具调用不单独计数 |
-| `WORKBENCH_MAX_ACTIVE_USERS` | 默认同时运行任务的用户最多 10 人，超出人数或任务数自动排队 |
-| `WORKBENCH_SANDBOX_MANAGER_URL` / `WORKBENCH_SANDBOX_MANAGER_TOKEN` | 仅内部网络使用；API、Agent、Manager 的密钥一致 |
-| `DIFY_AGENT_WORKBENCH_MANAGER_ENDPOINT` / `DIFY_AGENT_WORKBENCH_MANAGER_TOKEN` | Agent 的管理服务配置 |
-| `WORKBENCH_RUNTIME_CONTAINER` | 固定为实际单进程执行器容器名，本次为 `wb-agent` |
-| `WORKBENCH_SANDBOX_CPUS` / `WORKBENCH_SANDBOX_MEMORY` | 默认 `2` / `4g` |
-| `DIFY_CONSOLE_API_URL` | 前端服务端访问地址，本次 `http://wb-api:5001/console/api` |
-| `WORKBENCH_PUBLIC_ORIGIN` | 浏览器访问的完整 Origin；正式入口使用 HTTPS |
-| `WORKBENCH_REDIS_URL` / `WORKBENCH_SESSION_KEY` | 前端会话 Redis 地址及 32 字节 Base64 加密密钥 |
+| 配置                                                                           | 说明                                                                |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| `WORKBENCH_ENABLED`                                                            | 默认关闭，API 与 Celery 服务一致配置                                |
+| `WORKBENCH_AGENT_TEMPLATES`                                                    | JSON：工作区 ID → 已发布的公共 Agent ID                             |
+| `WORKBENCH_ALLOWED_ACCOUNTS`                                                   | JSON：工作区 ID → 灰度账号列表；空列表或未配置表示该工作区全部成员  |
+| `WORKBENCH_TOOL_PARAMETERS`                                                    | JSON：工作区 → 工具 ID → 参数 → JSON Schema；默认不开放任何工具参数 |
+| `WORKBENCH_PER_USER_RUNS` / `WORKBENCH_GLOBAL_RUNS`                            | 每人同时 2 个任务、全局同时 20 个任务；工具调用不单独计数           |
+| `WORKBENCH_MAX_ACTIVE_USERS`                                                   | 默认同时运行任务的用户最多 10 人，超出人数或任务数自动排队          |
+| `WORKBENCH_SANDBOX_MANAGER_URL` / `WORKBENCH_SANDBOX_MANAGER_TOKEN`            | 仅内部网络使用；API、Agent、Manager 的密钥一致                      |
+| `DIFY_AGENT_WORKBENCH_MANAGER_ENDPOINT` / `DIFY_AGENT_WORKBENCH_MANAGER_TOKEN` | Agent 的管理服务配置                                                |
+| `WORKBENCH_RUNTIME_CONTAINER`                                                  | 固定为实际单进程执行器容器名，本次为 `wb-agent`                     |
+| `WORKBENCH_SANDBOX_CPUS` / `WORKBENCH_SANDBOX_MEMORY`                          | 默认 `2` / `4g`                                                     |
+| `DIFY_CONSOLE_API_URL`                                                         | 前端服务端访问地址，本次 `http://wb-api:5001/console/api`           |
+| `WORKBENCH_PUBLIC_ORIGIN`                                                      | 浏览器访问的完整 Origin；正式入口使用 HTTPS                         |
+| `WORKBENCH_REDIS_URL` / `WORKBENCH_SESSION_KEY`                                | 前端会话 Redis 地址及 32 字节 Base64 加密密钥                       |
 
 开发 PostgreSQL `max_connections=80`、`dify_app CONNECTION LIMIT 60`。配置预算为 API 8、执行 Worker 32、控制 Worker 4、Beat 2、当前 Plugin 10，总计 56；不得按进程扩容后仍沿用这份预算。五用户验收采样峰值为 38。后续新建 Plugin 配置可收紧至 6，总预算 52。
 

@@ -15,7 +15,8 @@ import {
 
 const mocks = getMocks()
 
-describe('SkillDetailPage publishing', () => {
+// Full editor interactions include real debounce waits on shared CI runners.
+describe('SkillDetailPage publishing', { timeout: 15000 }, () => {
   beforeEach(resetDetailPageFixture)
 
   it('shows only the detailed backend error when publishing fails', async () => {

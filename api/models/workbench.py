@@ -10,7 +10,6 @@ from .types import StringUUID
 class WorkbenchChat(DefaultFieldsMixin, Base):
     __tablename__ = "workbench_chats"
     __table_args__ = (Index("wb_chat_owner", "tenant_id", "account_id"),)
-    id: Mapped[str] = mapped_column(StringUUID, primary_key=True)
     tenant_id: Mapped[str] = mapped_column(StringUUID)
     account_id: Mapped[str] = mapped_column(StringUUID)
     agent_id: Mapped[str] = mapped_column(StringUUID)
@@ -26,7 +25,6 @@ class WorkbenchChat(DefaultFieldsMixin, Base):
 class WorkbenchRevision(DefaultFieldsMixin, Base):
     __tablename__ = "workbench_revisions"
     __table_args__ = (UniqueConstraint("chat_id", "version", name="wb_revision_version"),)
-    id: Mapped[str] = mapped_column(StringUUID, primary_key=True)
     tenant_id: Mapped[str] = mapped_column(StringUUID)
     account_id: Mapped[str] = mapped_column(StringUUID)
     chat_id: Mapped[str] = mapped_column(StringUUID)
@@ -42,7 +40,6 @@ class WorkbenchRun(DefaultFieldsMixin, Base):
         UniqueConstraint("chat_id", "request_key", name="wb_run_idempotency"),
         Index("wb_run_state", "status"),
     )
-    id: Mapped[str] = mapped_column(StringUUID, primary_key=True)
     tenant_id: Mapped[str] = mapped_column(StringUUID)
     account_id: Mapped[str] = mapped_column(StringUUID)
     chat_id: Mapped[str] = mapped_column(StringUUID)

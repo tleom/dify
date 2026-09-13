@@ -7,7 +7,7 @@ from werkzeug.exceptions import BadRequest, NotFound
 from services.workbench import directories
 
 
-def test_folder_uses_existing_binding_and_new_chat_has_stable_folder():
+def test_folder_uses_existing_binding_and_new_chat_has_stable_folder() -> None:
     session = Mock()
     chat = SimpleNamespace(id="chat-id", conversation_id=None, app_id="app")
     assert directories.chat_directory(session, chat) == "conversations/chat-id"
@@ -21,7 +21,7 @@ def test_folder_uses_existing_binding_and_new_chat_has_stable_folder():
     }
 
 
-def test_directory_listing_filters_owner_and_deletion():
+def test_directory_listing_filters_owner_and_deletion() -> None:
     session = Mock()
     session.scalars.return_value = [SimpleNamespace(id="chat", conversation_id=None)]
     assert list(directories.owned_directories(session, "tenant", "account")) == ["conversations/chat"]
@@ -32,7 +32,7 @@ def test_directory_listing_filters_owner_and_deletion():
     }
 
 
-def test_attachment_cannot_reference_another_owned_conversation(monkeypatch):
+def test_attachment_cannot_reference_another_owned_conversation(monkeypatch: pytest.MonkeyPatch) -> None:
     chat = SimpleNamespace(id="chat-a")
     monkeypatch.setattr(directories, "owned_directories", lambda *_args: {"conversations/a": chat})
     assert directories.resolve_path(None, "tenant", "account", "conversations/a/file.txt", chat_id="chat-a") == (
@@ -55,11 +55,11 @@ def test_attachment_cannot_reference_another_owned_conversation(monkeypatch):
         "conversations/a/\\file",
     ],
 )
-def test_rejects_legacy_or_noncanonical_paths(path, monkeypatch):
+def test_rejects_legacy_or_noncanonical_paths(path: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(directories, "owned_directories", lambda *_args: {})
     with pytest.raises((BadRequest, NotFound)):
         directories.resolve_path(None, "tenant", "account", path)
 
 
-def test_title_only_affects_download_filename():
+def test_title_only_affects_download_filename() -> None:
     assert directories.archive_name("合同/审查:结果") == "合同审查结果.zip"

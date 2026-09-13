@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any, TypedDict
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -17,6 +18,7 @@ from models.provider_ids import ModelProviderID
 from models.workbench import WorkbenchChat, WorkbenchRevision, WorkbenchRun
 from services.agent.roster_service import AgentRosterService
 from services.model_provider_service import ModelProviderService
+from services.workbench.authorization import require_agent_run
 from services.workbench.catalog_labels import enrich_skill_labels, enrich_tool_labels
 from services.workbench.policy import (
     Selection,
@@ -25,6 +27,13 @@ from services.workbench.policy import (
     public_resources,
     template_resources,
 )
+
+
+class WorkbenchTemplate(TypedDict):
+    agent_id: str
+    app_id: str
+    snapshot_id: str
+    soul: dict[str, Any]
 
 
 def authorize(tenant_id: str, account_id: str):
@@ -44,7 +53,7 @@ def authorize(tenant_id: str, account_id: str):
             raise Forbidden()
 
 
-def template(tenant_id: str, account_id: str):
+def template(tenant_id: str, account_id: str) -> WorkbenchTemplate:
     authorize(tenant_id, account_id)
     agent_id = dify_config.WORKBENCH_AGENT_TEMPLATES.get(tenant_id)
     with session_factory.create_session() as session:
@@ -61,17 +70,11 @@ def template(tenant_id: str, account_id: str):
         if snapshot is None:
             raise Conflict("通用 Agent 发布版本不可用")
         app = AgentRosterService(session).get_agent_runtime_app_model(tenant_id=tenant_id, agent_id=agent.id)
-        from controllers.common.rbac import AgentId, RBACCheck, RBACPermission, enforce_rbac_checks
         from services.workbench.gxzs_identity import can_run_template
 
         if not can_run_template(session, tenant_id, account_id, agent.id):
-            enforce_rbac_checks(
-                tenant_id=tenant_id,
-                account_id=account_id,
-                checks=[RBACCheck(RBACPermission.AGENT_TEST_AND_RUN, AgentId())],
-                path_args={"agent_id": agent.id},
-            )
-        base = {
+            require_agent_run(tenant_id, account_id, agent.id)
+        base: WorkbenchTemplate = {
             "agent_id": agent.id,
             "app_id": app.id,
             "snapshot_id": snapshot.id,
@@ -88,7 +91,7 @@ def template(tenant_id: str, account_id: str):
     from services.skill_management_service import SkillManagementService
 
     names = {item["name"] for item in base["soul"].get("config_skills", [])}
-    for skill in SkillManagementService().list_runtime_agent_skills(tenant_id=tenant_id, agent_id=agent_id):
+    for skill in SkillManagementService().list_runtime_agent_skills(tenant_id=tenant_id, agent_id=base["agent_id"]):
         if skill["name"] not in names:
             base["soul"].setdefault("config_skills", []).append(
                 {key: value for key, value in skill.items() if key != "id"}
@@ -142,7 +145,7 @@ def catalog(tenant_id: str, account_id: str):
     }
 
 
-def compile_config(tenant_id: str, base: dict, selection: Selection):
+def compile_config(tenant_id: str, base: WorkbenchTemplate, selection: Selection):
     models = models_and_rules(tenant_id)
     rules = rules_for(tenant_id, models[selection.model]) if selection.model in models else {}
     effective = compile_selection(
@@ -180,6 +183,8 @@ def read_chat(tenant_id: str, account_id: str, chat_id: str):
                 WorkbenchRevision.chat_id == chat.id, WorkbenchRevision.version == chat.version
             )
         )
+        if revision is None:
+            raise Conflict("会话配置已不可用，请新建会话")
         runs = list(
             session.scalars(
                 select(WorkbenchRun)
@@ -293,7 +298,9 @@ def default_selection(tenant_id, account_id, base):
             model = base["soul"].get("model") or {}
             selection = Selection(
                 model=f"{model.get('model_provider')}::{model.get('model')}",
-                **{key: list(resources[key]) for key in resources},
+                tools=list(resources["tools"]),
+                skills=list(resources["skills"]),
+                knowledge=list(resources["knowledge"]),
             )
     from services.workbench.mentions import default_capabilities
 
@@ -358,7 +365,7 @@ def update_config(tenant_id, account_id, chat_id, version, selection):
     return read_chat(tenant_id, account_id, chat_id)
 
 
-def enqueue(tenant_id, account_id, chat_id, version, request_key, payload):
+def enqueue(tenant_id, account_id, chat_id, version, request_key, payload: dict[str, Any]):
     from services.workbench.mentions import default_capabilities, resolve_mentions
 
     base = template(tenant_id, account_id)
@@ -417,6 +424,8 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload):
         revision = session.scalar(
             select(WorkbenchRevision).where(WorkbenchRevision.chat_id == chat.id, WorkbenchRevision.version == version)
         )
+        if revision is None:
+            raise Conflict("会话配置已不可用，请新建会话")
         # The task's effective configuration is frozen independently of future template edits.
         from services.workbench.branches import resolve_parent
 

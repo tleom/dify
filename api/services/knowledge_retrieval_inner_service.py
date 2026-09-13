@@ -64,9 +64,9 @@ class InnerKnowledgeRetrievalService:
         self._validate_datasets(tenant_id=request.caller.tenant_id, dataset_ids=request.dataset_ids, session=session)
 
         rag = DatasetRetrieval()
-        if request.workbench_run_id:
-            from services.workbench.knowledge_events import retrieval_event
+        from services.workbench.knowledge_events import retrieval_event
 
+        if request.workbench_run_id:
             retrieval_event(request, "running")
         try:
             results = rag.knowledge_retrieval(session=session, request=self._to_rag_request(request))

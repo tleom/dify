@@ -4,7 +4,7 @@ from graphon.model_runtime.entities.model_entities import ParameterType
 
 
 def conversation_name_parameters(rules):
-    parameters = {"max_tokens": 500, "temperature": 0}
+    parameters: dict[str, int | str | bool] = {"max_tokens": 500, "temperature": 0}
     by_name = {rule.name: rule for rule in rules}
     for key in ("enable_thinking", "thinking"):
         rule = by_name.get(key)

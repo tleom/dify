@@ -341,14 +341,17 @@ class TestMessageCycleManagerOptimization:
         assert cycle_db.get(Conversation, "conv-1").name == ""
         assert cycle_db.get(App, "app-id") is None
 
+    @pytest.mark.parametrize("notify", [False, True])
     def test_generate_conversation_name_worker_uses_cached_name(
-        self, message_cycle_manager, cycle_db: Session, sqlite_engine: Engine
+        self, message_cycle_manager, cycle_db: Session, sqlite_engine: Engine, notify: bool
     ):
         """Use cached conversation name when present and avoid LLM call."""
         flask_app = Flask(__name__)
         cycle_db.add_all([_app(), _conversation()])
         cycle_db.commit()
 
+        callback = Mock()
+        message_cycle_manager._on_conversation_name_generated = callback if notify else None
         with (
             patch("core.app.task_pipeline.message_cycle_manager.redis_client") as mock_redis,
             patch("core.app.task_pipeline.message_cycle_manager.LLMGenerator") as mock_llm_generator,
@@ -364,6 +367,10 @@ class TestMessageCycleManagerOptimization:
         assert conversation.name == "cached-title"
         mock_llm_generator.generate_conversation_name.assert_not_called()
         mock_redis.setex.assert_not_called()
+        if notify:
+            callback.assert_called_once_with("tenant-1", "conv-1")
+        else:
+            callback.assert_not_called()
 
     def test_generate_conversation_name_worker_generates_and_caches_name(
         self, message_cycle_manager, cycle_db: Session, sqlite_engine: Engine

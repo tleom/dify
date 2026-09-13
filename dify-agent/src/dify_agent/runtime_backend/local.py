@@ -167,7 +167,7 @@ class LocalExecutionBindingBackend:
         finally:
             await _close_best_effort(lease, resource_ref=binding_ref)
 
-    async def acquire(self, binding_ref: str) -> RuntimeLease:
+    async def acquire(self, binding_ref: str) -> ShellctlRuntimeLease:
         lease = self._lease(binding_ref)
         try:
             result = await run_shellctl_control_command(

@@ -59,6 +59,7 @@ def resolve_account(claims: GxzsAssertion) -> Account:
                             AccountIntegrate.provider == PROVIDER, AccountIntegrate.open_id == open_id
                         )
                     )
+                    account: Account | None
                     if binding is None:
                         account = Account(
                             name=claims.name,

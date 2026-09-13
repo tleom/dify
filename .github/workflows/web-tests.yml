@@ -12,7 +12,7 @@ permissions:
 jobs:
   test:
     name: Web Tests (${{ matrix.shardIndex }}/${{ matrix.shardTotal }})
-    runs-on: depot-ubuntu-24.04-4
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -83,7 +83,7 @@ jobs:
     name: Merge Test Reports
     if: ${{ !cancelled() }}
     needs: [test]
-    runs-on: depot-ubuntu-24.04-4
+    runs-on: ubuntu-24.04
     env:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     defaults:

@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [depot-ubuntu-24.04, windows-latest, macos-latest]
+        os: [ubuntu-24.04, windows-latest, macos-latest]
     env:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     defaults:
@@ -43,14 +43,14 @@ jobs:
           bun-version: latest
 
       - name: Validate release manifest
-        if: matrix.os == 'depot-ubuntu-24.04'
+        if: matrix.os == 'ubuntu-24.04'
         run: node scripts/release-naming.mjs validate
 
       - name: CI pipeline (tree, coverage, build)
         run: pnpm run ci
 
       - name: Report coverage
-        if: ${{ env.CODECOV_TOKEN != '' && matrix.os == 'depot-ubuntu-24.04' }}
+        if: ${{ env.CODECOV_TOKEN != '' && matrix.os == 'ubuntu-24.04' }}
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           directory: cli/coverage
