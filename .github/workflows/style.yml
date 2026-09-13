@@ -45,7 +45,7 @@ jobs:
   python-style:
     name: Python Style
     if: ${{ !inputs.skip-checks && (!inputs.classification-succeeded || inputs.run-python-style || inputs.run-dify-agent-style) }}
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Verify changed-file classification
@@ -110,7 +110,7 @@ jobs:
   web-style:
     name: Web Style
     if: ${{ !inputs.skip-checks && (!inputs.classification-succeeded || inputs.run-web-style) }}
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: ./web
@@ -154,7 +154,7 @@ jobs:
   ts-common-style:
     name: TS Common
     if: ${{ !inputs.skip-checks && (!inputs.classification-succeeded || inputs.run-ts-common-style) }}
-    runs-on: depot-ubuntu-24.04-4
+    runs-on: ubuntu-24.04
     permissions:
       checks: write
       pull-requests: read
@@ -180,7 +180,7 @@ jobs:
   superlinter:
     name: SuperLinter
     if: ${{ !inputs.skip-checks && (!inputs.classification-succeeded || inputs.run-superlinter) }}
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Verify changed-file classification

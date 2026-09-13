@@ -2,6 +2,7 @@
 
 import base64
 import json
+from collections.abc import Iterator
 from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
@@ -310,7 +311,7 @@ class WorkbenchResource(Resource):
     method_decorators = [account_initialization_required, workbench_login_required, setup_required]
 
     @staticmethod
-    def owner():
+    def owner() -> tuple[str, str]:
         account, tenant_id = current_account_with_tenant()
         service.authorize(tenant_id, account.id)
         return tenant_id, account.id
@@ -322,11 +323,14 @@ class Identity(WorkbenchResource):
     def get(self):
         tenant_id, _ = self.owner()
         account, _ = current_account_with_tenant()
+        tenant = account.current_tenant
+        if tenant is None:
+            raise NotFound("工作台租户已不可用")
         return dump_response(
             WorkbenchIdentityResponse,
             {
                 "user": {"id": account.id, "name": account.name, "email": account.email},
-                "workspaces": [{"id": tenant_id, "name": account.current_tenant.name, "current": True}],
+                "workspaces": [{"id": tenant_id, "name": tenant.name, "current": True}],
                 "workspaceId": tenant_id,
             },
         )
@@ -584,6 +588,8 @@ class Stop(WorkbenchResource):
         redis_client.setex(scheduler.PREFIX + "stop:" + str(run_id), 86400, "1")
         with session_factory.get_session_maker().begin() as session:
             run = session.get(WorkbenchRun, str(run_id))
+            if run is None:
+                raise NotFound()
             if run.status in ("queued", "running", "waiting_input", "environment_update", "environment_installing"):
                 run.status = "cancelled"
         if task_id:
@@ -606,8 +612,7 @@ class Events(WorkbenchResource):
         )
         cursor = query.cursor
 
-        @stream_with_context
-        def generate():
+        def generate() -> Iterator[str]:
             nonlocal cursor
             while True:
                 items = redis_client.xread({scheduler.event_key(str(run_id)): cursor}, count=100, block=1000)
@@ -647,5 +652,8 @@ class Events(WorkbenchResource):
                 yield ": keepalive\n\n"
 
         return Response(
-            generate(), mimetype="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
+            # Flask accepts Iterator[str]; its AnyStr overload is not resolved by pyrefly.
+            stream_with_context(generate()),  # pyrefly: ignore[no-matching-overload]
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )

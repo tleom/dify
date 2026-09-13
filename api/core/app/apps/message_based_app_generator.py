@@ -56,6 +56,7 @@ class MessageBasedAppGenerator(BaseAppGenerator):
         message: Message,
         user: Union[Account, EndUser],
         stream: bool = False,
+        on_conversation_name_generated: Callable[[str, str], None] | None = None,
     ) -> Union[
         ChatbotAppBlockingResponse,
         CompletionAppBlockingResponse,
@@ -78,6 +79,7 @@ class MessageBasedAppGenerator(BaseAppGenerator):
             conversation=conversation,
             message=message,
             stream=stream,
+            on_conversation_name_generated=on_conversation_name_generated,
         )
 
         try:

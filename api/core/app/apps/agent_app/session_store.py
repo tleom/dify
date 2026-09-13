@@ -8,6 +8,7 @@ from agenton.compositor import CompositorSessionSnapshot
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from core.app.apps.agent_app.workbench_runtime import AgentAppWorkbenchRuntime
 from core.db.session_factory import session_factory
 from models.agent import (
     AgentConfigDraft,
@@ -40,8 +41,12 @@ class AgentAppSessionScope:
     @property
     def workspace_owner(self) -> WorkspaceOwnerScope:
         if self.workbench_account_id:
-            return WorkspaceOwnerScope(tenant_id=self.tenant_id, app_id=self.app_id,
-                owner_type=AgentWorkspaceOwnerType.WORKBENCH_USER, owner_id=self.workbench_account_id)
+            return WorkspaceOwnerScope(
+                tenant_id=self.tenant_id,
+                app_id=self.app_id,
+                owner_type=AgentWorkspaceOwnerType.WORKBENCH_USER,
+                owner_id=self.workbench_account_id,
+            )
         owner_type = (
             AgentWorkspaceOwnerType.BUILD_DRAFT if self.build_draft_id else AgentWorkspaceOwnerType.CONVERSATION
         )
@@ -67,9 +72,13 @@ class StoredAgentAppSession:
 class AgentAppWorkspaceStore:
     """Resolve Agent App sessions through a caller-owned Binding pointer."""
 
+    def __init__(self, *, workbench: AgentAppWorkbenchRuntime | None = None) -> None:
+        self._workbench = workbench
+
     def load_or_create(self, scope: AgentAppSessionScope) -> StoredAgentAppSession:
         if scope.workbench_account_id:
             from extensions.ext_redis import redis_client
+
             key = f"workbench:workspace:{scope.tenant_id}:{scope.workbench_account_id}"
             with redis_client.lock(key, timeout=90, blocking_timeout=60):
                 return self._load_or_create(scope)
@@ -83,13 +92,15 @@ class AgentAppWorkspaceStore:
                 if scope.workbench_account_id:
                     from models.workbench import WorkbenchChat
 
-                    binding_id = session.scalar(select(WorkbenchChat.id).where(
-                        WorkbenchChat.tenant_id == scope.tenant_id,
-                        WorkbenchChat.account_id == scope.workbench_account_id,
-                        WorkbenchChat.app_id == scope.app_id,
-                        WorkbenchChat.conversation_id == scope.conversation_id,
-                        WorkbenchChat.deleted == 0,
-                    ))
+                    binding_id = session.scalar(
+                        select(WorkbenchChat.id).where(
+                            WorkbenchChat.tenant_id == scope.tenant_id,
+                            WorkbenchChat.account_id == scope.workbench_account_id,
+                            WorkbenchChat.app_id == scope.app_id,
+                            WorkbenchChat.conversation_id == scope.conversation_id,
+                            WorkbenchChat.deleted == 0,
+                        )
+                    )
                     if binding_id is None:
                         raise AgentWorkspaceNotFoundError("Workbench chat is unavailable")
                 binding = AgentWorkspaceService.create_binding(
@@ -180,11 +191,10 @@ class AgentAppWorkspaceStore:
             pending_form_id=pending_form_id,
             pending_tool_call_id=pending_tool_call_id,
         )
-        if scope.workbench_run_id and scope.workbench_account_id:
-            from services.workbench.runtime import capture_run_history
-
-            capture_run_history(scope.tenant_id, scope.workbench_account_id, scope.conversation_id,
-                                scope.workbench_run_id, snapshot)
+        if scope.workbench_run_id and scope.workbench_account_id and self._workbench is not None:
+            self._workbench.capture_run_history(
+                scope.tenant_id, scope.workbench_account_id, scope.conversation_id, scope.workbench_run_id, snapshot
+            )
 
     @staticmethod
     def _stored(scope: AgentAppSessionScope, binding: AgentWorkspaceBinding) -> StoredAgentAppSession:

@@ -5,14 +5,17 @@ import hashlib
 import hmac
 import importlib.util
 import json
-from contextlib import nullcontext
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
-from flask import Flask, g, jsonify
+from flask import Flask, Response, g, jsonify
 from sqlalchemy import delete, func, select
+from sqlalchemy.orm import Session
 from werkzeug.exceptions import Forbidden, Unauthorized
 
 from models.account import Account, AccountIntegrate, AccountStatus, Tenant, TenantAccountJoin, TenantAccountRole
@@ -24,7 +27,7 @@ BODY = '{"query":"你好"}'.encode()
 TARGET = "/console/api/workbench/chats?limit=20"
 
 
-def claims(**changes):
+def claims(**changes: Any) -> GxzsAssertion:
     values = {
         "iss": "gxzs",
         "aud": "dify-workbench",
@@ -44,8 +47,8 @@ def claims(**changes):
     return GxzsAssertion.model_validate(values | changes)
 
 
-def token(value, header=None):
-    def encode(part):
+def token(value: GxzsAssertion, header: dict[str, str] | None = None) -> str:
+    def encode(part: dict[str, Any]) -> str:
         return (
             base64.urlsafe_b64encode(json.dumps(part, ensure_ascii=False, separators=(",", ":")).encode())
             .rstrip(b"=")
@@ -61,8 +64,8 @@ def token(value, header=None):
     return f"{signing_input}.{signature}"
 
 
-def verify(value, **changes):
-    args = {
+def verify(value: str, **changes: Any) -> GxzsAssertion:
+    args: dict[str, Any] = {
         "key": KEY,
         "issuer": "gxzs",
         "method": "POST",
@@ -75,12 +78,12 @@ def verify(value, **changes):
     return verify_assertion(value, **(args | changes))
 
 
-def test_assertion_accepts_unicode_and_binds_complete_request():
+def test_assertion_accepts_unicode_and_binds_complete_request() -> None:
     original = claims()
     assert verify(token(original)) == original
 
 
-def auth_app(config_overrides, monkeypatch):
+def auth_app(config_overrides: Callable[..., None], monkeypatch: pytest.MonkeyPatch) -> Flask:
     # Load this controller helper without importing the console package's unrelated routes.
     source = Path(__file__).resolve().parents[4] / "controllers" / "console" / "workbench_auth.py"
     spec = importlib.util.spec_from_file_location("workbench_auth_boundary", source)
@@ -94,14 +97,17 @@ def auth_app(config_overrides, monkeypatch):
     monkeypatch.setattr("services.workbench.gxzs_assertion.time.time", lambda: 1001)
     from libs.login import current_account_with_tenant, login_required
 
-    app = Flask(__name__)
+    class AuthTestApp(Flask):
+        login_manager: SimpleNamespace
+
+    app = AuthTestApp(__name__)
     app.login_manager = SimpleNamespace(unauthorized=lambda: (jsonify(message="console login required"), 401))
 
     @app.before_request
-    def ordinary_user():
+    def ordinary_user() -> None:
         g._login_user = None
 
-    def identity_view():
+    def identity_view() -> Response:
         owner = current_account_with_tenant()
         return jsonify(user_id=owner.account.id, tenant_id=owner.tenant_id, role=owner.account.current_role)
 
@@ -113,8 +119,8 @@ def auth_app(config_overrides, monkeypatch):
 
 
 def test_signed_controller_uses_same_account_and_keeps_console_login_separate(
-    workspace, sqlite_session, config_overrides, monkeypatch
-):
+    workspace: str, sqlite_session: Session, config_overrides: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
     app = auth_app(config_overrides, monkeypatch)
     client = app.test_client()
     assertion = token(claims())
@@ -142,12 +148,14 @@ def test_signed_controller_uses_same_account_and_keeps_console_login_separate(
     )
 
 
-def resolve_account_id(session):
+def resolve_account_id(session: Session) -> str | None:
     return session.scalar(select(AccountIntegrate.account_id).where(AccountIntegrate.provider == "gxzs"))
 
 
 @pytest.mark.usefixtures("workspace")
-def test_controller_rejects_changed_request_before_provisioning(sqlite_session, config_overrides, monkeypatch):
+def test_controller_rejects_changed_request_before_provisioning(
+    sqlite_session: Session, config_overrides: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = auth_app(config_overrides, monkeypatch).test_client()
     response = client.post(
         TARGET, data=b"{}", headers={"X-GXZS-Assertion": token(claims()), "Content-Type": "application/json"}
@@ -157,7 +165,9 @@ def test_controller_rejects_changed_request_before_provisioning(sqlite_session, 
 
 
 @pytest.mark.usefixtures("workspace")
-def test_controller_returns_not_found_until_explicitly_enabled(sqlite_session, config_overrides, monkeypatch):
+def test_controller_returns_not_found_until_explicitly_enabled(
+    sqlite_session: Session, config_overrides: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = auth_app(config_overrides, monkeypatch).test_client()
     config_overrides(GXZS_WORKBENCH_ENABLED=False)
     response = client.post(
@@ -181,18 +191,18 @@ def test_controller_returns_not_found_until_explicitly_enabled(sqlite_session, c
         {"key": base64.b64encode(bytes(range(1, 33))).decode()},
     ],
 )
-def test_rejects_changed_request_or_expired_signature(changes):
+def test_rejects_changed_request_or_expired_signature(changes: Any) -> None:
     with pytest.raises(Unauthorized):
         verify(token(claims()), **changes)
 
 
 @pytest.mark.parametrize("changes", [{"sub": "000001:42"}, {"exp": 1120}, {"iat": 1060, "exp": 1060}])
-def test_rejects_inconsistent_identity_or_lifetime(changes):
+def test_rejects_inconsistent_identity_or_lifetime(changes: Any) -> None:
     with pytest.raises(Unauthorized):
         verify(token(claims(**changes)))
 
 
-def test_rejects_unsigned_or_unsupported_algorithm():
+def test_rejects_unsigned_or_unsupported_algorithm() -> None:
     with pytest.raises(Unauthorized):
         verify(token(claims(), {"alg": "none", "typ": "JWT"}))
     with pytest.raises(Unauthorized):
@@ -200,13 +210,13 @@ def test_rejects_unsigned_or_unsupported_algorithm():
 
 
 class RedisMemory:
-    def __init__(self):
+    def __init__(self) -> None:
         self.keys = set()
 
-    def lock(self, *_args, **_kwargs):
+    def lock(self, *_args: object, **_kwargs: object) -> AbstractContextManager[None]:
         return nullcontext()
 
-    def set(self, key, _value, **kwargs):
+    def set(self, key: str, _value: str, **kwargs: Any) -> bool | None:
         assert kwargs == {"nx": True, "ex": 120}
         if key in self.keys:
             return None
@@ -215,7 +225,7 @@ class RedisMemory:
 
 
 @pytest.fixture
-def workspace(sqlite_session, config_overrides, monkeypatch):
+def workspace(sqlite_session: Session, config_overrides: Callable[..., None], monkeypatch: pytest.MonkeyPatch) -> str:
     tenant = Tenant(name="公信测试空间")
     sqlite_session.add(tenant)
     sqlite_session.commit()
@@ -229,14 +239,14 @@ def workspace(sqlite_session, config_overrides, monkeypatch):
 
 
 @pytest.mark.usefixtures("workspace")
-def test_nonce_is_consumed_exactly_once():
+def test_nonce_is_consumed_exactly_once() -> None:
     value = claims()
     gxzs_identity.consume_assertion(value)
     with pytest.raises(Unauthorized):
         gxzs_identity.consume_assertion(value)
 
 
-def test_same_gxzs_identity_has_one_passwordless_normal_dify_member(workspace, sqlite_session):
+def test_same_gxzs_identity_has_one_passwordless_normal_dify_member(workspace: str, sqlite_session: Session) -> None:
     first = gxzs_identity.resolve_account(claims())
     second = gxzs_identity.resolve_account(claims(name="修改后的名字"))
     assert first.id == second.id
@@ -248,7 +258,9 @@ def test_same_gxzs_identity_has_one_passwordless_normal_dify_member(workspace, s
     assert sqlite_session.scalar(select(func.count()).select_from(TenantAccountJoin)) == 1
 
 
-def test_same_name_different_user_or_tenant_never_merges(workspace, sqlite_session, config_overrides):
+def test_same_name_different_user_or_tenant_never_merges(
+    workspace: str, sqlite_session: Session, config_overrides: Callable[..., None]
+) -> None:
     other = Tenant(name="另一个租户")
     sqlite_session.add(other)
     sqlite_session.commit()
@@ -262,7 +274,7 @@ def test_same_name_different_user_or_tenant_never_merges(workspace, sqlite_sessi
 
 
 @pytest.mark.usefixtures("workspace")
-def test_removed_membership_is_not_recreated(sqlite_session):
+def test_removed_membership_is_not_recreated(sqlite_session: Session) -> None:
     account = gxzs_identity.resolve_account(claims())
     sqlite_session.execute(delete(TenantAccountJoin).where(TenantAccountJoin.account_id == account.id))
     sqlite_session.commit()
@@ -272,9 +284,10 @@ def test_removed_membership_is_not_recreated(sqlite_session):
 
 
 @pytest.mark.usefixtures("workspace")
-def test_disabled_dify_account_is_not_reactivated(sqlite_session):
+def test_disabled_dify_account_is_not_reactivated(sqlite_session: Session) -> None:
     account = gxzs_identity.resolve_account(claims())
     stored = sqlite_session.get(Account, account.id)
+    assert stored is not None
     stored.status = AccountStatus.BANNED
     sqlite_session.commit()
     with pytest.raises(Forbidden):
@@ -282,15 +295,15 @@ def test_disabled_dify_account_is_not_reactivated(sqlite_session):
 
 
 @pytest.mark.usefixtures("workspace")
-def test_unmapped_tenant_is_rejected_before_provisioning(sqlite_session):
+def test_unmapped_tenant_is_rejected_before_provisioning(sqlite_session: Session) -> None:
     with pytest.raises(Forbidden):
         gxzs_identity.resolve_account(claims(tenant_id="000002", sub="000002:42"))
     assert sqlite_session.scalar(select(func.count()).select_from(AccountIntegrate)) == 0
 
 
 def test_workbench_grant_is_limited_to_mapped_workspace_and_published_template(
-    workspace, sqlite_session, config_overrides
-):
+    workspace: str, sqlite_session: Session, config_overrides: Callable[..., None]
+) -> None:
     account = gxzs_identity.resolve_account(claims())
     assert gxzs_identity.can_run_template(sqlite_session, workspace, account.id, "agent-a")
     assert not gxzs_identity.can_run_template(sqlite_session, workspace, account.id, "agent-b")

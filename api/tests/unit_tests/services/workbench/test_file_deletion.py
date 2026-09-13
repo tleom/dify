@@ -3,7 +3,7 @@ from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import Table, create_engine
 from sqlalchemy.orm import sessionmaker
 from werkzeug.exceptions import Conflict
 
@@ -13,9 +13,11 @@ from services.workbench import directories, files
 
 @pytest.mark.parametrize("status", ["waiting_input", "environment_update", "completed"])
 @pytest.mark.parametrize("suffix", ["", "/source.txt"])
-def test_resumable_runs_protect_conversation_files(status, suffix, monkeypatch):
+def test_resumable_runs_protect_conversation_files(status: str, suffix: str, monkeypatch: pytest.MonkeyPatch) -> None:
     engine = create_engine("sqlite://")
-    WorkbenchRun.__table__.create(engine)
+    table = WorkbenchRun.__table__
+    assert isinstance(table, Table)
+    table.create(engine)
     factory = sessionmaker(bind=engine)
     chat_id, tenant_id, account_id = (str(uuid4()) for _ in range(3))
     root = f"conversations/{chat_id}"

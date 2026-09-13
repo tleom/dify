@@ -8,11 +8,11 @@ from typing import cast
 
 import httpx2 as httpx
 import pytest
-from shellctl.client import ShellctlClientError
-from shellctl.shared import JobMode
 
 from dify_agent.adapters.shell.protocols import ShellProviderError
 from dify_agent.adapters.shell.shellctl import ShellctlClientProtocol, ShellctlCommands
+from shellctl.client import ShellctlClientError
+from shellctl.shared import JobMode
 
 
 @dataclass(slots=True)
@@ -108,6 +108,19 @@ def test_commands_forward_stdio_mode() -> None:
 
     asyncio.run(scenario())
     assert client.run_calls == [("printf result", None, None, 2.5, JobMode.STDIO)]
+
+
+def test_commands_merge_runtime_defaults_with_command_environment() -> None:
+    client = _Client()
+
+    async def scenario() -> None:
+        commands = ShellctlCommands(_client(client), home_dir="/home/binding", default_env={"RUNTIME_TOKEN": "trusted"})
+        await commands.run("pwd", env={"LANG": "C.UTF-8", "RUNTIME_TOKEN": "override"}, timeout=2.5)
+
+    asyncio.run(scenario())
+    assert client.run_calls == [
+        ("pwd", None, {"LANG": "C.UTF-8", "RUNTIME_TOKEN": "trusted", "HOME": "/home/binding"}, 2.5, JobMode.PTY)
+    ]
 
 
 def test_commands_reject_cwd_outside_runtime_layout() -> None:

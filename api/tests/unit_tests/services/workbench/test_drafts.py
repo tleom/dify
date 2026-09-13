@@ -1,6 +1,9 @@
 """Draft defaults and voice composition must not persist empty conversations."""
+
+from collections.abc import Generator
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -13,7 +16,9 @@ from services.workbench.policy import Selection
 @pytest.mark.parametrize(
     "recent", [None, Selection(model="recent-model", knowledge=["old"], model_parameters={"temperature": 0.3})]
 )
-def test_draft_defaults_read_personal_preferences_without_writes(monkeypatch, recent):
+def test_draft_defaults_read_personal_preferences_without_writes(
+    monkeypatch: pytest.MonkeyPatch, recent: Selection | None
+) -> None:
     session = Mock()
     session.scalar.return_value = SimpleNamespace(selection=recent.model_dump_json()) if recent else None
     monkeypatch.setattr(service.session_factory, "create_session", lambda: nullcontext(session))
@@ -33,12 +38,12 @@ def test_draft_defaults_read_personal_preferences_without_writes(monkeypatch, re
     assert "account_id" in query
 
 
-def test_draft_voice_checks_template_owner_without_creating_a_chat(monkeypatch):
+def test_draft_voice_checks_template_owner_without_creating_a_chat(monkeypatch: pytest.MonkeyPatch) -> None:
     state = {"open": False}
     app = SimpleNamespace(id="app", tenant_id="tenant")
 
     @contextmanager
-    def session():
+    def session() -> Generator[SimpleNamespace]:
         state["open"] = True
         try:
             yield SimpleNamespace(get=lambda _model, _key: app)
@@ -52,7 +57,7 @@ def test_draft_voice_checks_template_owner_without_creating_a_chat(monkeypatch):
     owned = Mock(side_effect=AssertionError("Draft has no stored chat"))
     monkeypatch.setattr(audio, "_chat", owned)
 
-    def transcribe(**kwargs):
+    def transcribe(**kwargs: Any) -> dict[str, str]:
         assert not state["open"]
         assert kwargs["end_user"] == "account"
         return {"text": "语音草稿"}

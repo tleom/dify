@@ -2,6 +2,7 @@
 
 import json
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -10,7 +11,9 @@ from werkzeug.exceptions import Conflict, NotFound
 from services.workbench import branches
 
 
-def run(run_id, status="cancelled", parent=None, message=None, **history):
+def run(
+    run_id: str, status: str = "cancelled", parent: str | None = None, message: str | None = None, **history: Any
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=run_id,
         status=status,
@@ -22,7 +25,7 @@ def run(run_id, status="cancelled", parent=None, message=None, **history):
     )
 
 
-def resolve(runs, payload):
+def resolve(runs: list[SimpleNamespace], payload: dict[str, Any]) -> dict[str, Any]:
     session = Mock()
     session.scalars.return_value = runs
     chat = SimpleNamespace(id="chat", tenant_id="tenant", account_id="account")
@@ -32,7 +35,7 @@ def resolve(runs, payload):
     return result
 
 
-def test_stopped_turn_without_native_message_remains_the_parent():
+def test_stopped_turn_without_native_message_remains_the_parent() -> None:
     first = run("first", "completed", message="native-first")
     stopped = run("stopped", parent="first", input_history={"messages": ["prior"]})
     result = resolve([first, stopped], {"parent_run_id": "stopped", "parent_message_id": None})
@@ -42,7 +45,7 @@ def test_stopped_turn_without_native_message_remains_the_parent():
     assert branches.output_history(None, stopped) == {"messages": ["prior"]}
 
 
-def test_explicit_parent_preserves_selected_version_and_captured_output():
+def test_explicit_parent_preserves_selected_version_and_captured_output() -> None:
     chosen = run("chosen", message="native", output_history={"messages": ["captured"]})
     assert (
         resolve([chosen, run("other")], {"parent_run_id": "chosen", "parent_message_id": "native"})[
@@ -61,24 +64,24 @@ def test_explicit_parent_preserves_selected_version_and_captured_output():
         {"parent_run_id": None, "parent_message_id": "native"},
     ],
 )
-def test_rejects_parent_outside_owned_chat_or_mismatched_native_message(payload):
+def test_rejects_parent_outside_owned_chat_or_mismatched_native_message(payload: dict[str, Any]) -> None:
     with pytest.raises(NotFound):
         resolve([run("owned", message="native")], payload)
 
 
-def test_active_parent_is_still_rejected():
+def test_active_parent_is_still_rejected() -> None:
     with pytest.raises(Conflict):
         resolve([run("active", "running")], {"parent_run_id": "active"})
 
 
-def test_legacy_root_and_regeneration_keep_existing_semantics():
+def test_legacy_root_and_regeneration_keep_existing_semantics() -> None:
     runs = [run("first"), run("second", parent="first")]
     assert resolve(runs, {"parent_message_id": None})["branch_parent_run_id"] is None
     assert resolve(runs, {})["branch_parent_run_id"] == "second"
     assert resolve(runs, {"regenerate_from": "second", "parent_run_id": "second"})["branch_parent_run_id"] == "first"
 
 
-def test_cancelled_queue_entry_retains_context_from_its_owned_ancestor():
+def test_cancelled_queue_entry_retains_context_from_its_owned_ancestor() -> None:
     session = Mock()
     session.scalar.return_value = run("previous", "completed", output_history={"messages": ["previous conversation"]})
     queued = run("queued", parent="previous")

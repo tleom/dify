@@ -1,6 +1,7 @@
 """Cancelled installs must release queue gates only after the installer is terminal."""
 
 import json
+from collections.abc import Generator
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -14,12 +15,12 @@ ACCOUNT = "83b9990d-0f28-428f-bc1f-1d0ce1811d19"
 
 
 @pytest.fixture
-def session(monkeypatch):
+def session(monkeypatch: pytest.MonkeyPatch) -> Mock:
     session = Mock()
     session.is_open = False
 
     @contextmanager
-    def open_session():
+    def open_session() -> Generator[Mock]:
         session.is_open = True
         try:
             yield session
@@ -33,7 +34,7 @@ def session(monkeypatch):
 @pytest.mark.parametrize(
     ("status", "finished"), [("installing", False), ("ready", True), ("failed", True), ("unknown", False)]
 )
-def test_cancelled_installation_checks_stable_request_and_owner(status, finished, session):
+def test_cancelled_installation_checks_stable_request_and_owner(status: str, finished: bool, session: Mock) -> None:
     session.scalars.return_value = [
         SimpleNamespace(
             id="cancelled-run",
@@ -41,7 +42,7 @@ def test_cancelled_installation_checks_stable_request_and_owner(status, finished
         )
     ]
 
-    def poll(*_args):
+    def poll(*_args: object) -> dict[str, str]:
         assert not session.is_open
         return {"status": status}
 
@@ -54,7 +55,7 @@ def test_cancelled_installation_checks_stable_request_and_owner(status, finished
     assert ["cancelled", "failed", "interrupted"] in query.params.values()
 
 
-def test_manager_disconnect_keeps_gate_closed(session):
+def test_manager_disconnect_keeps_gate_closed(session: Mock) -> None:
     session.scalars.return_value = [
         SimpleNamespace(id="run", payload=json.dumps({"pending": {"tool_name": "update_shared_environment"}}))
     ]
@@ -63,7 +64,7 @@ def test_manager_disconnect_keeps_gate_closed(session):
     assert not session.is_open
 
 
-def test_old_non_pending_mentions_do_not_poll_installers(session):
+def test_old_non_pending_mentions_do_not_poll_installers(session: Mock) -> None:
     session.scalars.return_value = [
         SimpleNamespace(id="run", payload=json.dumps({"query": "update_shared_environment"}))
     ]
@@ -72,7 +73,7 @@ def test_old_non_pending_mentions_do_not_poll_installers(session):
     manager.assert_not_called()
 
 
-def test_recovery_finds_gates_even_when_no_environment_runs_remain(monkeypatch):
+def test_recovery_finds_gates_even_when_no_environment_runs_remain(monkeypatch: pytest.MonkeyPatch) -> None:
     prefix = maintenance.scheduler.PREFIX + "maintenance:"
     redis = Mock()
     redis.scan_iter.return_value = [(prefix + TENANT + ":" + ACCOUNT).encode(), prefix + "invalid"]

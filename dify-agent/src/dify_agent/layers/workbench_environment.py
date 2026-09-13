@@ -28,19 +28,21 @@ class WorkbenchEnvironmentLayer(PydanticAILayer[NoLayerDeps, object, EmptyLayerC
 
     @property
     def prefix_prompts(self):
-        return [
-            (
-                "Common Office/PDF/OCR/image/data libraries, LibreOffice, Chinese fonts and Google Chrome are preinstalled. "
-                "Read /opt/office/README.md and use python/node directly before requesting extra packages. "
-                "Use /opt/office/office.py for isolated Office conversion, previews and formula recalculation. "
-                "Use update_shared_environment only for missing or explicitly requested Python/Node registry packages. "
-                "The environment is shared by this user's conversations and mounted read-only. "
-                "The task will pause while other runs finish, then resume with the result. "
-                "Do not use pip/npm to create private replacement environments. "
-                "All uploaded, generated, and intermediate files belong in your current conversation directory. "
-                "Use relative paths from the working directory. Other conversations and the old shared folder are inaccessible."
-            )
-        ]
+        return [self._environment_prompt]
+
+    @staticmethod
+    def _environment_prompt() -> str:
+        return (
+            "Common Office/PDF/OCR/image/data libraries, LibreOffice, Chinese fonts and Google Chrome are preinstalled. "
+            "Read /opt/office/README.md and use python/node directly before requesting extra packages. "
+            "Use /opt/office/office.py for isolated Office conversion, previews and formula recalculation. "
+            "Use update_shared_environment only for missing or explicitly requested Python/Node registry packages. "
+            "The environment is shared by this user's conversations and mounted read-only. "
+            "The task will pause while other runs finish, then resume with the result. "
+            "Do not use pip/npm to create private replacement environments. "
+            "All uploaded, generated, and intermediate files belong in your current conversation directory. "
+            "Use relative paths from the working directory. Other conversations and the old shared folder are inaccessible."
+        )
 
     def _prepare(self, _ctx: RunContext[object], _definition: ToolDefinition):
         return ToolDefinition(

@@ -49,7 +49,7 @@ services:
     container_name: wb-web
     restart: unless-stopped
     env_file: ${WORKBENCH_CONFIG_DIR}/frontend.env
-    ports: ["${WORKBENCH_BIND_IP:-127.0.0.1}:3100:3100"]
+    ports: ['${WORKBENCH_BIND_IP:-127.0.0.1}:3100:3100']
     networks: [backend]
 
 networks:

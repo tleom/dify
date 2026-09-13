@@ -386,6 +386,7 @@ class TestGenerateWorker:
         session_scope_config_version_id="s",
         files=(),
         file_upload_config=None,
+        workbench_run_id=None,
     ):
         generator._generate_worker(
             flask_app=mocker.MagicMock(),
@@ -399,6 +400,8 @@ class TestGenerateWorker:
                 query=query,
                 files=files,
                 file_upload_config=file_upload_config,
+                workbench_run_id=workbench_run_id,
+                user_id="user",
             ),
             queue_manager=queue_manager,
             conversation_id="conv",
@@ -426,6 +429,34 @@ class TestGenerateWorker:
 
         assert runner.run.call_args.kwargs["agent_config_snapshot_id"] == "s"
         assert runner.run.call_args.kwargs["session_scope_snapshot_id"] is None
+
+    def test_workbench_worker_uses_account_scoped_config_and_passes_runtime(self, generator, mocker: MockerFixture):
+        runner, _ = self._wire(generator, mocker)
+        workbench = mocker.MagicMock()
+        soul = AgentSoulConfig()
+        workbench.resolve_run_config.return_value = soul
+        generator._workbench = workbench
+        queue_manager = mocker.MagicMock()
+
+        self._call(generator, mocker, queue_manager, workbench_run_id="run-1")
+
+        workbench.resolve_run_config.assert_called_once_with("run-1", "tenant", "user")
+        assert runner.run.call_args.kwargs["agent_soul"] is soul
+        module.AgentAppRunner.assert_called_once()
+        assert module.AgentAppRunner.call_args.kwargs["workbench"] is workbench
+        module.AgentAppWorkspaceStore.assert_called_once_with(workbench=workbench)
+        queue_manager.publish_error.assert_not_called()
+
+    def test_workbench_worker_requires_runtime_before_backend_call(self, generator, mocker: MockerFixture):
+        runner, _ = self._wire(generator, mocker)
+        queue_manager = mocker.MagicMock()
+
+        self._call(generator, mocker, queue_manager, workbench_run_id="run-1")
+
+        runner.run.assert_not_called()
+        error = queue_manager.publish_error.call_args.args[0]
+        assert isinstance(error, module.AgentAppGeneratorError)
+        assert "Workbench runtime is required" in str(error)
 
     def test_worker_passes_files_to_backend_runner_without_rewriting_query(self, generator, mocker: MockerFixture):
         runner, _ = self._wire(generator, mocker, guard_query="你看得见这张图片吗")

@@ -235,13 +235,13 @@ def test_create_run_request_accepts_dto_first_public_composition_and_normalizes_
         "node_id": "node-1",
         "node_execution_id": "node-execution-1",
         "conversation_id": None,
+        "workbench_run_id": None,
         "agent_id": None,
         "agent_config_version_id": None,
         "agent_config_version_kind": None,
         "agent_mode": "workflow_run",
         "invoke_from": "service-api",
         "trace_id": "trace-1",
-        "workbench_run_id": None,
     }
     assert payload["idempotency_key"] == "workflow-run-1:node-execution-1"
     assert payload["metadata"] == {"source": "unit_test"}

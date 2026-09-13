@@ -1,8 +1,8 @@
 name: Main CI Pipeline
 
 on:
+  # Stacked pull requests need the same validation before their base is merged.
   pull_request:
-    branches: ['main']
   merge_group:
     branches: ['main']
     types: [checks_requested]
@@ -23,7 +23,7 @@ concurrency:
 jobs:
   pre_job:
     name: Skip Duplicate Checks
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     outputs:
       should_skip: ${{ steps.skip_check.outputs.should_skip || 'false' }}
     steps:
@@ -37,7 +37,7 @@ jobs:
   # Check which paths were changed to determine which tests to run
   check-changes:
     name: Check Changed Files
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     outputs:
       api-changed: ${{ steps.changes.outputs.api }}
       cli-changed: ${{ steps.changes.outputs.cli }}
@@ -139,6 +139,8 @@ jobs:
             sandbox-runtime:
               - 'dify-agent-runtime/**'
               - '.github/workflows/sandbox-runtime-tests.yml'
+              - 'workbench/sandbox-manager/**'
+              - 'workbench/tests/**'
             dify-agent:
               - 'dify-agent/**'
               - '.github/workflows/dify-agent-tests.yml'
@@ -222,7 +224,7 @@ jobs:
       - pre_job
       - check-changes
     if: needs.pre_job.outputs.should_skip != 'true' && needs.check-changes.outputs.api-changed != 'true'
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Report skipped API tests
         run: echo "No API-related changes detected; skipping API tests."
@@ -235,7 +237,7 @@ jobs:
       - check-changes
       - api-tests-run
       - api-tests-skip
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Finalize API Tests status
         env:
@@ -282,7 +284,7 @@ jobs:
       - pre_job
       - check-changes
     if: needs.pre_job.outputs.should_skip != 'true' && needs.check-changes.outputs.cli-changed != 'true'
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Report skipped CLI tests
         run: echo "No CLI-related changes detected; skipping CLI tests."
@@ -295,7 +297,7 @@ jobs:
       - check-changes
       - cli-tests-run
       - cli-tests-skip
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Finalize CLI Tests status
         env:
@@ -342,7 +344,7 @@ jobs:
       - pre_job
       - check-changes
     if: needs.pre_job.outputs.should_skip != 'true' && needs.check-changes.outputs.web-changed != 'true'
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Report skipped web tests
         run: echo "No web-related changes detected; skipping web tests."
@@ -355,7 +357,7 @@ jobs:
       - check-changes
       - web-tests-run
       - web-tests-skip
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Finalize Web Tests status
         env:
@@ -404,7 +406,7 @@ jobs:
       - pre_job
       - check-changes
     if: needs.pre_job.outputs.should_skip != 'true' && needs.check-changes.outputs.e2e-changed != 'true'
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Report skipped web full-stack e2e
         run: echo "No E2E-related changes detected; skipping web full-stack E2E."
@@ -417,7 +419,7 @@ jobs:
       - check-changes
       - web-e2e-run
       - web-e2e-skip
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Finalize Web Full-Stack E2E status
         env:
@@ -480,7 +482,7 @@ jobs:
       - pre_job
       - check-changes
     if: needs.pre_job.outputs.should_skip != 'true' && needs.check-changes.outputs.vdb-changed != 'true'
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Report skipped VDB tests
         run: echo "No VDB-related changes detected; skipping VDB tests."
@@ -493,7 +495,7 @@ jobs:
       - check-changes
       - vdb-tests-run
       - vdb-tests-skip
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Finalize VDB Tests status
         env:
@@ -539,7 +541,7 @@ jobs:
       - pre_job
       - check-changes
     if: needs.pre_job.outputs.should_skip != 'true' && needs.check-changes.outputs.migration-changed != 'true'
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Report skipped DB migration tests
         run: echo "No migration-related changes detected; skipping DB migration tests."
@@ -552,7 +554,7 @@ jobs:
       - check-changes
       - db-migration-test-run
       - db-migration-test-skip
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Finalize DB Migration Test status
         env:
@@ -599,7 +601,7 @@ jobs:
       - pre_job
       - check-changes
     if: needs.pre_job.outputs.should_skip != 'true' && needs.check-changes.outputs.sandbox-runtime-changed != 'true'
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Report skipped sandbox runtime tests
         run: echo "No sandbox-runtime-related changes detected; skipping sandbox runtime tests."
@@ -612,7 +614,7 @@ jobs:
       - check-changes
       - sandbox-runtime-tests-run
       - sandbox-runtime-tests-skip
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Finalize Sandbox Runtime Tests status
         env:
@@ -659,7 +661,7 @@ jobs:
       - pre_job
       - check-changes
     if: needs.pre_job.outputs.should_skip != 'true' && needs.check-changes.outputs.dify-agent-changed != 'true'
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Report skipped dify agent tests
         run: echo "No dify-agent-related changes detected; skipping dify agent tests."
@@ -672,7 +674,7 @@ jobs:
       - check-changes
       - dify-agent-tests-run
       - dify-agent-tests-skip
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Finalize Dify Agent Tests status
         env:

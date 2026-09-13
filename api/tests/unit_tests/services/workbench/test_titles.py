@@ -3,10 +3,14 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from services.workbench import titles
 
 
-def setup(monkeypatch, title="新会话", native_name="合同审查要点"):
+def setup(
+    monkeypatch: pytest.MonkeyPatch, title: str = "新会话", native_name: str = "合同审查要点"
+) -> tuple[SimpleNamespace, Mock, Mock]:
     chat = SimpleNamespace(id="chat", title=title, app_id="app", account_id="account")
     session = Mock()
     session.scalar.side_effect = [chat, SimpleNamespace(name=native_name), "run"]
@@ -18,7 +22,7 @@ def setup(monkeypatch, title="新会话", native_name="合同审查要点"):
     return chat, session, redis
 
 
-def test_syncs_native_ai_title_and_sends_owned_chat_event(monkeypatch):
+def test_syncs_native_ai_title_and_sends_owned_chat_event(monkeypatch: pytest.MonkeyPatch) -> None:
     chat, session, redis = setup(monkeypatch)
     titles.sync_native_title("tenant", "native")
     assert chat.title == "合同审查要点"
@@ -39,7 +43,7 @@ def test_syncs_native_ai_title_and_sends_owned_chat_event(monkeypatch):
     }
 
 
-def test_late_name_does_not_overwrite_manual_rename(monkeypatch):
+def test_late_name_does_not_overwrite_manual_rename(monkeypatch: pytest.MonkeyPatch) -> None:
     chat, session, redis = setup(monkeypatch, title="我的案件材料")
     titles.sync_native_title("tenant", "native")
     assert chat.title == "我的案件材料"
@@ -47,7 +51,7 @@ def test_late_name_does_not_overwrite_manual_rename(monkeypatch):
     redis.xadd.assert_not_called()
 
 
-def test_default_native_title_is_not_used(monkeypatch):
+def test_default_native_title_is_not_used(monkeypatch: pytest.MonkeyPatch) -> None:
     chat, session, redis = setup(monkeypatch, native_name="New conversation")
     titles.sync_native_title("tenant", "native")
     assert chat.title == "新会话"

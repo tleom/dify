@@ -19,6 +19,8 @@ from dify_agent.protocol import (
     AgentRunUsage,
     CancelRunRequest,
     CancelRunResponse,
+    ContextStatusData,
+    ContextStatusRunEvent,
     PydanticAIStreamRunEvent,
     RunCancelledEvent,
     RunCancelledEventData,
@@ -56,6 +58,7 @@ from core.app.apps.agent_app.app_runner import AgentAppRunner
 from core.app.apps.agent_app.errors import AgentSessionSnapshotIncompatibleError
 from core.app.apps.agent_app.runtime_request_builder import AgentAppRuntimeBuildContext, AgentAppRuntimeRequestBuilder
 from core.app.apps.agent_app.session_store import AgentAppSessionScope, StoredAgentAppSession
+from core.app.apps.agent_app.workbench_runtime import AgentAppWorkbenchRuntime
 from core.app.apps.exc import GenerateTaskStoppedError
 from core.app.entities.app_invoke_entities import DifyRunContext, InvokeFrom, UserFrom
 from core.app.entities.queue_entities import (
@@ -734,6 +737,39 @@ def _saved_user_query(qm: _FakeQueueManager) -> str:
     content = prompt_messages[0].content
     assert isinstance(content, str)
     return content
+
+
+def test_context_status_reaches_injected_workbench_runtime() -> None:
+    class ContextClient(FakeAgentBackendRunClient):
+        @override
+        def stream_events(
+            self,
+            run_id: str,
+            *,
+            after: str | None = None,
+            should_stop: Callable[[], bool] | None = None,
+        ) -> Iterator[RunEvent]:
+            yield ContextStatusRunEvent(
+                run_id=run_id,
+                data=ContextStatusData(phase="usage", used_tokens=500, window_tokens=1000),
+            )
+            yield from super().stream_events(run_id, after=after, should_stop=should_stop)
+
+    workbench = MagicMock(spec=AgentAppWorkbenchRuntime)
+    workbench.conversation_owner.return_value = None
+    workbench.execution_run_id.return_value = None
+    workbench.continuation.return_value = None
+    runner = _runner(ContextClient(), _FakeSessionStore())
+    runner._workbench = workbench
+    queue = _FakeQueueManager()
+
+    _run(runner, queue)
+
+    workbench.record_context_status.assert_called_once()
+    tenant_id, conversation_id, account_id, event = workbench.record_context_status.call_args.args
+    assert (tenant_id, conversation_id, account_id) == ("tenant-1", "conv-1", "user-1")
+    assert event.data.used_tokens == 500
+    assert _message_end(queue) is not None
 
 
 def test_successful_turn_publishes_chunk_and_message_end_and_saves_session() -> None:

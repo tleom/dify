@@ -4,30 +4,35 @@ Run this directory with --confcutdir to verify the authentication boundary witho
 installing optional vector stores or starting external services.
 """
 
+from collections.abc import Callable, Iterator
+
 import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
-from configs import dify_config
 from core.db import session_factory as factory_module
 from models.account import Account, AccountIntegrate, Tenant, TenantAccountJoin
 from models.base import TypeBase
+from tests.unit_tests.config_override import apply_config_overrides
 
 
 @pytest.fixture
-def config_overrides(monkeypatch):
-    def apply(**values):
-        for key, value in values.items():
-            monkeypatch.setattr(dify_config, key, value)
+def config_overrides(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    def apply(**values: object) -> None:
+        apply_config_overrides(monkeypatch, **values)
 
     return apply
 
 
 @pytest.fixture
-def sqlite_session(monkeypatch):
+def sqlite_session(monkeypatch: pytest.MonkeyPatch) -> Iterator[Session]:
     engine = create_engine("sqlite://")
     TypeBase.metadata.create_all(
-        engine, tables=[model.__table__ for model in (Account, AccountIntegrate, Tenant, TenantAccountJoin)]
+        engine,
+        tables=[
+            TypeBase.metadata.tables[model.__tablename__]
+            for model in (Account, AccountIntegrate, Tenant, TenantAccountJoin)
+        ],
     )
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     monkeypatch.setattr(factory_module, "_session_maker", factory)

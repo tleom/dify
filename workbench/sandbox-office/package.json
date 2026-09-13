@@ -3,20 +3,20 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
-    "pptxgenjs": "latest",
-    "docx": "latest",
-    "mammoth": "latest",
-    "docx-preview": "latest",
-    "exceljs": "latest",
-    "pdf-lib": "latest",
-    "pdfjs-dist": "latest",
-    "sharp": "latest",
-    "@resvg/resvg-js": "latest",
     "@fortawesome/fontawesome-svg-core": "latest",
     "@fortawesome/free-solid-svg-icons": "latest",
+    "@resvg/resvg-js": "latest",
+    "docx": "latest",
+    "docx-preview": "latest",
+    "exceljs": "latest",
+    "mammoth": "latest",
+    "pdf-lib": "latest",
+    "pdfjs-dist": "latest",
     "playwright": "latest",
+    "pptxgenjs": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "react-icons": "latest"
+    "react-icons": "latest",
+    "sharp": "latest"
   }
 }
