@@ -11,7 +11,8 @@ import {
 
 const mocks = getMocks()
 
-describe('SkillDetailPage editor', () => {
+// These cases exercise the real editor page on shared CI runners.
+describe('SkillDetailPage editor', { timeout: 15000 }, () => {
   beforeEach(resetDetailPageFixture)
 
   it('does not render the markdown editor before external file content loads', async () => {

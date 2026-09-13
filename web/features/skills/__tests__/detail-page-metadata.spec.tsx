@@ -17,7 +17,7 @@ const mocks = getMocks()
 // Full-page editor flows include real overlays and one-second autosaves;
 // give those multi-step cases a bounded budget on shared CI runners.
 
-describe('SkillDetailPage metadata', () => {
+describe('SkillDetailPage metadata', { timeout: 15000 }, () => {
   beforeEach(resetDetailPageFixture)
 
   it('opens the inline tag selector with workspace tag options', async () => {
