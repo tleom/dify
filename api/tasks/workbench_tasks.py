@@ -19,7 +19,7 @@ from models import Account
 from models.model import App, AppMode
 from models.workbench import WorkbenchChat, WorkbenchRun
 from services.app_task_service import AppTaskService
-from services.workbench import scheduler
+from services.workbench import maintenance, scheduler
 from services.workbench.service import authorize
 
 logger = logging.getLogger(__name__)
@@ -144,6 +144,8 @@ def reconcile():
         }
     for tenant_id, account_id in owners:
         redis_client.set(scheduler.PREFIX + f"maintenance:{tenant_id}:{account_id}", "1")
+    # Cancellation changes the DB status but must not orphan the Redis gate.
+    for tenant_id, account_id in owners | maintenance.gated_owners():
         update_environment.delay(tenant_id, account_id)
     dispatch.delay()
 
@@ -251,7 +253,8 @@ def execute(owner, run_id):
                     for item in frames:
                         item["workbench_run_id"] = run_id
                         events.append(item)
-                        event(run_id, item)
+                        cursor = event(run_id, item)
+                        item["_id"] = cursor.decode() if isinstance(cursor, bytes) else str(cursor)
                         if item.get("event") == "error":
                             status, error = "failed", item.get("message", "Agent 执行失败")
                 completed_stream = True
@@ -316,6 +319,12 @@ def update_environment(tenant_id, account_id):
                 .limit(1)
             )
             if run is None:
+                try:
+                    if not maintenance.cancelled_installations_finished(session, tenant_id, account_id, manager):
+                        return
+                except Exception:
+                    logger.warning("Cancelled installer cleanup will be retried: %s", owner, exc_info=True)
+                    return
                 redis_client.delete(maintenance_key)
                 dispatch.delay()
                 return

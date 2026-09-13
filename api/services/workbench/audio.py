@@ -12,14 +12,15 @@ from services.errors.audio import (
     ProviderNotSupportSpeechToTextServiceError,
     UnsupportedAudioTypeServiceError,
 )
-from services.workbench.service import _chat, authorize
+from services.workbench.service import _chat, authorize, template
 
 
 def transcribe(tenant_id, account_id, chat_id, file):
     authorize(tenant_id, account_id)
+    draft_app_id = template(tenant_id, account_id)["app_id"] if chat_id is None else None
     with session_factory.create_session() as session:
-        chat = _chat(session, tenant_id, account_id, chat_id)
-        app = session.get(App, chat.app_id)
+        app_id = draft_app_id if chat_id is None else _chat(session, tenant_id, account_id, chat_id).app_id
+        app = session.get(App, app_id)
         if app is None or app.tenant_id != tenant_id:
             raise Conflict("会话所属应用已不可用")
     # Composition is a workbench feature, independent of the published Agent's

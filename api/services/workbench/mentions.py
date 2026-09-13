@@ -21,7 +21,7 @@ def default_capabilities(soul, selection, *, new_chat=False):
     })
 
 
-def resolve_mentions(soul, value, *, provider_names=None):
+def resolve_mentions(soul, value, *, provider_names=None, skill_names=None):
     refs = ResourceMentions.model_validate(value or {}).model_dump()
     resources = template_resources(soul)
     badges, tokens, seen = [], [], set()
@@ -38,6 +38,8 @@ def resolve_mentions(soul, value, *, provider_names=None):
                 token = f"[§tool:{item.get('tool_name')}§]"
             else:
                 badge_id, name = key, item.get("name") or key
+                if kind == "skills":
+                    name = (skill_names or {}).get(key) or name
                 token = f"[§{'skill' if kind == 'skills' else 'knowledge'}:{key}§]"
             if (kind, badge_id) not in seen:
                 badges.append({"kind": kind, "id": badge_id, "name": name})

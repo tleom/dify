@@ -7,9 +7,35 @@ from sqlalchemy import select
 from core.tools.tool_manager import ToolManager
 from core.tools.workflow_as_tool.provider import WorkflowToolProviderController
 from extensions.ext_database import db
+from models.agent import Agent
+from models.skill import AgentSkillBindingSnapshot, Skill, SkillVersion
 from models.tools import WorkflowToolProvider
 
 logger = logging.getLogger(__name__)
+
+
+def enrich_skill_labels(tenant_id, agent_id, skills):
+    if not skills:
+        return
+    rows = db.session.execute(
+        select(Skill, SkillVersion)
+        .join(AgentSkillBindingSnapshot, AgentSkillBindingSnapshot.skill_id == Skill.id)
+        .join(Agent, Agent.id == AgentSkillBindingSnapshot.agent_id)
+        .join(SkillVersion, SkillVersion.id == Skill.latest_published_version_id)
+        .where(
+            Skill.tenant_id == tenant_id,
+            AgentSkillBindingSnapshot.tenant_id == tenant_id,
+            Agent.tenant_id == tenant_id,
+            Agent.id == agent_id,
+            AgentSkillBindingSnapshot.config_snapshot_id == Agent.active_config_snapshot_id,
+        )
+    ).all()
+    names = {
+        version.manifest.name or skill.name: skill.display_name or version.manifest.display_name or skill.name
+        for skill, version in rows
+    }
+    for skill in skills:
+        skill["name"] = names.get(skill["id"], skill["name"])
 
 
 def localized(value, fallback=""):

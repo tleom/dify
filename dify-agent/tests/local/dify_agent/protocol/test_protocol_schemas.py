@@ -4,18 +4,26 @@ import pytest
 from pydantic import ValidationError
 from pydantic_ai.messages import FinalResultEvent
 
+import dify_agent.protocol as protocol_exports
 from agenton.compositor import CompositorSessionSnapshot
 from agenton.layers import ExitIntent
 from agenton_collections.layers.plain import PLAIN_PROMPT_LAYER_TYPE_ID, PromptLayerConfig
-import dify_agent.protocol as protocol_exports
 from dify_agent.layers.ask_human import DifyAskHumanLayerConfig
-from dify_agent.layers.execution_context import DIFY_EXECUTION_CONTEXT_LAYER_TYPE_ID, DifyExecutionContextLayerConfig
 from dify_agent.layers.dify_plugin import DIFY_PLUGIN_LLM_LAYER_TYPE_ID, DIFY_PLUGIN_TOOLS_LAYER_TYPE_ID
+from dify_agent.layers.dify_plugin.configs import (
+    DifyPluginLLMLayerConfig,
+    DifyPluginToolConfig,
+    DifyPluginToolParameter,
+    DifyPluginToolParameterForm,
+    DifyPluginToolParameterType,
+    DifyPluginToolsLayerConfig,
+)
+from dify_agent.layers.execution_context import DIFY_EXECUTION_CONTEXT_LAYER_TYPE_ID, DifyExecutionContextLayerConfig
 from dify_agent.layers.output import DIFY_OUTPUT_LAYER_TYPE_ID, DifyOutputLayerConfig
 from dify_agent.protocol import DIFY_AGENT_HISTORY_LAYER_ID, DIFY_AGENT_MODEL_LAYER_ID, DIFY_AGENT_OUTPUT_LAYER_ID
 from dify_agent.protocol.schemas import (
-    AgentRunUsage,
     RUN_EVENT_ADAPTER,
+    AgentRunUsage,
     CreateRunRequest,
     DeferredToolCallPayload,
     LayerExitSignals,
@@ -31,14 +39,6 @@ from dify_agent.protocol.schemas import (
     RunSucceededEvent,
     RunSucceededEventData,
     normalize_composition,
-)
-from dify_agent.layers.dify_plugin.configs import (
-    DifyPluginLLMLayerConfig,
-    DifyPluginToolConfig,
-    DifyPluginToolParameter,
-    DifyPluginToolParameterForm,
-    DifyPluginToolParameterType,
-    DifyPluginToolsLayerConfig,
 )
 
 
@@ -240,6 +240,7 @@ def test_create_run_request_accepts_dto_first_public_composition_and_normalizes_
         "agent_mode": "workflow_run",
         "invoke_from": "service-api",
         "trace_id": "trace-1",
+        "workbench_run_id": None,
     }
     assert payload["idempotency_key"] == "workflow-run-1:node-execution-1"
     assert payload["metadata"] == {"source": "unit_test"}
@@ -528,11 +529,11 @@ def test_run_succeeded_event_round_trips_complete_pricing_usage() -> None:
             session_snapshot=CompositorSessionSnapshot(layers=[]),
             usage=AgentRunUsage(
                 prompt_tokens=10,
-                prompt_unit_price=Decimal("5"),
+                prompt_unit_price=Decimal(5),
                 prompt_price_unit=Decimal("0.000001"),
                 prompt_price=Decimal("0.000050"),
                 completion_tokens=2,
-                completion_unit_price=Decimal("30"),
+                completion_unit_price=Decimal(30),
                 completion_price_unit=Decimal("0.000001"),
                 completion_price=Decimal("0.000060"),
                 total_tokens=12,

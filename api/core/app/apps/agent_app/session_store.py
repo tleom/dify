@@ -80,6 +80,18 @@ class AgentAppWorkspaceStore:
             caller = self._load_caller(session=session, scope=scope)
             binding_id = caller.agent_workspace_binding_id
             if binding_id is None:
+                if scope.workbench_account_id:
+                    from models.workbench import WorkbenchChat
+
+                    binding_id = session.scalar(select(WorkbenchChat.id).where(
+                        WorkbenchChat.tenant_id == scope.tenant_id,
+                        WorkbenchChat.account_id == scope.workbench_account_id,
+                        WorkbenchChat.app_id == scope.app_id,
+                        WorkbenchChat.conversation_id == scope.conversation_id,
+                        WorkbenchChat.deleted == 0,
+                    ))
+                    if binding_id is None:
+                        raise AgentWorkspaceNotFoundError("Workbench chat is unavailable")
                 binding = AgentWorkspaceService.create_binding(
                     session=session,
                     scope=scope.workspace_owner,
@@ -87,6 +99,7 @@ class AgentAppWorkspaceStore:
                     base_home_snapshot_id=scope.home_snapshot_id,
                     agent_config_version_id=scope.agent_config_snapshot_id,
                     agent_config_version_kind=scope.agent_config_version_kind,
+                    binding_id=binding_id,
                 )
                 caller.agent_workspace_binding_id = binding.id
                 session.commit()

@@ -17,7 +17,7 @@ from models.provider_ids import ModelProviderID
 from models.workbench import WorkbenchChat, WorkbenchRevision, WorkbenchRun
 from services.agent.roster_service import AgentRosterService
 from services.model_provider_service import ModelProviderService
-from services.workbench.catalog_labels import enrich_tool_labels
+from services.workbench.catalog_labels import enrich_skill_labels, enrich_tool_labels
 from services.workbench.policy import (
     Selection,
     compile_selection,
@@ -62,13 +62,15 @@ def template(tenant_id: str, account_id: str):
             raise Conflict("通用 Agent 发布版本不可用")
         app = AgentRosterService(session).get_agent_runtime_app_model(tenant_id=tenant_id, agent_id=agent.id)
         from controllers.common.rbac import AgentId, RBACCheck, RBACPermission, enforce_rbac_checks
+        from services.workbench.gxzs_identity import can_run_template
 
-        enforce_rbac_checks(
-            tenant_id=tenant_id,
-            account_id=account_id,
-            checks=[RBACCheck(RBACPermission.AGENT_TEST_AND_RUN, AgentId())],
-            path_args={"agent_id": agent.id},
-        )
+        if not can_run_template(session, tenant_id, account_id, agent.id):
+            enforce_rbac_checks(
+                tenant_id=tenant_id,
+                account_id=account_id,
+                checks=[RBACCheck(RBACPermission.AGENT_TEST_AND_RUN, AgentId())],
+                path_args={"agent_id": agent.id},
+            )
         base = {
             "agent_id": agent.id,
             "app_id": app.id,
@@ -130,8 +132,10 @@ def catalog(tenant_id: str, account_id: str):
     models = models_and_rules(tenant_id)
     resources = public_resources(base["soul"], dify_config.WORKBENCH_TOOL_PARAMETERS.get(tenant_id))
     enrich_tool_labels(tenant_id, resources["tools"])
+    enrich_skill_labels(tenant_id, base["agent_id"], resources["skills"])
     return {
         **resources,
+        "default_selection": default_selection(tenant_id, account_id, base).model_dump(mode="json"),
         "models": [
             {"id": key, "name": value["model"], "provider": value["model_provider"]} for key, value in models.items()
         ],
@@ -165,6 +169,7 @@ def _chat(session, tenant_id, account_id, chat_id, lock=False):
 
 def read_chat(tenant_id: str, account_id: str, chat_id: str):
     from services.workbench.branches import annotate
+    from services.workbench.directories import chat_directory
     from services.workbench.message_actions import with_feedback
 
     authorize(tenant_id, account_id)
@@ -185,6 +190,7 @@ def read_chat(tenant_id: str, account_id: str, chat_id: str):
         return {
             "id": chat.id,
             "title": chat.title,
+            "file_directory": chat_directory(session, chat),
             "pinned": chat.pinned,
             "version": chat.version,
             "template_snapshot_id": revision.template_snapshot_id or chat.base_snapshot_id,
@@ -194,8 +200,9 @@ def read_chat(tenant_id: str, account_id: str, chat_id: str):
 
 
 def run_dto(run):
-    from services.workbench.message_actions import message_ids
+    from services.workbench.context_status import merge_context_events
     from services.workbench.knowledge_events import run_knowledge_events
+    from services.workbench.message_actions import message_ids
 
     payload = json.loads(run.payload)
     ids = message_ids(run)
@@ -207,7 +214,8 @@ def run_dto(run):
         "pending": payload.get("pending"),
         "status": run.status,
         "error": run.error,
-        "events": [*run_knowledge_events(run, payload), *json.loads(run.event_log)],
+        "events": [*run_knowledge_events(run, payload), *merge_context_events(run, payload)],
+        "context_usage": payload.get("context_usage"),
         "query": payload.get("query", ""),
         "resource_mentions": payload.get("resource_mentions", {}),
         "mentioned_resources": payload.get("mentioned_resources", []),
@@ -225,10 +233,18 @@ def run_dto(run):
 
 
 def list_chats(tenant_id, account_id):
+    from services.workbench.directories import chat_directory
+
     authorize(tenant_id, account_id)
     with session_factory.create_session() as session:
         return [
-            {"id": c.id, "title": c.title, "version": c.version, "pinned": c.pinned}
+            {
+                "id": c.id,
+                "title": c.title,
+                "version": c.version,
+                "pinned": c.pinned,
+                "file_directory": chat_directory(session, c),
+            }
             for c in session.scalars(
                 select(WorkbenchChat)
                 .where(
@@ -243,6 +259,8 @@ def list_chats(tenant_id, account_id):
 
 
 def update_chat(tenant_id, account_id, chat_id, *, title=None, pinned=None):
+    from services.workbench.directories import chat_directory
+
     authorize(tenant_id, account_id)
     with session_factory.get_session_maker().begin() as session:
         chat = _chat(session, tenant_id, account_id, chat_id, lock=True)
@@ -250,11 +268,17 @@ def update_chat(tenant_id, account_id, chat_id, *, title=None, pinned=None):
             chat.title = title
         if pinned is not None:
             chat.pinned = pinned
-        return {"id": chat.id, "title": chat.title, "version": chat.version, "pinned": chat.pinned}
+        return {
+            "id": chat.id,
+            "title": chat.title,
+            "version": chat.version,
+            "pinned": chat.pinned,
+            "file_directory": chat_directory(session, chat),
+        }
 
 
-def create_chat(tenant_id, account_id):
-    base = template(tenant_id, account_id)
+def default_selection(tenant_id, account_id, base):
+    """Resolve personal draft defaults without creating a chat or revision."""
     with session_factory.create_session() as session:
         recent = session.scalar(
             select(WorkbenchRevision)
@@ -274,7 +298,12 @@ def create_chat(tenant_id, account_id):
     from services.workbench.mentions import default_capabilities
 
     selection = prune_unavailable_selection(base["soul"], selection)
-    selection = default_capabilities(base["soul"], selection, new_chat=True)
+    return default_capabilities(base["soul"], selection, new_chat=True)
+
+
+def create_chat(tenant_id, account_id):
+    base = template(tenant_id, account_id)
+    selection = default_selection(tenant_id, account_id, base)
     chat_id, revision_id = str(uuid4()), str(uuid4())
     with session_factory.get_session_maker().begin() as session:
         session.add(
@@ -338,12 +367,22 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload):
     selected = default_capabilities(base["soul"], Selection.model_validate(current["selection"]))
     mention_data = resolve_mentions(base["soul"], payload.get("resource_mentions"))
     mentioned_tools = mention_data["resource_mentions"]["tools"]
+    mentioned_skills = mention_data["resource_mentions"]["skills"]
+    provider_names, skill_names = {}, {}
     if mentioned_tools:
         display_tools = [tool for tool in public_resources(base["soul"])["tools"] if tool["id"] in mentioned_tools]
         enrich_tool_labels(tenant_id, display_tools)
-        mention_data = resolve_mentions(base["soul"], payload.get("resource_mentions"), provider_names={
-            tool["id"]: tool["provider_name"] for tool in display_tools if tool.get("provider_name")
-        })
+        provider_names = {tool["id"]: tool["provider_name"] for tool in display_tools if tool.get("provider_name")}
+    if mentioned_skills:
+        display_skills = [
+            skill for skill in public_resources(base["soul"])["skills"] if skill["id"] in mentioned_skills
+        ]
+        enrich_skill_labels(tenant_id, base["agent_id"], display_skills)
+        skill_names = {skill["id"]: skill["name"] for skill in display_skills}
+    if mentioned_tools or mentioned_skills:
+        mention_data = resolve_mentions(
+            base["soul"], payload.get("resource_mentions"), provider_names=provider_names, skill_names=skill_names
+        )
     selected.knowledge = list(dict.fromkeys([*selected.knowledge, *mention_data["resource_mentions"]["knowledge"]]))
     effective = compile_config(tenant_id, base, selected)
     if effective.get("knowledge", {}).get("sets") and not payload.get("query", "").strip():
@@ -352,7 +391,7 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload):
     if payload.get("files"):
         from services.workbench.files import validate_attachments
 
-        paths, images = validate_attachments(tenant_id, account_id, payload["files"])
+        paths, images = validate_attachments(tenant_id, account_id, chat_id, payload["files"])
         payload = {**payload, "sandbox_paths": paths, "image_files": images, "files": []}
     with session_factory.get_session_maker().begin() as session:
         chat = _chat(session, tenant_id, account_id, chat_id, lock=True)
@@ -402,8 +441,6 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload):
             event_log="[]",
         )
         session.add(run)
-        if chat.title == "新会话":
-            chat.title = (payload["query"].strip() or payload["sandbox_paths"][0].rsplit("/", 1)[-1])[:80]
         session.flush()
         dto = run_dto(run)
     from services.workbench.scheduler import publish

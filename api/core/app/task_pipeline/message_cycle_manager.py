@@ -149,6 +149,7 @@ class MessageCycleManager:
                                 conversation_id,
                                 conversation.app_id,
                                 message_id=message_id,
+                                plain_title=bool(getattr(self._application_generate_entity, "workbench_run_id", None)),
                             )
                             redis_client.setex(cache_key, 3600, name)
                         except Exception:
@@ -159,6 +160,13 @@ class MessageCycleManager:
                             name = query[:47] + "..." if len(query) > 50 else query
                     conversation.name = name
                     session.commit()
+                    if dify_config.WORKBENCH_ENABLED:
+                        from services.workbench.titles import sync_native_title
+
+                        try:
+                            sync_native_title(app_model.tenant_id, conversation_id)
+                        except Exception:
+                            logger.exception("Unable to mirror generated workbench title")
 
     def handle_annotation_reply(self, event: QueueAnnotationReplyEvent, session: Session) -> MessageAnnotation | None:
         """

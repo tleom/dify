@@ -32,8 +32,8 @@ there are no separate output or snapshot events to correlate.
 """
 
 import asyncio
-from collections.abc import AsyncIterable, Callable, Mapping
 from collections import Counter
+from collections.abc import AsyncIterable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast, runtime_checkable
 
@@ -56,18 +56,17 @@ from dify_agent.layers.dify_plugin.tools_layer import DifyPluginToolsLayer
 from dify_agent.layers.knowledge.client import DifyKnowledgeBaseClientError
 from dify_agent.layers.knowledge.layer import DifyKnowledgeBaseLayer
 from dify_agent.protocol.schemas import (
+    DIFY_AGENT_MODEL_LAYER_ID,
     AgentRunUsage,
     CreateRunRequest,
-    DIFY_AGENT_MODEL_LAYER_ID,
     DeferredToolCallPayload,
     RunFailureType,
     normalize_composition,
 )
 from dify_agent.runtime.agent_factory import create_agent, normalize_user_input
 from dify_agent.runtime.agenton_validation import is_agenton_enter_validation_runtime_error
-from dify_agent.runtime.compositor_factory import build_pydantic_ai_compositor, create_default_layer_providers
 from dify_agent.runtime.compaction import build_compaction_capability
-from dify_agent.runtime_backend import BindingLostError
+from dify_agent.runtime.compositor_factory import build_pydantic_ai_compositor, create_default_layer_providers
 from dify_agent.runtime.event_coalescer import (
     DEFAULT_TEXT_DELTA_FLUSH_INTERVAL_SECONDS,
     DEFAULT_TEXT_DELTA_MAX_CHARS,
@@ -88,7 +87,7 @@ from dify_agent.runtime.history import (
 from dify_agent.runtime.layer_exit_signals import apply_layer_exit_signals, validate_layer_exit_signals
 from dify_agent.runtime.output_type import resolve_run_output_contract, validate_output_layer_composition
 from dify_agent.runtime.user_prompt_validation import EMPTY_USER_PROMPTS_ERROR, has_non_blank_user_prompt
-
+from dify_agent.runtime_backend import BindingLostError
 
 _AGENT_OUTPUT_ADAPTER = TypeAdapter(object)
 _MAX_AGENT_STEPS_PER_RUN = 500
@@ -336,19 +335,29 @@ class AgentRunRunner:
             async with compositor.enter(configs=layer_configs, session_snapshot=restore_snapshot) as run:
                 if self.request.rebuild_layers and self.request.session_snapshot is not None:
                     from agenton_collections.layers.pydantic_ai.history import PydanticAIHistoryRuntimeState
-                    previous = next((layer for layer in self.request.session_snapshot.layers if layer.name == "history"), None)
+
+                    previous = next(
+                        (layer for layer in self.request.session_snapshot.layers if layer.name == "history"), None
+                    )
                     history = get_history_layer(run)
                     if previous is not None and history is not None:
-                        history.replace_messages(PydanticAIHistoryRuntimeState.model_validate(previous.runtime_state).messages)
+                        history.replace_messages(
+                            PydanticAIHistoryRuntimeState.model_validate(previous.runtime_state).messages
+                        )
                 entered_run = True
                 apply_layer_exit_signals(run, self.request.on_exit)
                 user_prompts = run.user_prompts
                 deferred_tool_results = _resolve_deferred_tool_results(self.request)
                 if deferred_tool_results is None and not has_non_blank_user_prompt(user_prompts):
                     raise AgentRunValidationError(EMPTY_USER_PROMPTS_ERROR)
-                knowledge_layer = next((slot.layer for slot in run.slots.values()
-                                        if isinstance(slot.layer, DifyKnowledgeBaseLayer)
-                                        and slot.layer.config.workbench_run_id), None)
+                knowledge_layer = next(
+                    (
+                        slot.layer
+                        for slot in run.slots.values()
+                        if isinstance(slot.layer, DifyKnowledgeBaseLayer) and slot.layer.config.workbench_run_id
+                    ),
+                    None,
+                )
 
                 async def handle_events(_ctx: object, events: AsyncIterable[AgentStreamEvent]) -> None:
                     published_events = coalesce_agent_stream_events(
@@ -375,7 +384,8 @@ class AgentRunRunner:
                     history_layer = get_history_layer(run)
                     message_history = history_layer.message_history if history_layer is not None else None
                     ask_human_layer = get_ask_human_layer(run)
-                    from dify_agent.layers.workbench_environment import WorkbenchEnvironmentLayer, TOOL_NAME
+                    from dify_agent.layers.workbench_environment import TOOL_NAME, WorkbenchEnvironmentLayer
+
                     try:
                         environment_layer = run.get_layer("workbench_environment", WorkbenchEnvironmentLayer)
                     except KeyError:
@@ -385,6 +395,15 @@ class AgentRunRunner:
                         context_window_tokens=llm_layer.config.context_window_tokens,
                         model_settings=llm_layer.config.model_settings,
                     )
+                    if self.request.execution_ticket:
+                        from dify_agent.runtime.context_status import WorkbenchContextStatus
+
+                        compaction = WorkbenchContextStatus(
+                            compaction=compaction,
+                            window_tokens=llm_layer.config.context_window_tokens,
+                            sink=self.sink,
+                            run_id=self.run_id,
+                        )
                     model = llm_layer.get_model(
                         http_client=self.dify_api_http_client,
                         agent_run_id=self.run_id,
@@ -407,7 +426,9 @@ class AgentRunRunner:
                 agent = create_agent(
                     model,
                     tools=prepare_knowledge_tools(tools, knowledge_layer),
-                    output_type=_resolve_agent_output_type(output_contract.output_type, ask_human_layer is not None or environment_layer is not None),
+                    output_type=_resolve_agent_output_type(
+                        output_contract.output_type, ask_human_layer is not None or environment_layer is not None
+                    ),
                 )
                 require_knowledge_before_answer(agent, knowledge_layer)
                 run_timeout = asyncio.timeout(self.run_timeout_seconds)
@@ -437,7 +458,11 @@ class AgentRunRunner:
                 usage = _serialize_agent_usage(complete_usage if complete_usage is not None else _result_usage(result))
                 self._terminal_usage = usage
                 if isinstance(result.output, DeferredToolRequests):
-                    deferred_layer = environment_layer if (result.output.calls and result.output.calls[0].tool_name == TOOL_NAME) else ask_human_layer
+                    deferred_layer = (
+                        environment_layer
+                        if (result.output.calls and result.output.calls[0].tool_name == TOOL_NAME)
+                        else ask_human_layer
+                    )
                     if deferred_layer is None:
                         raise AgentRunValidationError(
                             "Deferred tool requests were returned, but no active ask_human layer is available for validation."
@@ -492,7 +517,7 @@ def _result_usage(result: object) -> object | None:
         return None
 
     usage = result.usage
-    if isinstance(usage, _HasInputTokens) or isinstance(usage, _HasOutputTokens):
+    if isinstance(usage, (_HasInputTokens, _HasOutputTokens)):
         return usage
     if callable(usage):
         usage_getter = cast(Callable[[], object], usage)
