@@ -1,11 +1,12 @@
 """SQLite exercises persisted event order/ownership, with Redis failure isolated at the wake-up boundary."""
 
 import json
+from collections.abc import Iterator
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 from werkzeug.exceptions import NotFound
 
 from core.db import session_factory as factory_module
@@ -14,12 +15,13 @@ from models.workbench import WorkbenchChat, WorkbenchRun, WorkbenchRunEvent
 from services.workbench import event_log
 
 _REAL_NOTIFY = event_log.notify
+type Journal = tuple[sessionmaker[Session], str, str, str, str]
 
 
 @pytest.fixture
-def journal(monkeypatch):
+def journal(monkeypatch: pytest.MonkeyPatch) -> Iterator[Journal]:
     engine = create_engine("sqlite://")
-    TypeBase.metadata.create_all(engine, tables=[model.__table__ for model in (
+    TypeBase.metadata.create_all(engine, tables=[TypeBase.metadata.tables[model.__tablename__] for model in (
         WorkbenchChat, WorkbenchRun, WorkbenchRunEvent,
     )])
     factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -40,7 +42,7 @@ def journal(monkeypatch):
     engine.dispose()
 
 
-def test_history_live_and_reconnect_share_one_durable_order(journal):
+def test_history_live_and_reconnect_share_one_durable_order(journal: Journal) -> None:
     factory, tenant, account, run_id, _ = journal
     events = [
         {"event": "agent_message", "message_id": "message", "answer": "开始"},
@@ -53,6 +55,7 @@ def test_history_live_and_reconnect_share_one_durable_order(journal):
         assert event_log.append_event(run_id, item) == f"{index}-0"
     with factory.begin() as session:
         run = session.get(WorkbenchRun, run_id)
+        assert run is not None
         run.status = "completed"
         saved = event_log.history_events(run)
         payload = json.loads(run.payload)
@@ -63,26 +66,34 @@ def test_history_live_and_reconnect_share_one_durable_order(journal):
         run.event_log = "[]"
     live = list(event_log.stream_events(tenant, account, run_id))
     assert live[:-1] == saved
-    assert live[-1]["status"] == "completed"
+    terminal = live[-1]
+    assert terminal is not None
+    assert terminal["status"] == "completed"
     assert list(event_log.stream_events(tenant, account, run_id, after=2))[:-1] == saved[2:]
 
 
-def test_idempotent_source_and_native_attempt_validation(journal):
+def test_idempotent_source_and_native_attempt_validation(journal: Journal) -> None:
     factory, tenant, account, run_id, _ = journal
     with factory() as session:
-        ticket = session.get(WorkbenchRun, run_id).backend_run_id
-    item = {"event": "workbench_activity", "backend_run_id": ticket, "source_event_id": "1-0", "data": {}}
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        ticket = run.backend_run_id
+    item: dict[str, object] = {
+        "event": "workbench_activity", "backend_run_id": ticket, "source_event_id": "1-0", "data": {},
+    }
     assert event_log.append_event(run_id, item, expected_backend_run_id=ticket) == "1-0"
     assert event_log.append_event(run_id, item, expected_backend_run_id=ticket) == "1-0"
     assert event_log.append_event(run_id, item, expected_backend_run_id="old") is None
     with factory.begin() as session:
-        session.get(WorkbenchRun, run_id).status = "cancelled"
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        run.status = "cancelled"
     assert event_log.append_event(run_id, {**item, "source_event_id": "2-0"}) is None
     assert len(event_log.read_page(tenant, account, run_id)[0]) == 1
 
 
 @pytest.mark.parametrize("boundary", ["tenant", "account", "chat_tenant", "chat_account", "deleted"])
-def test_every_page_rechecks_full_ownership(journal, boundary):
+def test_every_page_rechecks_full_ownership(journal: Journal, boundary: str) -> None:
     factory, tenant, account, run_id, chat_id = journal
     event_log.append_event(run_id, {"event": "agent_message", "answer": "private"})
     if boundary in {"tenant", "account"}:
@@ -101,7 +112,9 @@ def test_every_page_rechecks_full_ownership(journal, boundary):
         event_log.read_state(tenant, account, run_id)
 
 
-def test_events_endpoint_reconnects_without_materializing_the_full_journal(journal, monkeypatch):
+def test_events_endpoint_reconnects_without_materializing_the_full_journal(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from flask import Flask
 
     from controllers.console import workbench
@@ -109,11 +122,12 @@ def test_events_endpoint_reconnects_without_materializing_the_full_journal(journ
     factory, tenant, account, run_id, _ = journal
     with factory.begin() as session:
         run = session.get(WorkbenchRun, run_id)
+        assert run is not None
         for index in range(3):
             event_log.append_locked(session, run, {"event": "agent_message", "answer": f"{index}:" + "x" * 100_000})
         run.status = "completed"
 
-    def unexpected_history(*_args, **_kwargs):
+    def unexpected_history(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("SSE must read only pages after the requested cursor")
 
     monkeypatch.setattr(workbench.WorkbenchResource, "owner", lambda _self: (tenant, account))
@@ -121,17 +135,18 @@ def test_events_endpoint_reconnects_without_materializing_the_full_journal(journ
     monkeypatch.setattr(event_log, "history_events", unexpected_history)
     with Flask(__name__).test_request_context(headers={"Last-Event-ID": "2-0"}):
         response = workbench.Events().get(UUID(run_id))
-        text = "".join(response.response)
+        text = response.get_data(as_text=True)
     assert "id: 3-0\n" in text
     assert "id: 1-0\n" not in text
     assert "id: 2-0\n" not in text
     assert '"status": "completed"' in text
 
 
-def test_terminal_stream_drains_all_pages_and_ignores_old_attempt_end(journal):
+def test_terminal_stream_drains_all_pages_and_ignores_old_attempt_end(journal: Journal) -> None:
     factory, tenant, account, run_id, _ = journal
     with factory.begin() as session:
         run = session.scalar(select(WorkbenchRun).where(WorkbenchRun.id == run_id).with_for_update())
+        assert run is not None
         for index in range(105):
             event_log.append_locked(session, run, {"event": "agent_message", "answer": str(index)})
         event_log.append_locked(session, run, {"event": "workbench_end", "status": "environment_update"})
@@ -139,11 +154,14 @@ def test_terminal_stream_drains_all_pages_and_ignores_old_attempt_end(journal):
         run.status = "completed"
     stream = list(event_log.stream_events(tenant, account, run_id))
     assert len(stream) == 107
-    assert stream[-2]["answer"] == "安装后验证"
-    assert stream[-1]["status"] == "completed"
+    answer, terminal = stream[-2:]
+    assert answer is not None
+    assert terminal is not None
+    assert answer["answer"] == "安装后验证"
+    assert terminal["status"] == "completed"
 
 
-def test_notification_failure_does_not_lose_committed_event(journal, monkeypatch):
+def test_notification_failure_does_not_lose_committed_event(journal: Journal, monkeypatch: pytest.MonkeyPatch) -> None:
     _, tenant, account, run_id, _ = journal
     from unittest.mock import Mock
 

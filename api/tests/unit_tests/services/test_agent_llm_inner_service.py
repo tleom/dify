@@ -206,8 +206,8 @@ def test_gateway_uses_quota_managed_instance_as_single_credit_owner(
 
 @pytest.mark.parametrize("invalid_reference", [False, True])
 def test_gateway_uses_explicit_reference_without_default_credential_fallback(
-    sqlite_session_factory, sqlite_session, invalid_reference,
-):
+    sqlite_session_factory: sessionmaker[Session], sqlite_session: Session, invalid_reference: bool,
+) -> None:
     from dify_agent.layers.dify_plugin.configs import DifyModelCredentialRef
 
     request = _request()

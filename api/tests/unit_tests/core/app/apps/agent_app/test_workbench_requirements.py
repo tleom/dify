@@ -3,6 +3,9 @@
 from dataclasses import replace
 
 import pytest
+from dify_agent.layers.config import DifyConfigLayerConfig
+from dify_agent.layers.dify_plugin.configs import DifyPluginLLMLayerConfig
+from dify_agent.layers.workbench_mentions import WorkbenchMentionsConfig
 
 from core.app.apps.agent_app.runtime_request_builder import (
     AgentAppRuntimeRequestBuilder,
@@ -19,7 +22,7 @@ from tests.unit_tests.core.app.apps.agent_app.test_runtime_request_builder impor
 )
 
 
-def test_user_only_skill_and_plugin_mentions_are_required_only_for_this_turn(monkeypatch):
+def test_user_only_skill_and_plugin_mentions_are_required_only_for_this_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     data = _soul_with_model_and_skill().model_dump(mode="json")
     data["prompt"]["system_prompt"] = "Answer the request."
     data["tools"]["dify_tools"] = [
@@ -42,19 +45,22 @@ def test_user_only_skill_and_plugin_mentions_are_required_only_for_this_turn(mon
     context = replace(_ctx(soul), workbench_runtime=runtime)
     first = builder.build(replace(context, workbench_run_id="first-run")).request
     config = next(layer.config for layer in first.composition.layers if layer.name == "config")
+    assert isinstance(config, DifyConfigLayerConfig)
     assert config.mentioned_skill_names == ["tender-analyzer"]
     required = next(layer.config for layer in first.composition.layers if layer.name == "workbench_mentions")
+    assert isinstance(required, WorkbenchMentionsConfig)
     assert required.workbench_run_id == "first-run"
     assert required.tool_groups[0].tool_names == ["current_time"]
     mentions = ResourceMentions()
     second = builder.build(replace(context, workbench_run_id="second-run")).request
     config = next(layer.config for layer in second.composition.layers if layer.name == "config")
+    assert isinstance(config, DifyConfigLayerConfig)
     assert config.mentioned_skill_names == []
     assert all(layer.name != "workbench_mentions" for layer in second.composition.layers)
     assert soul.prompt.system_prompt == "Answer the request."
 
 
-def test_workbench_requires_the_injected_runtime_to_enforce_turn_resources():
+def test_workbench_requires_the_injected_runtime_to_enforce_turn_resources() -> None:
     builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_PluginLayerBuilder())
     context = replace(_ctx(_soul_with_model_and_skill()), workbench_run_id="run", workbench_runtime=None)
     with pytest.raises(AgentAppRuntimeRequestBuildError, match="Workbench runtime is required"):
@@ -62,11 +68,13 @@ def test_workbench_requires_the_injected_runtime_to_enforce_turn_resources():
 
 
 @pytest.mark.parametrize("kind", ["provider", "model"])
-def test_model_reference_reaches_runtime_and_context_capability_resolution(monkeypatch, kind):
+def test_model_reference_reaches_runtime_and_context_capability_resolution(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
     data = _soul_with_model_and_skill().model_dump(mode="json")
     reference = {"type": kind, "id": "explicit-credential", "provider": "langgenius/openai/openai"}
     data["model"]["credential_ref"] = reference
-    seen = []
+    seen: list[dict[str, object]] = []
     monkeypatch.setattr(
         "core.app.apps.agent_app.runtime_request_builder.load_runtime_agent_skill_configs", lambda **_kwargs: []
     )
@@ -78,6 +86,8 @@ def test_model_reference_reaches_runtime_and_context_capability_resolution(monke
         _ctx(AgentSoulConfig.model_validate(data))
     )
     llm = next(layer.config for layer in built.request.composition.layers if layer.name == "llm")
+    assert isinstance(llm, DifyPluginLLMLayerConfig)
+    assert llm.credential_ref is not None
     assert llm.credential_ref.model_dump() == reference
     assert seen[0]["credential_ref"] == reference
     assert llm.context_window_tokens == 16384

@@ -60,7 +60,9 @@ def _app() -> Flask:
 def test_post_streams_plugin_compatible_envelope() -> None:
     payload = _payload()
     reference = {"type": "provider", "id": str(uuid4())}
-    payload["target"]["credential_ref"] = reference
+    target = payload["target"]
+    assert isinstance(target, dict)
+    target["credential_ref"] = reference
     request = AgentLLMInvokeRequest.model_validate(payload)
     prepared = PreparedAgentLLMInvocation(request=request, model_instance=MagicMock())
     chunk = LLMResultChunk(

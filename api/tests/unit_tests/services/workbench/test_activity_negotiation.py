@@ -1,6 +1,7 @@
 """Old clients remain on their existing transcript protocol when producers are enabled."""
 
 import json
+from collections.abc import Callable
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -14,8 +15,10 @@ from services.workbench import branches, mentions, scheduler, service
 
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("requested", [None, 0, 1])
-def test_enqueue_freezes_only_a_negotiated_and_enabled_protocol(monkeypatch, enabled, requested):
-    monkeypatch.setattr(service.dify_config, "WORKBENCH_ACTIVITY_ENABLED", enabled)
+def test_enqueue_freezes_only_a_negotiated_and_enabled_protocol(
+    monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., None], enabled: bool, requested: int | None
+) -> None:
+    config_overrides(WORKBENCH_ACTIVITY_ENABLED=enabled)
     monkeypatch.setattr(
         service, "template", lambda *_args: {"soul": {}, "agent_id": "agent", "snapshot_id": "snapshot"}
     )
@@ -37,7 +40,7 @@ def test_enqueue_freezes_only_a_negotiated_and_enabled_protocol(monkeypatch, ena
         lambda run: {"id": run.id, "activity_protocol": json.loads(run.payload)["activity_protocol"]},
     )
     monkeypatch.setattr(scheduler, "publish", Mock())
-    payload = {"query": "hello"}
+    payload: dict[str, str | int] = {"query": "hello"}
     if requested is not None:
         payload["activity_protocol"] = requested
     result = service.enqueue("tenant", "account", "chat", 1, "request", payload)
@@ -47,7 +50,9 @@ def test_enqueue_freezes_only_a_negotiated_and_enabled_protocol(monkeypatch, ena
 
 
 @pytest.mark.parametrize("model", [WorkbenchRunPayload, WorkbenchRegeneratePayload])
-def test_transport_defaults_to_legacy_and_rejects_unknown_protocol(model):
+def test_transport_defaults_to_legacy_and_rejects_unknown_protocol(
+    model: type[WorkbenchRunPayload] | type[WorkbenchRegeneratePayload],
+) -> None:
     assert model.model_validate({"version": 1, "request_key": "key", "query": "hello"}).activity_protocol == 0
     with pytest.raises(ValidationError):
         model.model_validate({"version": 1, "request_key": "key", "query": "hello", "activity_protocol": 2})

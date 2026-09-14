@@ -32,6 +32,7 @@ from core.app.apps.agent_app.runtime_request_builder import (
 )
 from core.app.entities.app_invoke_entities import InvokeFrom, UserFrom
 from core.workflow.file_reference import build_file_reference
+from core.workflow.nodes.agent_v2.dify_tools_builder import WorkflowAgentToolLayers
 from graphon.file import File, FileTransferMethod, FileType
 from graphon.model_runtime.entities.message_entities import ImagePromptMessageContent
 from models.agent_config_entities import AgentSoulConfig
@@ -187,8 +188,8 @@ class _NoToolsBuilder:
 
 
 class _PluginLayerBuilder:
-    def build_layers(self, **kwargs):
-        return SimpleNamespace(
+    def build_layers(self, **kwargs: object) -> WorkflowAgentToolLayers:
+        return WorkflowAgentToolLayers(
             plugin_tools=DifyPluginToolsLayerConfig(
                 tools=[
                     DifyPluginToolConfig(
@@ -206,7 +207,6 @@ class _PluginLayerBuilder:
                 ]
             ),
             core_tools=None,
-            exposed_tool_names=lambda: ["current_time"],
         )
 
 

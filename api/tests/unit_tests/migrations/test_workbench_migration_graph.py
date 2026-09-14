@@ -20,9 +20,10 @@ def test_default_upgrade_head_includes_workbench_and_upstream() -> None:
 
 
 @pytest.mark.parametrize(("dialect_name", "payload_type"), [("mysql", "LONGTEXT"), ("postgresql", "TEXT")])
-def test_journal_payload_supports_large_tool_output_on_each_database(dialect_name, payload_type):
+def test_journal_payload_supports_large_tool_output_on_each_database(dialect_name: str, payload_type: str) -> None:
     scripts = ScriptDirectory(str(Path(__file__).resolve().parents[3] / "migrations"))
     migration = scripts.get_revision("wb20260914events")
+    assert migration is not None
     output = StringIO()
     context = MigrationContext.configure(dialect_name=dialect_name, opts={"as_sql": True, "output_buffer": output})
     with Operations.context(context):

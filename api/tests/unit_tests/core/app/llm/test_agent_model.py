@@ -2,11 +2,13 @@
 
 import json
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
 from dify_agent.layers.dify_plugin.configs import DifyModelCredentialRef
+from sqlalchemy.orm import Session
 
 from core.app.llm import agent_model
 from core.entities.provider_configuration import ProviderConfiguration, ProviderModelBundle
@@ -17,9 +19,11 @@ from models.credential_permission import CredentialPermission, CredentialType
 from models.enums import PermissionEnum
 from models.provider import ProviderCredential, ProviderModelCredential, ProviderType
 
+type CredentialContext = tuple[Session, ProviderConfiguration, str, str, MagicMock]
+
 
 @pytest.fixture
-def context(sqlite_session, monkeypatch):
+def context(sqlite_session: Session, monkeypatch: pytest.MonkeyPatch) -> CredentialContext:
     tenant, user = str(uuid4()), str(uuid4())
     account = Account(name="caller", email="caller@example.test")
     account.id = user
@@ -43,25 +47,30 @@ def context(sqlite_session, monkeypatch):
     return sqlite_session, configuration, tenant, user, decrypt
 
 
-def add_credential(context, kind="provider", **changes):
-    session, configuration, tenant, user, _ = context
-    kwargs = {
-        "tenant_id": tenant, "provider_name": "demo", "credential_name": "explicit",
-        "encrypted_config": json.dumps({"api_key": "encrypted-test-value", "endpoint": "test"}),
-    }
+def add_credential(
+    context: CredentialContext, kind: Literal["provider", "model"] = "provider", **changes: object
+) -> DifyModelCredentialRef:
+    session, _, tenant, user, _ = context
+    encrypted = json.dumps({"api_key": "encrypted-test-value", "endpoint": "test"})
     if kind == "model":
-        kwargs.update(model_name="test-model", model_type=ModelType.LLM)
+        record = ProviderModelCredential(
+            tenant_id=tenant, provider_name="demo", credential_name="explicit", encrypted_config=encrypted,
+            model_name="test-model", model_type=ModelType.LLM,
+        )
     else:
-        kwargs.update(user_id=user, visibility=PermissionEnum.ALL_TEAM)
-    kwargs.update(changes)
-    record = (ProviderCredential if kind == "provider" else ProviderModelCredential)(**kwargs)
+        record = ProviderCredential(
+            tenant_id=tenant, provider_name="demo", credential_name="explicit", encrypted_config=encrypted,
+            user_id=user, visibility=PermissionEnum.ALL_TEAM,
+        )
+    for key, value in changes.items():
+        setattr(record, key, value)
     session.add(record)
     session.commit()
     return DifyModelCredentialRef(type=kind, id=record.id)
 
 
 @pytest.mark.parametrize("kind", ["provider", "model"])
-def test_reference_uses_scoped_saved_credential(context, kind):
+def test_reference_uses_scoped_saved_credential(context: CredentialContext, kind: Literal["provider", "model"]) -> None:
     _, configuration, tenant, user, decrypt = context
     reference = add_credential(context, kind)
     values = agent_model._resolve_credentials(configuration, tenant, user, "test-model", reference)
@@ -80,7 +89,9 @@ def test_reference_uses_scoped_saved_credential(context, kind):
         ("model", {"tenant_id": str(uuid4())}),
     ],
 )
-def test_reference_rejects_wrong_owner_provider_model_or_visibility(context, kind, changes):
+def test_reference_rejects_wrong_owner_provider_model_or_visibility(
+    context: CredentialContext, kind: Literal["provider", "model"], changes: dict[str, object]
+) -> None:
     _, configuration, tenant, user, decrypt = context
     reference = add_credential(context, kind, **changes)
     with pytest.raises(ValueError, match="unavailable or not authorized"):
@@ -88,7 +99,7 @@ def test_reference_rejects_wrong_owner_provider_model_or_visibility(context, kin
     decrypt.assert_not_called()
 
 
-def test_partial_credential_visibility_uses_shared_permission_owner(context):
+def test_partial_credential_visibility_uses_shared_permission_owner(context: CredentialContext) -> None:
     session, configuration, tenant, user, _ = context
     reference = add_credential(context, user_id=str(uuid4()), visibility=PermissionEnum.PARTIAL_TEAM)
     with pytest.raises(ValueError, match="unavailable or not authorized"):
@@ -105,20 +116,23 @@ def test_partial_credential_visibility_uses_shared_permission_owner(context):
     assert agent_model._resolve_credentials(configuration, tenant, user, "test-model", reference)["endpoint"] == "test"
 
 
-def test_deleted_or_undecodable_reference_never_falls_back(context):
+def test_deleted_or_undecodable_reference_never_falls_back(context: CredentialContext) -> None:
     session, configuration, tenant, user, decrypt = context
     reference = add_credential(context)
     decrypt.side_effect = ValueError("invalid encrypted token")
     with pytest.raises(ValueError, match="could not be decoded"):
         agent_model._resolve_credentials(configuration, tenant, user, "test-model", reference)
     record = session.get(ProviderCredential, reference.id)
+    assert record is not None
     session.delete(record)
     session.commit()
     with pytest.raises(ValueError, match="unavailable or not authorized"):
         agent_model._resolve_credentials(configuration, tenant, user, "test-model", reference)
 
 
-def test_pinned_model_uses_custom_billing_and_disables_load_balancing_without_mutation(context, monkeypatch):
+def test_pinned_model_uses_custom_billing_and_disables_load_balancing_without_mutation(
+    context: CredentialContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _, configuration, tenant, user, _ = context
     reference = add_credential(context)
     configuration.using_provider_type = ProviderType.SYSTEM

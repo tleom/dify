@@ -129,7 +129,7 @@ def test_timestamp_contract_documents_required_epoch_seconds() -> None:
         "cancelled",
     ],
 )
-def test_history_executing_state(history, status):
+def test_history_executing_state(history: tuple[sessionmaker[Session], str, str, str], status: str) -> None:
     factory, tenant, account, chat_id = history
     with factory.begin() as session:
         session.add(
@@ -157,7 +157,9 @@ def test_history_executing_state(history, status):
     assert service.update_chat(tenant, account, chat_id, pinned=True)["has_active_run"] is expected_active
 
 
-def test_history_executing_state_ignores_foreign_run_owners(history):
+def test_history_executing_state_ignores_foreign_run_owners(
+    history: tuple[sessionmaker[Session], str, str, str],
+) -> None:
     factory, tenant, account, chat_id = history
     with factory.begin() as session:
         for run_tenant, run_account in ((str(uuid4()), account), (tenant, str(uuid4()))):
