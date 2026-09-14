@@ -11,11 +11,16 @@ the Agent's published config files and loaded through the config layer. The
 workbench environment layer enforces shared dependency updates and conversation
 file placement. Workbench Shell prompts omit native sandbox installation and
 Home-layout assumptions; administrators own environment usage guidance in
-published instructions or config files. The published CLI and environment
-declarations retain their existing runtime behavior and sandbox restrictions.
+published instructions or config files. CLI declarations use already-provisioned
+commands; workbench runs skip their installation scripts and request missing
+dependencies through the shared-environment owner. Environment declarations keep
+normal variables and account-host secret references, excluding the publisher's
+inline secret values.
 
 Workbench knowledge selection requires an access attempt before a final answer,
 while preparation tools and deferred human/environment requests remain available.
+Answer text is withheld until the required knowledge attempts have been made,
+so output rejected by the knowledge validator never appears as a streamed draft.
 Access failures are explicit observations; they neither count as successful
 searches nor force repeated calls. Retrieval failures within a dataset propagate
 to this boundary instead of silently becoming empty or partial search results.

@@ -12,6 +12,7 @@ from werkzeug.exceptions import BadRequest, Conflict, Forbidden, NotFound
 from configs import dify_config
 from core.rag.retrieval.dataset_retrieval import DatasetRetrieval
 from core.workflow.nodes.knowledge_retrieval.entities import MetadataFilteringCondition
+from graphon.model_runtime.entities.llm_entities import LLMMode
 from graphon.nodes.llm.entities import ModelConfig
 from models.dataset import Dataset, Document, DocumentSegment
 from models.workbench import WorkbenchChat, WorkbenchRun
@@ -107,7 +108,7 @@ def _document_query(session: Session, request: KnowledgeDocumentsPayload, datase
             tenant_id=request.caller.tenant_id,
             user_id=request.caller.user_id,
             metadata_filtering_mode="manual",
-            metadata_model_config=ModelConfig(provider="", name="", mode="chat", completion_params={}),
+            metadata_model_config=ModelConfig(provider="", name="", mode=LLMMode.CHAT, completion_params={}),
             metadata_filtering_conditions=MetadataFilteringCondition.model_validate(filtering["conditions"]),
             inputs={},
         )

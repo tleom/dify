@@ -280,6 +280,11 @@ class DifyShellLayer(PydanticAILayer[DifyShellLayerDeps, object, DifyShellLayerC
 
     @override
     async def on_context_create(self) -> None:
+        execution_context = self.deps.execution_context
+        if execution_context is not None and execution_context.config.workbench_run_id:
+            # Workbench dependencies are provisioned by the shared-environment
+            # owner. Published CLI declarations must not bootstrap a private tree.
+            return
         bootstrap_script = _workspace_bootstrap_script(self.config)
         if not bootstrap_script:
             return

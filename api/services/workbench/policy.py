@@ -113,9 +113,13 @@ def compile_selection(
         result["tools"]["dify_tools"].append(tool)
     result["config_skills"] = [copy.deepcopy(resources["skills"][key]) for key in selection.skills]
     result["knowledge"] = {"sets": [copy.deepcopy(resources["knowledge"][key]) for key in selection.knowledge]}
-    # Files and environment declarations remain frozen copies of the published
-    # template. Secret references are names, resolved by the sandbox host; this
-    # compiler neither reads host secrets nor exposes env values in the catalog.
+    # Preserve declarations, but do not copy the publisher's inline credentials
+    # into an account shell. Reference names are resolved by that account's host.
+    environments = [result.get("env") or {}]
+    environments.extend(tool.get("env") or {} for tool in result["tools"].get("cli_tools", []))
+    for environment in environments:
+        for secret_ref in environment.get("secret_refs", []):
+            secret_ref.pop("value", None)
     return result
 
 

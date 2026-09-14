@@ -359,6 +359,26 @@ def test_shell_layer_create_bootstraps_inside_sandbox_workspace() -> None:
     assert [call.job_id for call in provider.resource.commands.delete_calls] == ["bootstrap-job"]
 
 
+def test_workbench_create_uses_existing_cli_without_running_installers() -> None:
+    layer, provider = _layer(
+        commands=FakeCommands(),
+        config=DifyShellLayerConfig(
+            cli_tools=[DifyShellCliToolConfig(name="ripgrep", install_commands=["apt-get install -y ripgrep"])],
+        ),
+    )
+    _bind_execution_context(layer)
+    layer.deps.execution_context.config.workbench_run_id = "run-1"
+
+    async def scenario() -> None:
+        async with layer.resource_context():
+            await layer.on_context_create()
+
+    asyncio.run(scenario())
+
+    assert provider.resource.commands.run_calls == []
+    assert layer.config.cli_tools[0].name == "ripgrep"
+
+
 def test_shell_layer_uses_sandbox_layout_for_home_and_workspace_cwd() -> None:
     expected_home = "/home/agent-1"
     expected_workspace_cwd = "/home/agent-1/workspace/abc12ff"

@@ -205,3 +205,51 @@ def test_published_cli_env_and_secret_references_are_frozen_without_client_overr
         Selection.model_validate(
             {"model": "m", "env": {"variables": [{"name": "FORGED", "value": "value"}]}}
         )
+
+
+@pytest.mark.parametrize("scope", ["global", "cli"])
+def test_published_inline_secrets_do_not_become_account_shell_variables(
+    template, scope
+):
+    from core.workflow.nodes.agent_v2.runtime_request_builder import (
+        build_shell_layer_config,
+    )
+    from models.agent_config_entities import AgentSoulConfig
+
+    environment = {
+        "variables": [{"name": "PUBLIC_SETTING", "value": "enabled"}],
+        "secret_refs": [
+            {"name": "PUBLISHER_TOKEN", "value": "publisher-private-token"},
+            {
+                "name": "ACCOUNT_TOKEN",
+                "ref": "account-managed-token",
+                "value": "publisher-copy",
+            },
+        ],
+    }
+    if scope == "global":
+        template["env"] = environment
+    else:
+        template["tools"]["cli_tools"] = [{"name": "cli", "env": environment}]
+    original = copy.deepcopy(template)
+
+    effective = compile_selection(template, Selection(model="m"), {"m": {"model": "m"}})
+    config = build_shell_layer_config(
+        AgentSoulConfig.model_validate(
+            {
+                "env": effective["env"],
+                "tools": {"cli_tools": effective["tools"]["cli_tools"]},
+            }
+        )
+    )
+    shell_environment = config if scope == "global" else config.cli_tools[0]
+
+    assert template == original
+    assert [(item.name, item.value) for item in shell_environment.env] == [
+        ("PUBLIC_SETTING", "enabled")
+    ]
+    assert [(item.name, item.ref) for item in shell_environment.secret_refs] == [
+        ("ACCOUNT_TOKEN", "account-managed-token")
+    ]
+    assert "publisher-private-token" not in config.model_dump_json()
+    assert "publisher-copy" not in config.model_dump_json()
