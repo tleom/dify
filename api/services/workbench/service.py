@@ -11,6 +11,7 @@ from werkzeug.exceptions import Conflict, Forbidden, NotFound
 
 from configs import dify_config
 from core.db.session_factory import session_factory
+from libs.datetime_utils import naive_utc_now, to_utc_timestamp
 from models import Account, TenantAccountJoin
 from models.agent import Agent, AgentConfigSnapshot
 from models.agent_config_entities import AgentSoulConfig
@@ -196,6 +197,8 @@ def read_chat(tenant_id: str, account_id: str, chat_id: str):
             "id": chat.id,
             "title": chat.title,
             "file_directory": chat_directory(session, chat),
+            "created_at": to_utc_timestamp(chat.created_at),
+            "updated_at": to_utc_timestamp(chat.updated_at),
             "pinned": chat.pinned,
             "version": chat.version,
             "template_snapshot_id": revision.template_snapshot_id or chat.base_snapshot_id,
@@ -246,6 +249,8 @@ def list_chats(tenant_id, account_id):
             {
                 "id": c.id,
                 "title": c.title,
+                "created_at": to_utc_timestamp(c.created_at),
+                "updated_at": to_utc_timestamp(c.updated_at),
                 "version": c.version,
                 "pinned": c.pinned,
                 "file_directory": chat_directory(session, c),
@@ -273,9 +278,12 @@ def update_chat(tenant_id, account_id, chat_id, *, title=None, pinned=None):
             chat.title = title
         if pinned is not None:
             chat.pinned = pinned
+        session.flush()
         return {
             "id": chat.id,
             "title": chat.title,
+            "created_at": to_utc_timestamp(chat.created_at),
+            "updated_at": to_utc_timestamp(chat.updated_at),
             "version": chat.version,
             "pinned": chat.pinned,
             "file_directory": chat_directory(session, chat),
@@ -450,6 +458,7 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload: dict[
             event_log="[]",
         )
         session.add(run)
+        chat.updated_at = naive_utc_now()
         session.flush()
         dto = run_dto(run)
     from services.workbench.scheduler import publish
