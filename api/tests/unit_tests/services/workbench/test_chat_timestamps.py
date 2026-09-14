@@ -115,6 +115,126 @@ def test_timestamp_contract_documents_required_epoch_seconds() -> None:
         assert "Unix seconds" in schema["properties"][field]["description"]
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        "queued",
+        "running",
+        "environment_installing",
+        "stopping",
+        "waiting_input",
+        "environment_update",
+        "completed",
+        "failed",
+        "cancelled",
+    ],
+)
+def test_history_executing_state(history, status):
+    factory, tenant, account, chat_id = history
+    with factory.begin() as session:
+        session.add(
+            WorkbenchRun(
+                id=str(uuid4()),
+                tenant_id=tenant,
+                account_id=account,
+                chat_id=chat_id,
+                revision_id=str(uuid4()),
+                request_key=str(uuid4()),
+                payload="{}",
+                status=status,
+            )
+        )
+    expected = status in {"queued", "running", "environment_installing", "stopping"}
+    listed = WorkbenchChatSummaryResponse.model_validate(service.list_chats(tenant, account)[0])
+    assert listed.is_running is expected
+    assert listed.needs_input is (status == "waiting_input")
+    assert service.read_chat(tenant, account, chat_id)["is_running"] is expected
+    assert service.read_chat(tenant, account, chat_id)["needs_input"] is (status == "waiting_input")
+    assert service.update_chat(tenant, account, chat_id, pinned=True)["is_running"] is expected
+
+
+def test_history_executing_state_ignores_foreign_run_owners(history):
+    factory, tenant, account, chat_id = history
+    with factory.begin() as session:
+        for run_tenant, run_account in ((str(uuid4()), account), (tenant, str(uuid4()))):
+            session.add(
+                WorkbenchRun(
+                    id=str(uuid4()),
+                    tenant_id=run_tenant,
+                    account_id=run_account,
+                    chat_id=chat_id,
+                    revision_id=str(uuid4()),
+                    request_key=str(uuid4()),
+                    payload="{}",
+                    status="running",
+                )
+            )
+    assert service.list_chats(tenant, account)[0]["is_running"] is False
+    assert service.read_chat(tenant, account, chat_id)["is_running"] is False
+    assert service.list_chats(tenant, account)[0]["needs_input"] is False
+
+
+def test_favorites_keep_their_chronological_position_and_activity_time(
+    history: tuple[sessionmaker[Session], str, str, str],
+) -> None:
+    factory, tenant, account, chat_id = history
+    newer_id = str(uuid4())
+    with factory.begin() as session:
+        original = session.get(WorkbenchChat, chat_id)
+        assert original is not None
+        session.add(
+            WorkbenchChat(
+                id=newer_id,
+                tenant_id=tenant,
+                account_id=account,
+                agent_id=original.agent_id,
+                app_id=original.app_id,
+                base_snapshot_id=original.base_snapshot_id,
+                title="最近的会话",
+                version=1,
+                created_at=datetime(2026, 9, 1),
+                updated_at=datetime(2026, 9, 14),
+            )
+        )
+    original_time = int(datetime(2026, 8, 1, tzinfo=UTC).timestamp())
+    for pinned in (True, False):
+        result = service.update_chat(tenant, account, chat_id, pinned=pinned)
+        assert result["pinned"] is pinned
+        assert result["updated_at"] == original_time
+        chats = service.list_chats(tenant, account)
+        assert [chat["id"] for chat in chats] == [newer_id, chat_id]
+        assert chats[-1]["updated_at"] == original_time
+
+
+def test_history_limit_selects_recent_chats_before_favorites(
+    history: tuple[sessionmaker[Session], str, str, str],
+) -> None:
+    factory, tenant, account, chat_id = history
+    with factory.begin() as session:
+        original = session.get(WorkbenchChat, chat_id)
+        assert original is not None
+        original.pinned = True
+        original.updated_at = datetime(2026, 8, 2)
+        for index in range(200):
+            session.add(
+                WorkbenchChat(
+                    id=str(uuid4()),
+                    tenant_id=tenant,
+                    account_id=account,
+                    agent_id=original.agent_id,
+                    app_id=original.app_id,
+                    base_snapshot_id=original.base_snapshot_id,
+                    title=f"最近的会话 {index}",
+                    version=1,
+                    created_at=datetime(2026, 9, 1),
+                    updated_at=datetime(2026, 9, 14),
+                )
+            )
+    chats = service.list_chats(tenant, account)
+    assert len(chats) == 200
+    assert all(chat["id"] != chat_id for chat in chats)
+
+
 def test_new_message_refreshes_history_time_but_idempotent_retry_does_not(
     history: tuple[sessionmaker[Session], str, str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

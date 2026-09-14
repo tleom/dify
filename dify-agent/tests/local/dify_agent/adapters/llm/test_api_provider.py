@@ -30,7 +30,10 @@ def _execution_context() -> DifyExecutionContextLayerConfig:
     )
 
 
-def test_api_client_uses_stable_per_run_call_identity() -> None:
+@pytest.mark.parametrize("reference", [None, {"type": "provider", "id": "saved-provider-credential"},
+                                      {"type": "model", "id": "saved-model-credential"}])
+def test_api_client_uses_stable_per_run_call_identity(reference) -> None:
+    from dify_agent.layers.dify_plugin.configs import DifyModelCredentialRef
     requests: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -46,6 +49,7 @@ def test_api_client_uses_stable_per_run_call_identity() -> None:
                 execution_context=_execution_context(),
                 agent_run_id=run_id,
                 http_client=http_client,
+                credential_ref=DifyModelCredentialRef.model_validate(reference) if reference else None,
             )
 
             for _ in range(2):
@@ -78,6 +82,8 @@ def test_api_client_uses_stable_per_run_call_identity() -> None:
     assert first_payload["caller"]["agent_config_version_kind"] == "draft"
     assert first_payload["target"]["provider"] == "acme/custom-model/openai"
     assert "credentials" not in first_payload["target"]
+    assert first_payload["target"].get("credential_ref") == reference
+    assert second_payload["target"].get("credential_ref") == reference
 
 
 def test_api_client_propagates_gateway_quota_error() -> None:

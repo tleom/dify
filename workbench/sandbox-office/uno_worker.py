@@ -1,5 +1,7 @@
 """Run inside Debian's Python so LibreOffice's matching UNO bridge is available."""
 import json
+import os
+from contextlib import chdir
 from pathlib import Path
 import subprocess
 import sys
@@ -27,8 +29,14 @@ def convert(source, target, action):
     if target.exists():
         raise FileExistsError(target)
     pipe = 'office_' + uuid.uuid4().hex
-    with tempfile.TemporaryDirectory(prefix='workbench-office-') as profile:
-        command = ['soffice', f'-env:UserInstallation={Path(profile).as_uri()}', '--headless', '--norestore', '--nodefault', '--nofirststartwizard', f'--accept=pipe,name={pipe};urp;StarOffice.ServiceManager']
+    with tempfile.TemporaryDirectory(prefix='workbench-office-') as profile, chdir(profile):
+        # Both UNO processes resolve OSL_SOCKET_PATH relative to this private
+        # directory. A relative path also avoids AF_UNIX's 108-byte limit with
+        # the conversation UUID and LibreOffice's long internal pipe names.
+        # The Debian oosplash launcher has its own hard-coded /tmp IPC lookup.
+        # Headless workers use the installed binary directly, with explicit
+        # bootstrap configuration for the private pipe path.
+        command = ['/usr/lib/libreoffice/program/soffice.bin', '-env:OSL_SOCKET_PATH=.', f'-env:UserInstallation={Path(profile).as_uri()}', '--headless', '--norestore', '--nodefault', '--nofirststartwizard', f'--accept=pipe,name={pipe};urp;StarOffice.ServiceManager']
         with tempfile.TemporaryFile() as log:
             process = subprocess.Popen(command, stdout=log, stderr=log)
             document = None
@@ -37,13 +45,22 @@ def convert(source, target, action):
                 context = uno.getComponentContext()
                 resolver = context.ServiceManager.createInstanceWithContext('com.sun.star.bridge.UnoUrlResolver', context)
                 deadline = time.monotonic() + 30
+                restarted = False
                 while True:
                     try:
                         remote = resolver.resolve(f'uno:pipe,name={pipe};urp;StarOffice.ComponentContext')
                         break
                     except Exception:
+                        # Fresh Debian profiles request one normal restart (81)
+                        # after extension registration; oosplash normally owns it.
+                        if process.poll() == 81 and not restarted and time.monotonic() < deadline:
+                            restarted = True
+                            process = subprocess.Popen(command, stdout=log, stderr=log)
+                            continue
                         if process.poll() is not None or time.monotonic() >= deadline:
-                            raise RuntimeError('LibreOffice did not become ready')
+                            log.seek(0)
+                            detail = log.read(2000).decode('utf-8', errors='replace').strip()
+                            raise RuntimeError(f'LibreOffice did not become ready (exit={process.returncode})' + (': ' + detail if detail else ''))
                         time.sleep(0.2)
                 desktop = remote.ServiceManager.createInstanceWithContext('com.sun.star.frame.Desktop', remote)
                 document = desktop.loadComponentFromURL(source.as_uri(), '_blank', 0, (
@@ -106,6 +123,15 @@ def convert(source, target, action):
 
 if __name__ == '__main__':
     try:
+        # Preload is scoped to this worker and its soffice child. The image and
+        # other Shell processes retain their normal libc and Landlock behavior.
+        shim = str(Path(__file__).with_name('private_ipc.so').resolve())
+        if os.environ.get('WORKBENCH_OFFICE_PRIVATE_IPC') != shim:
+            if not Path(shim).is_file():
+                raise RuntimeError('Office private IPC support is missing from the sandbox image')
+            environment = dict(os.environ, WORKBENCH_OFFICE_PRIVATE_IPC=shim,
+                               OSL_SOCKET_PATH='.', LD_PRELOAD=shim)
+            os.execve(sys.executable, [sys.executable, *sys.argv], environment)
         print(json.dumps(convert(*sys.argv[1:4]), ensure_ascii=False))
     except Exception as error:
         print(json.dumps({'status': 'failed', 'error': str(error)}, ensure_ascii=False))

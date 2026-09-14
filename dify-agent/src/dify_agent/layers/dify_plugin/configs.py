@@ -106,12 +106,23 @@ class DifyPluginToolParameter(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="ignore", from_attributes=True)
 
 
+class DifyModelCredentialRef(BaseModel):
+    """Non-secret reference; only the tenant's API model gateway resolves it."""
+
+    type: Literal["provider", "model"]
+    id: str = Field(min_length=1, max_length=255)
+    provider: str | None = Field(default=None, max_length=255)
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+
 class DifyPluginLLMLayerConfig(LayerConfig):
     """Public config for selecting a plugin-backed business provider/model."""
 
     plugin_id: str
     model_provider: str
     model: str
+    credential_ref: DifyModelCredentialRef | None = None
     model_settings: ModelSettings | None = None
     context_window_tokens: int | None = Field(default=None, gt=0)
 

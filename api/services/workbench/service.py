@@ -7,6 +7,7 @@ from typing import Any, TypedDict
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified
 from werkzeug.exceptions import Conflict, Forbidden, NotFound
 
 from configs import dify_config
@@ -35,6 +36,22 @@ class WorkbenchTemplate(TypedDict):
     app_id: str
     snapshot_id: str
     soul: dict[str, Any]
+
+
+EXECUTING_STATUSES = ("queued", "running", "environment_installing", "stopping")
+
+
+def _chat_has_run(tenant_id, account_id, statuses):
+    return (
+        select(WorkbenchRun.id)
+        .where(
+            WorkbenchRun.chat_id == WorkbenchChat.id,
+            WorkbenchRun.tenant_id == tenant_id,
+            WorkbenchRun.account_id == account_id,
+            WorkbenchRun.status.in_(statuses),
+        )
+        .exists()
+    )
 
 
 def authorize(tenant_id: str, account_id: str):
@@ -139,6 +156,7 @@ def catalog(tenant_id: str, account_id: str):
     enrich_skill_labels(tenant_id, base["agent_id"], resources["skills"])
     return {
         **resources,
+        "activity_protocol": 1,
         "default_selection": default_selection(tenant_id, account_id, base).model_dump(mode="json"),
         "models": [
             {"id": key, "name": value["model"], "provider": value["model_provider"]} for key, value in models.items()
@@ -189,7 +207,11 @@ def read_chat(tenant_id: str, account_id: str, chat_id: str):
         runs = list(
             session.scalars(
                 select(WorkbenchRun)
-                .where(WorkbenchRun.chat_id == chat.id)
+                .where(
+                    WorkbenchRun.chat_id == chat.id,
+                    WorkbenchRun.tenant_id == tenant_id,
+                    WorkbenchRun.account_id == account_id,
+                )
                 .order_by(WorkbenchRun.created_at, WorkbenchRun.id)
             )
         )
@@ -201,6 +223,8 @@ def read_chat(tenant_id: str, account_id: str, chat_id: str):
             "updated_at": to_utc_timestamp(chat.updated_at),
             "pinned": chat.pinned,
             "version": chat.version,
+            "is_running": any(run.status in EXECUTING_STATUSES for run in runs),
+            "needs_input": any(run.status == "waiting_input" for run in runs),
             "template_snapshot_id": revision.template_snapshot_id or chat.base_snapshot_id,
             "selection": json.loads(revision.selection),
             "runs": annotate(runs, with_feedback(session, runs, [run_dto(run) for run in runs])),
@@ -214,6 +238,9 @@ def run_dto(run):
 
     payload = json.loads(run.payload)
     ids = message_ids(run)
+    from services.workbench.event_log import history_events, uses_journal
+
+    journal = uses_journal(run, payload)
     return {
         "id": run.id,
         "chat_id": run.chat_id,
@@ -222,7 +249,10 @@ def run_dto(run):
         "pending": payload.get("pending"),
         "status": run.status,
         "error": run.error,
-        "events": [*run_knowledge_events(run, payload), *merge_context_events(run, payload)],
+        "events": history_events(run)
+        if journal
+        else [*run_knowledge_events(run, payload), *merge_context_events(run, payload)],
+        "activity_protocol": 1 if journal else 0,
         "context_usage": payload.get("context_usage"),
         "query": payload.get("query", ""),
         "resource_mentions": payload.get("resource_mentions", {}),
@@ -253,16 +283,22 @@ def list_chats(tenant_id, account_id):
                 "updated_at": to_utc_timestamp(c.updated_at),
                 "version": c.version,
                 "pinned": c.pinned,
+                "is_running": is_running,
+                "needs_input": needs_input,
                 "file_directory": chat_directory(session, c),
             }
-            for c in session.scalars(
-                select(WorkbenchChat)
+            for c, is_running, needs_input in session.execute(
+                select(
+                    WorkbenchChat,
+                    _chat_has_run(tenant_id, account_id, EXECUTING_STATUSES),
+                    _chat_has_run(tenant_id, account_id, ("waiting_input",)),
+                )
                 .where(
                     WorkbenchChat.tenant_id == tenant_id,
                     WorkbenchChat.account_id == account_id,
                     WorkbenchChat.deleted == 0,
                 )
-                .order_by(WorkbenchChat.pinned.desc(), WorkbenchChat.updated_at.desc())
+                .order_by(WorkbenchChat.updated_at.desc(), WorkbenchChat.created_at.desc(), WorkbenchChat.id.desc())
                 .limit(200)
             )
         ]
@@ -278,6 +314,9 @@ def update_chat(tenant_id, account_id, chat_id, *, title=None, pinned=None):
             chat.title = title
         if pinned is not None:
             chat.pinned = pinned
+            if title is None:
+                # Bookmark changes do not count as conversation activity.
+                flag_modified(chat, "updated_at")
         session.flush()
         return {
             "id": chat.id,
@@ -287,6 +326,12 @@ def update_chat(tenant_id, account_id, chat_id, *, title=None, pinned=None):
             "version": chat.version,
             "pinned": chat.pinned,
             "file_directory": chat_directory(session, chat),
+            "is_running": session.scalar(
+                select(_chat_has_run(tenant_id, account_id, EXECUTING_STATUSES)).where(WorkbenchChat.id == chat.id)
+            ),
+            "needs_input": session.scalar(
+                select(_chat_has_run(tenant_id, account_id, ("waiting_input",))).where(WorkbenchChat.id == chat.id)
+            ),
         }
 
 
@@ -444,6 +489,7 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload: dict[
             "effective_soul": effective,
             "version": version,
             "attempt": 0,
+            "activity_protocol": int(dify_config.WORKBENCH_ACTIVITY_ENABLED and payload.get("activity_protocol") == 1),
             "template_snapshot_id": base["snapshot_id"],
         }
         run = WorkbenchRun(

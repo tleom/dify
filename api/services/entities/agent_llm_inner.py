@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import ClassVar, Literal
 
+from dify_agent.layers.dify_plugin.configs import DifyModelCredentialRef
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from graphon.model_runtime.entities.message_entities import PromptMessageTool
@@ -38,6 +39,7 @@ class AgentLLMInvokeCaller(BaseModel):
 class AgentLLMInvokeTarget(BaseModel):
     provider: str
     model: str
+    credential_ref: DifyModelCredentialRef | None = None
     # The trusted Agent service already produces plugin-runtime prompt payloads.
     # Keep them opaque here so this transport cannot discard role-specific or
     # newly introduced fields before the authoritative runtime validates them.

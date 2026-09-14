@@ -44,3 +44,51 @@ pre-request estimates from provider response usage; an unknown model window stay
 null. Compaction phases share `compaction_id` and include `before_tokens`.
 The existing tiered compactor remains responsible for rewriting history. These
 events are non-terminal; consumers that do not display context can ignore them.
+
+The LLM layer accepts an optional `credential_ref` with `type` (`provider` or
+`model`), `id`, and optional `provider`. The API resolves it for the caller's
+tenant and selected provider/model on every invocation, including credential
+visibility and runtime policy checks. An explicit reference pins the call to
+that credential and uses the custom-provider billing path; load balancing cannot
+replace it. Invalid references fail explicitly. Context-window and vision
+capabilities use the same reference. Secrets remain inside the API runtime.
+
+Workbench mentions are loaded from the current run's frozen payload. Mentioned
+Skills are eagerly read by the config layer before the model runs. The optional
+`dify.workbench_mentions` layer stores `workbench_run_id` and `tool_groups`
+(`name`, `tool_names`). At least one appropriate tool in each mentioned group
+must return an observation before a final answer. Argument-validation retries
+do not count; explicit tool error observations count as attempts and must be
+reported accurately. Preparation and deferred human/environment requests remain
+available. Rejected answer text is withheld from streaming, and output validation
+has two retries when mentions are present. Completion state survives suspension
+of that run; a new workbench turn starts with fresh mention requirements.
+
+Workbench activity reporting is opt-in through `dify.workbench_activity`. The
+composition supplies the trusted logical `workbench_run_id`. Its sequential
+`report_activity` tool lets the same task model describe an action and purpose,
+update the stage, and close an activity after results return. The runtime assigns
+activity IDs and revisions, binds each business call at execution start, and
+restores the same identity when human input or environment installation resumes
+in a different native run. Parallel business calls remain parallel. Reports do
+not appear as business tool rows; malformed or repeated reports become no-ops
+without using the task's retry budget. Four reports without business work hide
+the report tool until work resumes. Reporting still uses the normal model token
+and request budget; no separate summarization model is invoked.
+
+`workbench_activity` public events contain a discriminated `data.kind`: `activity`
+for public titles, `tool` for call state, and `text`/`reasoning` for visible model
+output. Tool `call_id` includes its originating native run and remains unchanged
+across a deferred continuation. Shell `done=false` means the background job is
+still pending even when output has arrived. Activity close checks pending calls
+and jobs; it is not independent proof that a user's business goal was achieved.
+
+The API freezes `activity_protocol=1` in new workbench runs only when
+`WORKBENCH_ACTIVITY_ENABLED=true`. Its `workbench_run_events` journal is the shared
+authority for history and live SSE, with an increasing sequence per logical run;
+Redis is a wake-up channel. Install the migration and upgrade all API/Agent
+readers before enabling the producer. To roll back reporting, disable the flag
+while retaining the new readers and journal. Existing protocol-1 continuations
+still emit tool and text records with the reporting tool disabled. Legacy runs
+retain their previous reader and composition contract. Do not drop the journal
+when merely disabling reporting.

@@ -40,6 +40,11 @@ from tests.unit_tests.config_override import apply_config_overrides
 
 @pytest.fixture(autouse=True)
 def _no_runtime_agent_skills(monkeypatch: pytest.MonkeyPatch):
+    from services.workbench.mentions import ResourceMentions
+
+    monkeypatch.setattr(
+        "core.app.apps.agent_app.runtime_request_builder.load_run_mentions", lambda *_args: ResourceMentions(),
+    )
     monkeypatch.setattr(
         "core.app.apps.agent_app.runtime_request_builder.load_runtime_agent_skill_configs",
         lambda **_kwargs: [],
@@ -105,6 +110,20 @@ def test_workbench_retrieves_same_question_again_on_new_turn():
         ids.append(config.sets[0].id)
     assert ids == ["dataset-1:run-1", "dataset-1:run-2", "dataset-1:run-2"]
     assert soul.knowledge.sets[0].id == "dataset-1"
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_activity_protocol_is_frozen_per_turn_and_rollback_preserves_its_reader(monkeypatch, enabled):
+    apply_config_overrides(monkeypatch, WORKBENCH_ACTIVITY_ENABLED=enabled)
+    builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_NoToolsBuilder())
+    context = replace(_ctx(_soul_with_model()), workbench_run_id="run-1", workbench_activity_protocol=1)
+    request = builder.build(context).request
+    activity = next(layer for layer in request.composition.layers if layer.name == "workbench_activity")
+    assert activity.config.workbench_run_id == "run-1"
+    assert activity.config.enabled is enabled
+    # Old tasks never acquire an extra layer while restoring a native snapshot.
+    old = builder.build(replace(context, workbench_activity_protocol=0)).request
+    assert all(layer.name != "workbench_activity" for layer in old.composition.layers)
 
 
 @pytest.mark.parametrize(("previous_prompt", "current_prompt"), [("", "New soul"), ("Old soul", "")])

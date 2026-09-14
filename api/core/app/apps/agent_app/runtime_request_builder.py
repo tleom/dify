@@ -59,6 +59,7 @@ from graphon.model_runtime.entities.message_entities import ImagePromptMessageCo
 from models.agent_config_entities import AgentSoulConfig, AgentSoulToolsConfig
 from models.provider_ids import ModelProviderID
 from services.agent.prompt_mentions import expand_prompt_mentions
+from services.workbench.mentions import load_run_mentions, required_tool_groups
 
 from .errors import AgentSessionSnapshotIncompatibleError
 
@@ -92,6 +93,7 @@ class AgentAppRuntimeBuildContext:
     # ENG-638: set when resuming a chat turn after a submitted ask_human form.
     deferred_tool_results: DeferredToolResultsPayload | None = None
     workbench_run_id: str | None = None
+    workbench_activity_protocol: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +155,13 @@ class AgentAppRuntimeRequestBuilder:
             runtime_config_skills=runtime_config_skills,
         )
         config_layer_config.reset_materialized_assets = bool(workbench_run_id)
+        mention_groups = []
+        if workbench_run_id:
+            mentions = load_run_mentions(workbench_run_id, context.dify_context.tenant_id, context.dify_context.user_id)
+            mention_groups = required_tool_groups(agent_soul.model_dump(mode="json"), mentions, tool_layers)
+            config_layer_config.mentioned_skill_names = list(dict.fromkeys([
+                *config_layer_config.mentioned_skill_names, *mentions.skills,
+            ]))
         append_runtime_warnings(metadata, config_warnings)
         soul_prompt_resolver = build_config_aware_soul_mention_resolver(
             agent_soul,
@@ -169,6 +178,8 @@ class AgentAppRuntimeRequestBuilder:
             run_context=context.dify_context,
             provider_name=agent_soul.model.model_provider,
             model_name=agent_soul.model.model,
+            **({"credential_ref": agent_soul.model.credential_ref.model_dump()}
+               if agent_soul.model.credential_ref else {}),
         )
         model_plugin_id, model_provider = normalize_plugin_daemon_provider_identity(
             ModelProviderID(agent_soul.model.model_provider),
@@ -180,6 +191,7 @@ class AgentAppRuntimeRequestBuilder:
             provider_name=agent_soul.model.model_provider,
             model_name=agent_soul.model.model,
             image_detail_config=context.image_detail_config,
+            credential_ref=agent_soul.model.credential_ref.model_dump() if agent_soul.model.credential_ref else None,
         )
 
         request = self._request_builder.build_for_agent_app(
@@ -188,6 +200,8 @@ class AgentAppRuntimeRequestBuilder:
                     plugin_id=model_plugin_id,
                     model_provider=model_provider,
                     model=agent_soul.model.model,
+                    credential_ref=(agent_soul.model.credential_ref.model_dump()
+                                    if agent_soul.model.credential_ref else None),
                     model_settings=agent_soul.model.model_settings.model_dump(mode="json", exclude_none=True),
                     context_window_tokens=context_window_tokens,
                 ),
@@ -233,11 +247,26 @@ class AgentAppRuntimeRequestBuilder:
             )
         )
         if workbench_run_id:
+            from dify_agent.layers.workbench_mentions import WorkbenchMentionsConfig
             from dify_agent.protocol.schemas import RunLayerSpec
 
             request.composition.layers.append(
                 RunLayerSpec(name="workbench_environment", type="dify.workbench_environment", config={})
             )
+            if mention_groups:
+                request.composition.layers.append(RunLayerSpec(
+                    name="workbench_mentions", type="dify.workbench_mentions",
+                    config=WorkbenchMentionsConfig(workbench_run_id=workbench_run_id, tool_groups=mention_groups),
+                ))
+            if context.workbench_activity_protocol == 1:
+                from dify_agent.layers.workbench_activity import WorkbenchActivityConfig
+
+                request.composition.layers.append(RunLayerSpec(
+                    name="workbench_activity", type="dify.workbench_activity",
+                    config=WorkbenchActivityConfig(
+                        workbench_run_id=workbench_run_id, enabled=dify_config.WORKBENCH_ACTIVITY_ENABLED,
+                    ),
+                ))
             request.rebuild_layers = context.deferred_tool_results is None
         self._validate_session_snapshot_layers(request)
         redacted = cast(dict[str, Any], redact_for_agent_backend_log(request))
@@ -256,11 +285,13 @@ class AgentAppRuntimeRequestBuilder:
         provider_name: str,
         model_name: str,
         image_detail_config: ImagePromptMessageContent.DETAIL | None,
+        credential_ref: dict[str, Any] | None = None,
     ) -> list[DifyUserPromptFileConfig]:
         supports_vision = any(file.type == FileType.IMAGE for file in files) and resolve_model_supports_vision(
             run_context=run_context,
             provider_name=provider_name,
             model_name=model_name,
+            **({"credential_ref": credential_ref} if credential_ref else {}),
         )
         return [
             _build_user_image(file, image_detail_config=image_detail_config)

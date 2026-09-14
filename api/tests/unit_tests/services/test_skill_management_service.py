@@ -3285,6 +3285,45 @@ def test_agent_skill_binding_changes_require_agent_publish_before_runtime_load()
     assert service.list_runtime_agent_skills(tenant_id=TENANT, agent_id=AGENT)[0]["name"] == "finance-sop"
 
 
+@pytest.mark.parametrize("include_draft", [True, False])
+def test_runtime_agent_skills_preserve_binding_priority(include_draft: bool) -> None:
+    service = SkillManagementService(tool_file_manager=_FakeToolFileManager())
+    ids = []
+    for name in ("word-docx", "excel-xlsx", "legal-research"):
+        created = service.create_skill(
+            tenant_id=TENANT, user_id=USER, payload=SkillCreatePayload(name=name, description=name)
+        )
+        service.replace_draft_tree(
+            tenant_id=TENANT,
+            user_id=USER,
+            skill_id=created["id"],
+            payload=SkillDraftTreePayload(files=[{"path": "SKILL.md", "content": _skill_md(name=name)}]),
+        )
+        service.publish_skill(tenant_id=TENANT, user_id=USER, skill_id=created["id"], payload=SkillPublishPayload())
+        ids.append(created["id"])
+    service.replace_agent_bindings(tenant_id=TENANT, user_id=USER, agent_id=AGENT, skill_ids=ids)
+    with session_factory.create_session() as session:
+        agent = session.get(Agent, AGENT)
+        assert agent is not None
+        snapshot = AgentConfigSnapshot(
+            tenant_id=TENANT, agent_id=AGENT, version=1, config_snapshot=AgentSoulConfig(), created_by=USER
+        )
+        session.add(snapshot)
+        session.flush()
+        agent.active_config_snapshot_id = snapshot.id
+        snapshot_id = snapshot.id
+        session.commit()
+    service.publish_agent_bindings(tenant_id=TENANT, agent_id=AGENT, snapshot_id=snapshot_id, user_id=USER)
+    assert [
+        skill["id"]
+        for skill in service.list_runtime_agent_skills(
+            tenant_id=TENANT,
+            agent_id=AGENT,
+            include_draft=include_draft,
+        )
+    ] == ids
+
+
 def test_runtime_agent_skill_pull_normalizes_archive_identity_to_published_metadata() -> None:
     archive_buffer = io.BytesIO()
     with zipfile.ZipFile(archive_buffer, "w") as archive:

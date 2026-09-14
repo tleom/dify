@@ -40,6 +40,9 @@ RUN npm ci --prefix /opt/office/node --no-fund --no-audit \
 
 COPY smoke.py smoke.cjs /opt/office/
 COPY office.py uno_worker.py /opt/office/
+COPY private_ipc.c /opt/office/
+RUN gcc -shared -fPIC -O2 -Wall -Wextra -Werror /opt/office/private_ipc.c \
+      -ldl -o /opt/office/private_ipc.so
 COPY fonts/ /usr/local/share/fonts/workbench/
 RUN fc-cache -f
 RUN google-chrome --version > /opt/office/chrome-version.txt \

@@ -42,6 +42,8 @@ from agenton_collections.transformers.pydantic_ai import PYDANTIC_AI_TRANSFORMER
 from dify_agent.agent_stub.shell_env import ShellAgentStubTokenFactory
 from dify_agent.layers.ask_human.layer import DifyAskHumanLayer
 from dify_agent.layers.workbench_environment import WorkbenchEnvironmentLayer
+from dify_agent.layers.workbench_mentions import WorkbenchMentionsLayer
+from dify_agent.layers.workbench_activity import WorkbenchActivityLayer
 from dify_agent.layers.config.layer import DifyConfigLayer
 from dify_agent.layers.dify_core_tools.configs import DifyCoreToolsLayerConfig
 from dify_agent.layers.dify_core_tools.layer import DifyCoreToolsLayer
@@ -82,6 +84,8 @@ def create_default_layer_providers(
         LayerProvider.from_layer_type(DifyOutputLayer),
         LayerProvider.from_layer_type(DifyAskHumanLayer),
         LayerProvider.from_layer_type(WorkbenchEnvironmentLayer),
+        LayerProvider.from_layer_type(WorkbenchMentionsLayer),
+        LayerProvider.from_layer_type(WorkbenchActivityLayer),
         LayerProvider.from_layer_type(DifyConfigLayer),
         LayerProvider.from_factory(
             layer_type=DifyExecutionContextLayer,

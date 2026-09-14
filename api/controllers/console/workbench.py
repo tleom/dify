@@ -9,7 +9,6 @@ from urllib.parse import quote
 from flask import Response, request, stream_with_context
 from flask_restx import Resource
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
-from sqlalchemy import select
 from werkzeug.exceptions import Conflict, NotFound
 
 from controllers.common.schema import query_params_from_model, register_response_schema_models, register_schema_models
@@ -26,6 +25,7 @@ from models.model import AppMode
 from models.workbench import WorkbenchRun
 from services.app_task_service import AppTaskService
 from services.workbench import scheduler, service
+from services.workbench.event_log import owned_statement, stream_events
 from services.workbench.mentions import ResourceMentions
 from services.workbench.policy import Selection
 
@@ -74,6 +74,7 @@ class WorkbenchSandboxFilePayload(BaseModel):
 
 class WorkbenchRunPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    activity_protocol: Literal[0, 1] = 0
     version: int = Field(ge=1)
     request_key: str = Field(min_length=1, max_length=128)
     query: str = Field(max_length=100000)
@@ -110,6 +111,7 @@ class WorkbenchFeedbackPayload(BaseModel):
 
 class WorkbenchRegeneratePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    activity_protocol: Literal[0, 1] = 0
     version: int = Field(ge=1)
     request_key: str = Field(min_length=1, max_length=128)
     query: str | None = Field(default=None, max_length=100000)
@@ -134,6 +136,7 @@ class WorkbenchModelResponse(ResponseModel):
 
 
 class WorkbenchCatalogResponse(ResponseModel):
+    activity_protocol: Literal[1] = 1
     default_selection: Selection
     models: list[WorkbenchModelResponse]
     tools: list[WorkbenchResourceResponse]
@@ -151,6 +154,7 @@ class WorkbenchAttachmentResponse(ResponseModel):
 
 
 class WorkbenchRunResponse(ResponseModel):
+    activity_protocol: int = 0
     id: str
     chat_id: str
     revision_id: str
@@ -195,6 +199,10 @@ class WorkbenchChatSummaryResponse(ResponseModel):
     title: str
     version: int
     pinned: bool
+    is_running: bool | None = Field(
+        default=None, description="Whether this conversation has a queued or executing run; excludes waiting for input"
+    )
+    needs_input: bool | None = Field(default=None, description="Whether this conversation is waiting for user input")
 
 
 class WorkbenchChatSummaryEnvelopeResponse(ResponseModel):
@@ -509,11 +517,7 @@ def owned_run(tenant_id, account_id, run_id):
     from services.workbench.message_actions import with_feedback
 
     with session_factory.create_session() as session:
-        run = session.scalar(
-            select(WorkbenchRun).where(
-                WorkbenchRun.id == run_id, WorkbenchRun.tenant_id == tenant_id, WorkbenchRun.account_id == account_id
-            )
-        )
+        run = session.scalar(owned_statement(tenant_id, account_id, run_id))
         if run is None:
             raise NotFound()
         return with_feedback(session, [run], [service.run_dto(run)])[0], run.task_id
@@ -549,7 +553,12 @@ class Regenerate(WorkbenchResource):
             WorkbenchRunEnvelopeResponse,
             {
                 "data": regenerate(
-                    *self.owner(), str(run_id), payload.version, payload.request_key, query=payload.query
+                    *self.owner(),
+                    str(run_id),
+                    payload.version,
+                    payload.request_key,
+                    query=payload.query,
+                    activity_protocol=payload.activity_protocol,
                 ),
             },
         ), 202
@@ -616,6 +625,14 @@ class Events(WorkbenchResource):
 
         def generate() -> Iterator[str]:
             nonlocal cursor
+            if dto.get("activity_protocol") == 1:
+                for item in stream_events(*owner, str(run_id), after=int(cursor.split("-")[0])):
+                    if item is None:
+                        yield ": keepalive\n\n"
+                    else:
+                        identifier = f"id: {item['_id']}\n" if item.get("_id") else ""
+                        yield identifier + "data: " + json.dumps(item, ensure_ascii=False) + "\n\n"
+                return
             while True:
                 items = redis_client.xread({scheduler.event_key(str(run_id)): cursor}, count=100, block=1000)
                 for event_id, fields in scheduler.stream_entries(items):

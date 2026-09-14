@@ -17,10 +17,33 @@ def sync_native_title(tenant_id, conversation_id):
         sync(tenant_id, conversation_id)
 
 
+def activity_protocol(tenant_id, conversation_id, account_id):
+    with session_factory.create_session() as session:
+        run = current_run(session, tenant_id, conversation_id, account_id)
+        if run is None or run.tenant_id != tenant_id or run.account_id != account_id:
+            return 0
+        return int(json.loads(run.payload).get("activity_protocol") == 1)
+
+
+def accept_activity(tenant_id, conversation_id, account_id, public_event):
+    if not dify_config.WORKBENCH_ENABLED or not public_event.id:
+        return False
+    with session_factory.create_session() as session:
+        run = current_run(session, tenant_id, conversation_id, account_id)
+        return bool(
+            run is not None
+            and run.tenant_id == tenant_id
+            and run.account_id == account_id
+            and run.id == public_event.data.workbench_run_id
+            and run.backend_run_id == public_event.run_id
+            and json.loads(run.payload).get("activity_protocol") == 1
+        )
+
+
 def record_context_status(tenant_id, conversation_id, account_id, public_event):
     from services.workbench.context_status import record_context_status as record
 
-    record(tenant_id, conversation_id, account_id, public_event)
+    return record(tenant_id, conversation_id, account_id, public_event)
 
 
 def resolve_run_config(run_id, tenant_id, account_id):
@@ -71,8 +94,8 @@ def conversation_owner(tenant_id, conversation_id, account_id):
         )
 
 
-def current_run(session, tenant_id, conversation_id, account_id):
-    return session.scalar(
+def current_run(session, tenant_id, conversation_id, account_id, *, for_update=False):
+    statement = (
         select(WorkbenchRun)
         .join(WorkbenchChat, WorkbenchRun.chat_id == WorkbenchChat.id)
         .where(
@@ -81,8 +104,11 @@ def current_run(session, tenant_id, conversation_id, account_id):
             WorkbenchChat.account_id == account_id,
             WorkbenchChat.deleted == 0,
             WorkbenchRun.status == "running",
+            WorkbenchRun.tenant_id == tenant_id,
+            WorkbenchRun.account_id == account_id,
         )
     )
+    return session.scalar(statement.with_for_update() if for_update else statement)
 
 
 def execution_run_id(tenant_id, conversation_id, account_id):
@@ -164,7 +190,7 @@ def prepare_execution(tenant_id, conversation_id, account_id, request):
     from services.workbench.scheduler import heartbeat
 
     with session_factory.get_session_maker().begin() as session:
-        run = current_run(session, tenant_id, conversation_id, account_id)
+        run = current_run(session, tenant_id, conversation_id, account_id, for_update=True)
         if run is None:
             if conversation_owner(tenant_id, conversation_id, account_id):
                 raise Forbidden("Workbench task was stopped")
@@ -234,10 +260,11 @@ def pause(tenant_id, conversation_id, account_id, terminal, binding_id):
         return False
     from extensions.ext_redis import redis_client
     from models.agent import AgentWorkspaceBinding
+    from services.workbench.event_log import append_locked, notify, uses_journal
     from services.workbench.scheduler import PREFIX, event_key
 
     with session_factory.get_session_maker().begin() as session:
-        run = current_run(session, tenant_id, conversation_id, account_id)
+        run = current_run(session, tenant_id, conversation_id, account_id, for_update=True)
         if run is None:
             return False
         pending = terminal.deferred_tool_call.model_dump(mode="json")
@@ -251,8 +278,15 @@ def pause(tenant_id, conversation_id, account_id, terminal, binding_id):
         binding.session_snapshot = terminal.session_snapshot.model_dump_json()
         run.status = "environment_update" if pending["tool_name"] == "update_shared_environment" else "waiting_input"
         run_id, status = run.id, run.status
+        item = {"event": "workbench_status", "status": status}
+        journal = uses_journal(run)
+        if journal:
+            item = append_locked(session, run, item)
         # Gate new user jobs before releasing this task's normal lease.
         if status == "environment_update":
             redis_client.set(PREFIX + f"maintenance:{tenant_id}:{account_id}", "1")
-    redis_client.xadd(event_key(run_id), {"data": json.dumps({"event": "workbench_status", "status": status})})
+    if journal:
+        notify(run_id, item)
+    else:
+        redis_client.xadd(event_key(run_id), {"data": json.dumps(item)})
     return True

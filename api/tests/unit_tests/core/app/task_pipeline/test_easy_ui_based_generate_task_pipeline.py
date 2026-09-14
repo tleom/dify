@@ -16,6 +16,7 @@ from core.app.entities.queue_entities import (
     QueueMessageEndEvent,
     QueueMessageFileEvent,
     QueuePingEvent,
+    QueueWorkbenchActivityEvent,
 )
 from core.app.entities.task_entities import (
     EasyUITaskState,
@@ -323,6 +324,21 @@ class TestEasyUIBasedGenerateTaskPipelineProcessStreamResponse:
         # Assert
         assert len(responses) == 1
         pipeline.ping_stream_response.assert_called_once()
+
+    def test_workbench_events_keep_queue_order_and_serializable_envelope(self, pipeline):
+        events = [QueueWorkbenchActivityEvent(
+            backend_run_id="native", source_event_id=f"{index}-0", stream_event=kind, data=data,
+        ) for index, (kind, data) in enumerate([
+            ("workbench_activity", {"kind": "activity", "title": "安装依赖以读取文档"}),
+            ("workbench_context", {"phase": "compacted"}),
+            ("workbench_activity", {"kind": "text", "text": "开始验证"}),
+        ])]
+        pipeline.queue_manager.listen.return_value = [SimpleNamespace(event=event) for event in events]
+        responses = list(pipeline._process_stream_response(publisher=None, trace_manager=None))
+        serialized = [response.model_dump(mode="json") for response in responses]
+        assert [item["source_event_id"] for item in serialized] == ["0-0", "1-0", "2-0"]
+        assert [item["event"] for item in serialized] == [event.stream_event for event in events]
+        assert all(item["task_id"] == "test-task-id" for item in serialized)
 
     def test_file_event(self, pipeline, mock_message_cycle_manager):
         """Test handling of file events."""

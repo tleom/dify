@@ -222,6 +222,8 @@ class WorkflowAgentRuntimeRequestBuilder:
             run_context=context.dify_context,
             provider_name=agent_soul.model.model_provider,
             model_name=agent_soul.model.model,
+            **({"credential_ref": agent_soul.model.credential_ref.model_dump()}
+               if agent_soul.model.credential_ref else {}),
         )
         model_plugin_id, model_provider = normalize_plugin_daemon_provider_identity(
             ModelProviderID(agent_soul.model.model_provider),
@@ -234,6 +236,8 @@ class WorkflowAgentRuntimeRequestBuilder:
                     plugin_id=model_plugin_id,
                     model_provider=model_provider,
                     model=agent_soul.model.model,
+                    credential_ref=(agent_soul.model.credential_ref.model_dump()
+                                    if agent_soul.model.credential_ref else None),
                     model_settings=agent_soul.model.model_settings.model_dump(mode="json", exclude_none=True),
                     context_window_tokens=context_window_tokens,
                 ),

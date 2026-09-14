@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol
 
 from dify_agent.layers.dify_core_tools import DifyCoreToolConfig, DifyCoreToolProviderType, DifyCoreToolsLayerConfig
@@ -78,6 +78,7 @@ class MCPProviderIDResolver(Protocol):
 class WorkflowAgentToolLayers:
     plugin_tools: DifyPluginToolsLayerConfig | None = None
     core_tools: DifyCoreToolsLayerConfig | None = None
+    provider_tool_names: dict[tuple[ToolProviderType, str], list[str]] = field(default_factory=dict)
 
     def exposed_tool_names(self) -> list[str]:
         names: list[str] = []
@@ -190,6 +191,7 @@ class WorkflowAgentDifyToolsBuilder:
         prepared_plugin: list[DifyPluginToolConfig] = []
         prepared_core: list[DifyCoreToolConfig] = []
         seen_names: set[str] = set()
+        provider_tool_names: dict[tuple[ToolProviderType, str], list[str]] = {}
 
         for tool_config in self.expand_provider_entries(tenant_id=tenant_id, enabled_tools=enabled_tools):
             normalized_tool_config = self._normalized_tool_config(tenant_id=tenant_id, tool_config=tool_config)
@@ -201,6 +203,7 @@ class WorkflowAgentDifyToolsBuilder:
                     f"Duplicate Dify Tool name {exposed_name!r}.",
                 )
             seen_names.add(exposed_name)
+            provider_tool_names.setdefault(self._provider_key(tool_config), []).append(exposed_name)
 
             agent_tool = self._to_agent_tool_entity(normalized_tool_config)
             tool_runtime = self._fetch_tool_runtime(
@@ -224,6 +227,7 @@ class WorkflowAgentDifyToolsBuilder:
         return WorkflowAgentToolLayers(
             plugin_tools=DifyPluginToolsLayerConfig(tools=prepared_plugin) if prepared_plugin else None,
             core_tools=DifyCoreToolsLayerConfig(tools=prepared_core) if prepared_core else None,
+            provider_tool_names=provider_tool_names,
         )
 
     def expand_provider_entries(

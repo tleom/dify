@@ -2284,7 +2284,7 @@ class SkillManagementService:
                     .join(SkillVersion, SkillVersion.id == Skill.latest_published_version_id)
                     .join(Agent, Agent.id == binding_model.agent_id)
                     .where(*conditions)
-                    .order_by(Skill.name)
+                    .order_by(binding_model.priority, binding_model.created_at, binding_model.id)
                 )
             )
             return [

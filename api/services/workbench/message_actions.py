@@ -15,6 +15,9 @@ from services.workbench import service
 
 
 def message_ids(run):
+    payload = json.loads(run.payload)
+    if payload.get("activity_protocol") == 1:
+        return payload.get("message_ids", [])
     return list(
         dict.fromkeys(
             item["message_id"]
@@ -91,7 +94,7 @@ def feedback(tenant_id, account_id, run_id, rating):
         return with_feedback(session, [run], [service.run_dto(run)])[0]
 
 
-def regenerate(tenant_id, account_id, run_id, version, request_key, *, query=None):
+def regenerate(tenant_id, account_id, run_id, version, request_key, *, query=None, activity_protocol=0):
     service.authorize(tenant_id, account_id)
     with session_factory.create_session() as session:
         run, chat = _owned(session, tenant_id, account_id, run_id)
@@ -105,6 +108,7 @@ def regenerate(tenant_id, account_id, run_id, version, request_key, *, query=Non
         if message is not None and (message.app_id != chat.app_id or message.from_account_id != account_id):
             raise NotFound()
         payload = {
+            "activity_protocol": activity_protocol,
             "query": original["query"] if query is None else query,
             "edited_from": run.id if query is not None else None,
             "inputs": original.get("inputs", {}),

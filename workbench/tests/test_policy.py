@@ -253,3 +253,16 @@ def test_published_inline_secrets_do_not_become_account_shell_variables(
     ]
     assert "publisher-private-token" not in config.model_dump_json()
     assert "publisher-copy" not in config.model_dump_json()
+
+
+@pytest.mark.parametrize("same_model", [True, False])
+def test_explicit_model_credential_is_inherited_only_for_the_published_model(template, same_model):
+    identity = {"plugin_id": "test/provider", "model_provider": "test/provider/demo", "model": "first"}
+    reference = {"type": "provider", "id": "explicit-reference", "provider": "test/provider/demo"}
+    template["model"] = {**identity, "credential_ref": reference, "model_settings": {"temperature": 0.2}}
+    selected = {**identity, "model": "first" if same_model else "second", "model_settings": {}}
+    compiled = compile_selection(template, Selection(model="selected"), {"selected": selected})
+    assert compiled["model"].get("credential_ref") == (reference if same_model else None)
+    if same_model:
+        assert compiled["model"]["credential_ref"] is not reference
+    assert "credential_ref" not in selected

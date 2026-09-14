@@ -358,6 +358,24 @@ class AgentRunRunner:
                     ),
                     None,
                 )
+                from dify_agent.layers.workbench_mentions import WorkbenchMentionsLayer
+
+                mentions_layer = next(
+                    (slot.layer for slot in run.slots.values() if isinstance(slot.layer, WorkbenchMentionsLayer)),
+                    None,
+                )
+                from dify_agent.layers.workbench_activity import WorkbenchActivityLayer
+                from dify_agent.runtime.workbench_activity import WorkbenchActivityCapability
+
+                activity_layer = next(
+                    (slot.layer for slot in run.slots.values() if isinstance(slot.layer, WorkbenchActivityLayer)),
+                    None,
+                )
+                activity = (
+                    WorkbenchActivityCapability(layer=activity_layer, sink=self.sink, run_id=self.run_id)
+                    if activity_layer is not None
+                    else None
+                )
 
                 async def handle_events(_ctx: object, events: AsyncIterable[AgentStreamEvent]) -> None:
                     published_events = coalesce_agent_stream_events(
@@ -369,9 +387,15 @@ class AgentRunRunner:
                     async for event in published_events:
                         if self.is_cancelled():
                             raise asyncio.CancelledError
+                        if mentions_layer is not None:
+                            mentions_layer.record_event(event)
                         text_delta = _extract_agent_message_delta(event)
                         if text_delta is not None and knowledge_layer is not None and knowledge_layer.missing_searches:
                             continue
+                        if text_delta is not None and mentions_layer is not None and mentions_layer.missing_groups:
+                            continue
+                        if activity is not None:
+                            await activity.observe(event, run_step=getattr(_ctx, "run_step", 0), text_delta=text_delta)
                         _ = await emit_pydantic_ai_event(
                             self.sink,
                             run_id=self.run_id,
@@ -426,11 +450,14 @@ class AgentRunRunner:
                 agent = create_agent(
                     model,
                     tools=tools,
+                    **({"output_retries": 2} if mentions_layer is not None else {}),
                     output_type=_resolve_agent_output_type(
                         output_contract.output_type, ask_human_layer is not None or environment_layer is not None
                     ),
                 )
                 require_knowledge_before_answer(agent, knowledge_layer)
+                if mentions_layer is not None:
+                    mentions_layer.require_before_answer(agent)
                 run_timeout = asyncio.timeout(self.run_timeout_seconds)
                 try:
                     with capture_run_messages() as captured_messages:
@@ -442,7 +469,9 @@ class AgentRunRunner:
                                     deferred_tool_results=deferred_tool_results,
                                     event_stream_handler=handle_events,
                                     instructions=run.prompts or None,
-                                    capabilities=[compaction] if compaction is not None else None,
+                                    capabilities=[
+                                        capability for capability in (compaction, activity) if capability is not None
+                                    ],
                                     usage_limits=UsageLimits(request_limit=_MAX_AGENT_STEPS_PER_RUN),
                                 )
                         finally:

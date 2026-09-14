@@ -9,4 +9,4 @@ def test_default_upgrade_head_includes_workbench_and_upstream() -> None:
     # The deployment entrypoint upgrades to head, which must resolve without choosing a branch.
     assert scripts.get_current_head() is not None
     ancestors = {revision.revision for revision in scripts.walk_revisions(base="base", head="head")}
-    assert {"wb20260911u171", "d8e4a6b1c902"} <= ancestors
+    assert {"wb20260911u171", "d8e4a6b1c902", "wb20260914events"} <= ancestors

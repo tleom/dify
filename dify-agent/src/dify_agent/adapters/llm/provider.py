@@ -25,6 +25,7 @@ from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedMode
 from pydantic_ai.providers import Provider
 
 from dify_agent.layers.execution_context import DifyExecutionContextLayerConfig
+from dify_agent.layers.dify_plugin.configs import DifyModelCredentialRef
 from dify_agent.plugin_daemon_transport import (
     decode_plugin_daemon_error_payload,
     to_plugin_daemon_jsonable,
@@ -66,6 +67,7 @@ class DifyApiLLMClient:
     execution_context: DifyExecutionContextLayerConfig
     agent_run_id: str
     http_client: httpx.AsyncClient = field(repr=False)
+    credential_ref: DifyModelCredentialRef | None = None
     _call_counter: count[int] = field(default_factory=lambda: count(1), init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -117,6 +119,11 @@ class DifyApiLLMClient:
                     "tools": tools,
                     "stop": stop,
                     "stream": stream,
+                    **(
+                        {"credential_ref": self.credential_ref.model_dump(mode="json", exclude_none=True)}
+                        if self.credential_ref is not None
+                        else {}
+                    ),
                 },
             }
         )
@@ -178,6 +185,7 @@ class DifyApiLLMProvider(Provider[DifyLLMClient]):
     execution_context: DifyExecutionContextLayerConfig
     agent_run_id: str
     http_client: httpx.AsyncClient = field(repr=False)
+    credential_ref: DifyModelCredentialRef | None = None
     _client: DifyLLMClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -189,6 +197,7 @@ class DifyApiLLMProvider(Provider[DifyLLMClient]):
             execution_context=self.execution_context,
             agent_run_id=self.agent_run_id,
             http_client=self.http_client,
+            credential_ref=self.credential_ref,
         )
 
     @override

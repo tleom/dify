@@ -33,3 +33,22 @@ def test_plugin_mention_preserves_the_localized_provider_label():
     soul, ids = fixtures()
     result = resolve_mentions(soul, {"tools": ids}, provider_names=dict.fromkeys(ids, "工具插件"))
     assert result["mentioned_resources"][0]["name"] == "工具插件"
+
+
+def test_plugin_group_requires_one_of_its_selected_tools_and_rejects_missing_tools():
+    from types import SimpleNamespace
+
+    from services.workbench.mentions import ResourceMentions, required_tool_groups
+
+    soul, ids = fixtures()
+    for tool in soul["tools"]["dify_tools"]:
+        tool["credential_type"] = "unauthorized"
+    layers = SimpleNamespace(exposed_tool_names=lambda: ["first", "second"])
+    groups = required_tool_groups(soul, ResourceMentions(tools=ids), layers)
+    assert len(groups) == 1
+    assert groups[0].tool_names == ["first", "second"]
+    layers.exposed_tool_names = lambda: ["second"]
+    with pytest.raises(ValueError, match="未成功载入"):
+        required_tool_groups(soul, ResourceMentions(tools=ids), layers)
+    with pytest.raises(ValueError, match="已失效"):
+        required_tool_groups(soul, ResourceMentions(skills=["unpublished"]), layers)

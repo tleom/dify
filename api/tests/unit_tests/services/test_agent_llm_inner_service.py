@@ -204,6 +204,38 @@ def test_gateway_uses_quota_managed_instance_as_single_credit_owner(
     provider_invoke.assert_called_once()
 
 
+@pytest.mark.parametrize("invalid_reference", [False, True])
+def test_gateway_uses_explicit_reference_without_default_credential_fallback(
+    sqlite_session_factory, sqlite_session, invalid_reference,
+):
+    from dify_agent.layers.dify_plugin.configs import DifyModelCredentialRef
+
+    request = _request()
+    request.target.credential_ref = DifyModelCredentialRef(type="provider", id="saved-reference")
+    _persist_app(sqlite_session, request=request)
+    service = AgentLLMInnerService(session_factory=sqlite_session_factory)
+    selected = MagicMock()
+    with (
+        patch("services.agent_llm_inner_service.create_plugin_provider_manager") as provider_factory,
+        patch("services.agent_llm_inner_service.ModelManager") as default_manager,
+        patch("core.app.llm.agent_model.resolve_referenced_agent_model", return_value=selected) as resolver,
+    ):
+        if invalid_reference:
+            resolver.side_effect = ValueError("Referenced model credential is unavailable or not authorized")
+            with pytest.raises(AgentLLMInnerServiceError) as error:
+                service.prepare(request)
+            assert error.value.error_code == "agent_model_credential_invalid"
+            assert error.value.status_code == 400
+        else:
+            assert service.prepare(request).model_instance is selected
+        default_manager.assert_not_called()
+        resolver.assert_called_once_with(
+            provider_manager=provider_factory.return_value, tenant_id=request.caller.tenant_id,
+            user_id=request.caller.user_id, provider=request.target.provider, model=request.target.model,
+            credential_ref=request.target.credential_ref,
+        )
+
+
 def test_gateway_forwards_prompt_messages_without_revalidation() -> None:
     request = _request()
     prompt_messages: list[dict[str, JsonValue]] = [
