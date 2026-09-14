@@ -34,6 +34,10 @@ def _scope() -> WorkspaceOwnerScope:
     )
 
 
+def _workbench_scope() -> WorkspaceOwnerScope:
+    return replace(_scope(), owner_type=AgentWorkspaceOwnerType.WORKBENCH_USER, owner_id="account-1")
+
+
 def _backend_client() -> MagicMock:
     client = MagicMock()
     client.create_execution_binding_sync.return_value = SimpleNamespace(
@@ -258,7 +262,7 @@ def test_get_active_binding_resolves_exact_participant(sqlite_session: Session) 
 def test_workbench_template_change_reuses_workspace_and_scopes_bindings_to_app(
     monkeypatch: pytest.MonkeyPatch, sqlite_session: Session
 ) -> None:
-    scope = replace(_scope(), owner_type=AgentWorkspaceOwnerType.WORKBENCH_USER, owner_id="account-1")
+    scope = _workbench_scope()
     workspace = _workspace(owner_type=scope.owner_type, owner_id=scope.owner_id)
     previous = _binding()
     sqlite_session.add_all([workspace, previous])
@@ -314,20 +318,21 @@ def test_workbench_template_change_reuses_workspace_and_scopes_bindings_to_app(
 
 
 @pytest.mark.parametrize(
-    "changed",
+    "invalid_scope",
     [
-        {"tenant_id": "tenant-2"},
-        {"owner_id": "account-2"},
-        {"owner_scope_key": "other"},
-        {"owner_type": AgentWorkspaceOwnerType.CONVERSATION},
+        replace(_workbench_scope(), tenant_id="tenant-2"),
+        replace(_workbench_scope(), owner_id="account-2"),
+        replace(_workbench_scope(), owner_scope_key="other"),
+        replace(_workbench_scope(), owner_type=AgentWorkspaceOwnerType.CONVERSATION),
     ],
 )
-def test_workbench_workspace_reuse_preserves_owner_boundary(sqlite_session: Session, changed: dict) -> None:
-    scope = replace(_scope(), owner_type=AgentWorkspaceOwnerType.WORKBENCH_USER, owner_id="account-1")
+def test_workbench_workspace_reuse_preserves_owner_boundary(
+    sqlite_session: Session, invalid_scope: WorkspaceOwnerScope
+) -> None:
+    scope = _workbench_scope()
     sqlite_session.add(_workspace(owner_type=scope.owner_type, owner_id=scope.owner_id))
     sqlite_session.add(_binding())
     sqlite_session.commit()
-    invalid_scope = replace(scope, **changed)
 
     assert AgentWorkspaceService.resolve_active_workspace(session=sqlite_session, scope=invalid_scope) is None
     assert (
