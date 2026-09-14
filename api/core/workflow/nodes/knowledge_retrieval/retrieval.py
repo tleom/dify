@@ -80,6 +80,9 @@ class KnowledgeRetrievalRequest(BaseModel):
     reranking_model: RerankingModelDict | None = Field(default=None, description="Reranking model configuration")
     weights: WeightsDict | None = Field(default=None, description="Weights for weighted score reranking")
     reranking_enable: bool = Field(default=True, description="Whether reranking is enabled")
+    skip_failed_datasets: bool = Field(
+        default=True, description="Allow partial results after a dataset retrieval error"
+    )
     attachment_ids: list[str] | None = Field(default=None, description="List of attachment file IDs for retrieval")
 
 

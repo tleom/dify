@@ -3875,6 +3875,36 @@ class TestKnowledgeRetrievalRegression:
         assert "Skipping dataset retrieval because retriever failed" in caplog.text
 
 
+@pytest.mark.parametrize("skip_failed_datasets", [True, False])
+def test_workbench_retriever_failure_cannot_be_returned_as_empty(skip_failed_datasets: bool) -> None:
+    retrieval = DatasetRetrieval()
+    dataset = Dataset(id=str(uuid4()), provider="dify", indexing_technique="high_quality")
+    with (
+        patch.object(retrieval, "_retriever", side_effect=RuntimeError("vector provider unavailable")),
+        patch.object(retrieval, "_on_query"),
+    ):
+        expectation = nullcontext() if skip_failed_datasets else pytest.raises(RuntimeError, match="vector provider")
+        with expectation:
+            retrieval.multiple_retrieve(
+                app_id=str(uuid4()),
+                user_id=str(uuid4()),
+                user_from="account",
+                available_datasets=[dataset],
+                query="资料",
+                tenant_id=str(uuid4()),
+                reranking_enable=False,
+                reranking_mode="reranking_model",
+                reranking_model=None,
+                weights=None,
+                top_k=4,
+                score_threshold=0.0,
+                metadata_filter_document_ids=None,
+                metadata_condition=None,
+                attachment_ids=[],
+                skip_failed_datasets=skip_failed_datasets,
+            )
+
+
 class _FakeFlaskApp:
     def app_context(self):
         return nullcontext()

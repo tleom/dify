@@ -21,7 +21,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models import ModelRequestParameters
-from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults
 from pydantic_ai.usage import UsageLimits
@@ -1673,6 +1673,95 @@ def test_runner_passes_dynamic_dify_knowledge_tools_to_agent(monkeypatch: pytest
     asyncio.run(scenario())
 
     assert [tool.name for tool in seen_tools] == ["knowledge_base_search"]
+
+
+@pytest.mark.parametrize("coalesce", [False, True])
+def test_workbench_stream_hides_rejected_answer_but_forwards_preparation_and_search(
+    monkeypatch: pytest.MonkeyPatch, coalesce: bool
+) -> None:
+    requests = 0
+    calls: list[str] = []
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | dict[int, DeltaToolCall]]:
+        nonlocal requests
+        del messages, info
+        requests += 1
+        if requests == 1:
+            yield "unverified draft"
+        elif requests == 2:
+            yield {0: DeltaToolCall(name="prepare_attachment", json_args="{}")}
+        elif requests == 3:
+            yield {0: DeltaToolCall(name="knowledge_base_search", json_args="{}")}
+        else:
+            yield "verified answer"
+
+    def get_model(self: DifyPluginLLMLayer, *, http_client: httpx.AsyncClient, agent_run_id: str):
+        del self, http_client, agent_run_id
+        return FunctionModel(stream_function=stream)
+
+    async def get_tools(self: DifyKnowledgeBaseLayer, *, http_client: httpx.AsyncClient) -> list[Tool[object]]:
+        del http_client
+
+        async def prepare_attachment() -> str:
+            calls.append("prepare")
+            return "attachment ready"
+
+        async def search() -> str:
+            calls.append("search")
+            self.runtime_state.attempted_set_ids.append("support")
+            return "verified source"
+
+        return [Tool(prepare_attachment), Tool(search, name="knowledge_base_search")]
+
+    monkeypatch.setattr(DifyPluginLLMLayer, "get_model", get_model)
+    monkeypatch.setattr(DifyKnowledgeBaseLayer, "get_tools", get_tools)
+    request = _request()
+    request.composition.layers.append(
+        RunLayerSpec(
+            name="knowledge",
+            type=DIFY_KNOWLEDGE_BASE_LAYER_TYPE_ID,
+            deps={"execution_context": "execution_context"},
+            config=DifyKnowledgeBaseLayerConfig.model_validate(
+                {
+                    "workbench_run_id": "workbench-run",
+                    "sets": [
+                        {
+                            "id": "support",
+                            "name": "Support KB",
+                            "datasets": [{"id": "dataset-1"}],
+                            "query": {"mode": "generated_query"},
+                            "retrieval": {"mode": "multiple", "top_k": 4},
+                        }
+                    ],
+                }
+            ),
+        )
+    )
+    sink = InMemoryRunEventSink()
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            await AgentRunRunner(
+                sink=sink,
+                request=request,
+                run_id="workbench-stream",
+                plugin_daemon_http_client=client,
+                dify_api_http_client=client,
+                stream_text_delta_coalescing_enabled=coalesce,
+            ).run()
+
+    asyncio.run(scenario())
+
+    events = sink.events["workbench-stream"]
+    streamed = [event for event in events if isinstance(event, PydanticAIStreamRunEvent)]
+    assert calls == ["prepare", "search"]
+    assert requests == 4
+    assert "".join(event.agent_message_delta or "" for event in streamed) == "verified answer"
+    assert any("prepare_attachment" in event.model_dump_json() for event in streamed)
+    assert any("knowledge_base_search" in event.model_dump_json() for event in streamed)
+    terminal = events[-1]
+    assert isinstance(terminal, RunSucceededEvent)
+    assert terminal.data.output == "verified answer"
 
 
 def test_runner_passes_dynamic_dify_core_tools_to_agent(monkeypatch: pytest.MonkeyPatch) -> None:

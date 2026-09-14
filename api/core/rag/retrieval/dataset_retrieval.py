@@ -279,6 +279,7 @@ class DatasetRetrieval:
                 reranking_model=request.reranking_model,
                 weights=request.weights,
                 reranking_enable=request.reranking_enable,
+                skip_failed_datasets=request.skip_failed_datasets,
                 metadata_filter_document_ids=metadata_filter_document_ids,
                 metadata_condition=metadata_condition,
                 attachment_ids=request.attachment_ids,
@@ -798,6 +799,7 @@ class DatasetRetrieval:
         metadata_filter_document_ids: dict[str, list[str]] | None = None,
         metadata_condition: MetadataFilteringCondition | None = None,
         attachment_ids: list[str] | None = None,
+        skip_failed_datasets: bool = True,
     ):
         if not available_datasets:
             return []
@@ -860,6 +862,7 @@ class DatasetRetrieval:
                         "dataset_count": dataset_count,
                         "cancel_event": cancel_event,
                         "thread_exceptions": thread_exceptions,
+                        "skip_failed_datasets": skip_failed_datasets,
                     },
                 )
                 all_threads.append(query_thread)
@@ -886,6 +889,7 @@ class DatasetRetrieval:
                             "dataset_count": dataset_count,
                             "cancel_event": cancel_event,
                             "thread_exceptions": thread_exceptions,
+                            "skip_failed_datasets": skip_failed_datasets,
                         },
                     )
                     all_threads.append(attachment_thread)
@@ -1918,6 +1922,7 @@ class DatasetRetrieval:
         attachment_id: str | None,
         dataset_count: int,
         cancel_event: threading.Event | None = None,
+        skip_failed_datasets: bool = True,
     ) -> None:
         try:
             with flask_app.app_context():
@@ -1953,7 +1958,7 @@ class DatasetRetrieval:
                             "attachment_ids": [attachment_id] if attachment_id else None,
                             "cancel_event": cancel_event,
                             "thread_exceptions": retrieval_thread_exceptions,
-                            "skip_on_error": True,
+                            "skip_on_error": skip_failed_datasets,
                         },
                     )
                     threads.append(retrieval_thread)
@@ -2034,6 +2039,7 @@ class DatasetRetrieval:
         dataset_count: int,
         cancel_event: threading.Event | None = None,
         thread_exceptions: list[Exception] | None = None,
+        skip_failed_datasets: bool = True,
     ) -> None:
         """Collect errors only after they pass through the traced multi-retrieval method."""
         try:
@@ -2054,6 +2060,7 @@ class DatasetRetrieval:
                 attachment_id=attachment_id,
                 dataset_count=dataset_count,
                 cancel_event=cancel_event,
+                skip_failed_datasets=skip_failed_datasets,
             )
         except Exception as exc:
             if cancel_event:

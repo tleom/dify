@@ -114,6 +114,13 @@ def _build_source() -> Source:
     )
 
 
+@pytest.mark.parametrize("workbench_run_id", [None, "workbench-run"])
+def test_only_workbench_rejects_partial_retrieval_failures(workbench_run_id: str | None) -> None:
+    request = _build_request(workbench_run_id=workbench_run_id)
+    mapped = InnerKnowledgeRetrievalService()._to_rag_request(request)
+    assert mapped.skip_failed_datasets is (workbench_run_id is None)
+
+
 class TestInnerKnowledgeRetrievalService:
     @pytest.mark.parametrize("sqlite_session", [(App, Dataset)], indirect=True)
     @patch("services.knowledge_retrieval_inner_service.DatasetRetrieval")

@@ -26,6 +26,8 @@ def test_history_responses_preserve_context_usage_without_stream_events() -> Non
     chat = {
         "id": "chat",
         "title": "title",
+        "created_at": 1785542400,
+        "updated_at": 1785542400,
         "version": 1,
         "pinned": False,
         "template_snapshot_id": "snapshot",

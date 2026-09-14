@@ -63,6 +63,11 @@ def compile_selection(
     result = copy.deepcopy(soul)
     result["model"] = copy.deepcopy(models[selection.model])
     settings = result["model"].setdefault("model_settings", {})
+    template_model = soul.get("model") or {}
+    if all(template_model.get(key) == result["model"].get(key) for key in ("plugin_id", "model_provider", "model")):
+        # A workbench selection overrides individual settings of the published
+        # model. Provider-specific settings must not leak into a different model.
+        settings.update(copy.deepcopy(template_model.get("model_settings") or {}))
     for key, value in selection.model_parameters.items():
         rule = (parameter_rules or {}).get(key)
         if rule is None:
@@ -87,8 +92,10 @@ def compile_selection(
             if rule.get("max") is not None and value > rule["max"]:
                 raise ValueError(f"模型参数过大: {key}")
         settings[key] = value
-    # CLI definitions are not public resources. Shell belongs to the user's sandbox.
-    result["tools"] = {"dify_tools": [], "cli_tools": []}
+    # Executable definitions come only from the administrator's published
+    # snapshot, never from a client selection. Preserve their native runtime
+    # handling and the sandbox's existing filesystem/execution restrictions.
+    result.setdefault("tools", {})["dify_tools"] = []
     if not set(selection.tool_parameters) <= set(selection.tools):
         raise ValueError("不能设置未启用工具的参数")
     for key in selection.tools:
@@ -106,9 +113,13 @@ def compile_selection(
         result["tools"]["dify_tools"].append(tool)
     result["config_skills"] = [copy.deepcopy(resources["skills"][key]) for key in selection.skills]
     result["knowledge"] = {"sets": [copy.deepcopy(resources["knowledge"][key]) for key in selection.knowledge]}
-    # Published reference files are inherited from the copied template.
-    # Keep template environment secrets out of account sandboxes.
-    result["env"] = {"variables": [], "secret_refs": []}
+    # Preserve declarations, but do not copy the publisher's inline credentials
+    # into an account shell. Reference names are resolved by that account's host.
+    environments = [result.get("env") or {}]
+    environments.extend(tool.get("env") or {} for tool in result["tools"].get("cli_tools", []))
+    for environment in environments:
+        for secret_ref in environment.get("secret_refs", []):
+            secret_ref.pop("value", None)
     return result
 
 

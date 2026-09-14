@@ -20,6 +20,14 @@ def require_agent_run(tenant_id: str, account_id: str, agent_id: str) -> None:
 
 
 def can_retrieve_dataset(tenant_id: str, account_id: str, dataset_id: str) -> bool:
+    return _can_access_dataset(tenant_id, account_id, dataset_id, RBACPermission.DATASET_RETRIEVAL_RECALL)
+
+
+def can_read_dataset(tenant_id: str, account_id: str, dataset_id: str) -> bool:
+    return _can_access_dataset(tenant_id, account_id, dataset_id, RBACPermission.DATASET_READONLY)
+
+
+def _can_access_dataset(tenant_id: str, account_id: str, dataset_id: str, permission: RBACPermission) -> bool:
     if not dify_config.RBAC_ENABLED:
         return True
     # Match the dataset transport's maintainer exemption before consulting RBAC.
@@ -28,7 +36,7 @@ def can_retrieve_dataset(tenant_id: str, account_id: str, dataset_id: str) -> bo
     return RBACService.CheckAccess.check(
         tenant_id,
         account_id,
-        scene=RBACPermission.DATASET_RETRIEVAL_RECALL,
+        scene=permission,
         resource_type=RBACResourceScope.DATASET,
         resource_id=dataset_id,
     )

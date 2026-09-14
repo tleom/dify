@@ -188,6 +188,8 @@ class WorkbenchRunEnvelopeResponse(ResponseModel):
 
 
 class WorkbenchChatSummaryResponse(ResponseModel):
+    created_at: int = Field(description="Conversation creation time in Unix seconds (UTC)")
+    updated_at: int = Field(description="Conversation update time in Unix seconds (UTC)")
     file_directory: str | None = None
     id: str
     title: str

@@ -239,12 +239,14 @@ class DifyKnowledgeEagerResult(BaseModel):
 
 
 class DifyKnowledgeRuntimeState(BaseModel):
-    """Serializable eager-retrieval state stored in Agenton session snapshots."""
+    """Serializable retrieval attempts and paginated results for session snapshots."""
 
     eager_config_fingerprint: str | None = None
     eager_results: list[DifyKnowledgeEagerResult] = Field(default_factory=list)
     search_run_id: str | None = None
     searched_set_ids: list[str] = Field(default_factory=list)
+    attempted_set_ids: list[str] = Field(default_factory=list)
+    search_result_texts: dict[str, str] = Field(default_factory=dict)
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", validate_assignment=True)
 
@@ -252,10 +254,12 @@ class DifyKnowledgeRuntimeState(BaseModel):
 class DifyKnowledgeBaseLayerConfig(LayerConfig):
     """Public config for one knowledge-base layer.
 
-    The model-visible surface stays fixed to ``knowledge_base_search``. Set
-    names are the only model-visible selection labels; dataset ids, retrieval
-    controls, metadata filtering, and caller identity remain config/runtime
-    concerns outside the tool schema.
+    Set names select knowledge sources. Workbench runs also expose result-page
+    and indexed-document tools. Dataset selection, retrieval controls, metadata
+    filtering and caller identity remain server/config concerns rather than
+    model-supplied tool arguments. Native observations use both length limits;
+    workbench results preserve full hit content and use max_observation_chars
+    as the search page size.
     """
 
     sets: list[DifyKnowledgeSetConfig]

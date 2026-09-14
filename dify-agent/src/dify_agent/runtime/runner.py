@@ -421,11 +421,11 @@ class AgentRunRunner:
                         "Deferred tool results require a 'history' layer with prior message history."
                     )
 
-                from dify_agent.runtime.knowledge import prepare_knowledge_tools, require_knowledge_before_answer
+                from dify_agent.runtime.knowledge import require_knowledge_before_answer
 
                 agent = create_agent(
                     model,
-                    tools=prepare_knowledge_tools(tools, knowledge_layer),
+                    tools=tools,
                     output_type=_resolve_agent_output_type(
                         output_contract.output_type, ask_human_layer is not None or environment_layer is not None
                     ),

@@ -31,7 +31,14 @@ def test_agent_run_permission_uses_exact_tenant_account_and_agent(
 
 
 @pytest.mark.parametrize(
-    "enabled,owner,allowed,expected",
+    ("permission_check", "permission"),
+    [
+        (authorization.can_retrieve_dataset, RBACPermission.DATASET_RETRIEVAL_RECALL),
+        (authorization.can_read_dataset, RBACPermission.DATASET_READONLY),
+    ],
+)
+@pytest.mark.parametrize(
+    ("enabled", "owner", "allowed", "expected"),
     [
         (False, "someone-else", False, True),
         (True, "account-1", False, True),
@@ -46,6 +53,8 @@ def test_dataset_permission_preserves_maintainer_and_rbac_policy(
     owner: str,
     allowed: bool,
     expected: bool,
+    permission_check: Callable[[str, str, str], bool],
+    permission: RBACPermission,
 ) -> None:
     config_overrides(RBAC_ENABLED=enabled)
     maintainer = MagicMock(return_value=owner)
@@ -53,7 +62,7 @@ def test_dataset_permission_preserves_maintainer_and_rbac_policy(
     monkeypatch.setattr(authorization.RBACResourceService, "get_dataset_maintainer", maintainer)
     monkeypatch.setattr(authorization.RBACService.CheckAccess, "check", check)
 
-    assert authorization.can_retrieve_dataset("tenant-1", "account-1", "dataset-1") is expected
+    assert permission_check("tenant-1", "account-1", "dataset-1") is expected
 
     if enabled:
         maintainer.assert_called_once_with("tenant-1", "dataset-1")
@@ -63,7 +72,7 @@ def test_dataset_permission_preserves_maintainer_and_rbac_policy(
         check.assert_called_once_with(
             "tenant-1",
             "account-1",
-            scene=RBACPermission.DATASET_RETRIEVAL_RECALL,
+            scene=permission,
             resource_type=RBACResourceScope.DATASET,
             resource_id="dataset-1",
         )

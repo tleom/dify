@@ -8,8 +8,34 @@ See the [operations guide](guide/index.md) for local server behavior.
 
 Workbench Office, browser, and environment usage instructions are maintained in
 the Agent's published config files and loaded through the config layer. The
-workbench environment layer describes shared dependency updates and conversation
-file placement.
+workbench environment layer enforces shared dependency updates and conversation
+file placement. Workbench Shell prompts omit native sandbox installation and
+Home-layout assumptions; administrators own environment usage guidance in
+published instructions or config files. CLI declarations use already-provisioned
+commands; workbench runs skip their installation scripts and request missing
+dependencies through the shared-environment owner. Environment declarations keep
+normal variables and account-host secret references, excluding the publisher's
+inline secret values.
+
+Workbench knowledge selection requires an access attempt before a final answer,
+while preparation tools and deferred human/environment requests remain available.
+Answer text is withheld until the required knowledge attempts have been made,
+so output rejected by the knowledge validator never appears as a streamed draft.
+Access failures are explicit observations; they neither count as successful
+searches nor force repeated calls. Retrieval failures within a dataset propagate
+to this boundary instead of silently becoming empty or partial search results.
+
+Workbench search observations are paginated JSON. `knowledge_base_read_results`
+continues the same result using `search_id` and `next_offset`; the current run
+retains its latest five results across suspension. `knowledge_base_list_documents`
+and `knowledge_base_read_document` use the authenticated inner document API to
+page through selected datasets. Each page rechecks the active run's owner,
+selection, current retrieval permission and full-content read permission. Document
+filters come from the frozen run configuration; query-dependent automatic filters
+require using search instead of full enumeration. `complete`, `unavailable_count` and
+`scope` describe indexed-content coverage; Top-K search and external providers
+without enumeration cannot establish complete document coverage. Native Agent
+tool availability, preview limits and error propagation remain unchanged.
 
 Workbench executions additionally emit `context_status` events. Their `data.phase`
 is `usage`, `compacting`, `compacted`, or `failed`. Token counts describe the current

@@ -106,17 +106,16 @@ Installed CLI:
 - Use the generated `dify-agent ... --help` output in the config prompt for exact command syntax.
 - Do not install or recreate the `dify-agent` CLI.
 
-Filesystem spaces:
+shell_run script rules:
+
+- The script argument can be a normal shell script or a shebang script.
+- If the first line is a shebang, the shell executes the script directly."""
+_LOCAL_SANDBOX_ENVIRONMENT_PROMPT = """Filesystem spaces:
 
 - `$HOME` is the system space for reusable tools and state.
 - The current working directory (`cwd`) is the active Workspace and temporary working space.
 - Relative paths and the standard temp environment variables (`TMPDIR`, `TMP`, and `TEMP`) resolve directly to `cwd`.
 - Do not use `/tmp`.
-
-shell_run script rules:
-
-- The script argument can be a normal shell script or a shebang script.
-- If the first line is a shebang, the shell executes the script directly.
 
 Tips:
 
@@ -266,16 +265,26 @@ class DifyShellLayer(PydanticAILayer[DifyShellLayerDeps, object, DifyShellLayerC
 
     def _build_prefix_prompt(self) -> str:
         execution_context = self.deps.execution_context
+        if execution_context is not None and execution_context.config.workbench_run_id:
+            # The workbench has a shared, read-only dependency environment and
+            # different writable paths. Its layer owns those invariants; usage
+            # guidance comes from the administrator's published instructions.
+            return _SHELL_LAYER_PREFIX_PROMPT
         is_build_draft = (
             execution_context is not None and execution_context.config.agent_config_version_kind == "build_draft"
         )
         working_location_prompt = (
             _BUILD_DRAFT_WORKING_LOCATION_PROMPT if is_build_draft else _DEFAULT_WORKING_LOCATION_PROMPT
         )
-        return f"{_SHELL_LAYER_PREFIX_PROMPT}\n\n{working_location_prompt}"
+        return f"{_SHELL_LAYER_PREFIX_PROMPT}\n\n{_LOCAL_SANDBOX_ENVIRONMENT_PROMPT}\n\n{working_location_prompt}"
 
     @override
     async def on_context_create(self) -> None:
+        execution_context = self.deps.execution_context
+        if execution_context is not None and execution_context.config.workbench_run_id:
+            # Workbench dependencies are provisioned by the shared-environment
+            # owner. Published CLI declarations must not bootstrap a private tree.
+            return
         bootstrap_script = _workspace_bootstrap_script(self.config)
         if not bootstrap_script:
             return

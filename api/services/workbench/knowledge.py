@@ -1,5 +1,7 @@
 """Account-visible Dify datasets exposed as searchable workbench knowledge sets."""
 
+import copy
+
 from werkzeug.exceptions import Forbidden
 
 from configs import dify_config
@@ -7,6 +9,31 @@ from core.db.session_factory import session_factory
 from models import Account
 from services.dataset_service import DatasetService
 from services.workbench.authorization import can_retrieve_dataset
+
+
+def dataset_retrieval_config(settings: dict) -> dict:
+    """Translate the dataset's saved retrieval policy without replacing it."""
+    reranking = settings.get("reranking_model") or {}
+    provider = reranking.get("reranking_provider_name")
+    model = reranking.get("reranking_model_name")
+    return {
+        "mode": "multiple",
+        "top_k": settings.get("top_k", 4),
+        "reranking_enable": settings.get("reranking_enable", False),
+        "reranking_mode": settings.get("reranking_mode") or "reranking_model",
+        "reranking_model": {"provider": provider, "model": model} if provider and model else None,
+        "weights": copy.deepcopy(settings.get("weights")),
+        "score_threshold": (settings.get("score_threshold") or 0.0) if settings.get("score_threshold_enabled") else 0.0,
+    }
+
+
+def dataset_metadata_filter(settings: dict) -> dict:
+    """Use the saved dataset metadata conditions for both search and document reads."""
+    conditions = copy.deepcopy(settings.get("metadata_filtering_conditions"))
+    if not conditions or not conditions.get("conditions"):
+        return {"mode": "disabled"}
+    conditions["logical_operator"] = conditions.get("logical_operator") or "and"
+    return {"mode": "manual", "conditions": conditions}
 
 
 def available_sets(tenant_id: str, account_id: str) -> list[dict]:
@@ -46,15 +73,8 @@ def available_sets(tenant_id: str, account_id: str) -> list[dict]:
                         "description": dataset.description,
                         "datasets": [{"id": dataset.id, "name": dataset.name}],
                         "query": {"mode": "generated_query"},
-                        "retrieval": {
-                            "mode": "multiple",
-                            "top_k": settings.get("top_k", 4),
-                            "reranking_enable": False,
-                            "score_threshold": settings.get("score_threshold")
-                            if settings.get("score_threshold_enabled")
-                            else None,
-                        },
-                        "metadata_filtering": {"mode": "disabled"},
+                        "retrieval": dataset_retrieval_config(settings),
+                        "metadata_filtering": dataset_metadata_filter(settings),
                     }
                 )
             if page * 100 >= total:

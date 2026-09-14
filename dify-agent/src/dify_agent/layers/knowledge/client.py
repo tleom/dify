@@ -1,7 +1,7 @@
-"""Async client for the Dify API inner knowledge retrieval endpoint.
+"""Async client for Dify API inner knowledge retrieval and document pages.
 
 This wrapper owns only request/response mapping and error normalization for
-``POST /inner/api/knowledge/retrieve``. The shared ``httpx.AsyncClient`` is
+``POST /inner/api/knowledge/retrieve`` and ``/knowledge/documents``. The shared ``httpx.AsyncClient`` is
 supplied by the FastAPI lifespan/runtime and must stay open for the caller.
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
@@ -92,6 +92,22 @@ class DifyKnowledgeRetrieveResponse(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
 
+class DifyKnowledgeDocumentPage(BaseModel):
+    operation: Literal["list", "read"]
+    dataset_id: str
+    document_id: str | None = None
+    document_name: str | None = None
+    documents: list[dict[str, JsonValue]] = Field(default_factory=list)
+    segments: list[dict[str, JsonValue]] = Field(default_factory=list)
+    total: int
+    unavailable_count: int = 0
+    next_cursor: str | None = None
+    complete: bool
+    scope: str
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+
 @dataclass(slots=True)
 class DifyKnowledgeBaseClient:
     """Boundary client for the Dify API inner knowledge retrieval endpoint."""
@@ -142,14 +158,58 @@ class DifyKnowledgeBaseClient:
             metadata_filtering=metadata_filtering.to_request_payload(),
         )
 
+        response = await self._post(
+            "/inner/api/knowledge/retrieve", request_payload.model_dump(mode="json", by_alias=True)
+        )
+        try:
+            return DifyKnowledgeRetrieveResponse.model_validate_json(response.text)
+        except ValidationError as exc:
+            raise DifyKnowledgeBaseClientError(
+                "Invalid knowledge retrieval response from Dify API.",
+                status_code=response.status_code,
+                error_code="invalid_response",
+                retryable=False,
+            ) from exc
+
+    async def document_page(
+        self,
+        *,
+        caller: dict[str, str],
+        workbench_run_id: str,
+        dataset_id: str,
+        operation: Literal["list", "read"],
+        document_id: str | None = None,
+        cursor: str | None = None,
+    ) -> DifyKnowledgeDocumentPage:
+        response = await self._post(
+            "/inner/api/knowledge/documents",
+            {
+                "caller": _DifyKnowledgeCaller.model_validate(caller).model_dump(mode="json"),
+                "workbench_run_id": workbench_run_id,
+                "dataset_id": dataset_id,
+                "operation": operation,
+                "document_id": document_id,
+                "cursor": cursor,
+            },
+        )
+        try:
+            return DifyKnowledgeDocumentPage.model_validate_json(response.text)
+        except ValidationError as exc:
+            raise DifyKnowledgeBaseClientError(
+                "Invalid knowledge document page from Dify API.",
+                error_code="invalid_response",
+                retryable=False,
+            ) from exc
+
+    async def _post(self, path: str, payload: dict) -> httpx.Response:
         try:
             response = await self.http_client.post(
-                f"{self.base_url}/inner/api/knowledge/retrieve",
+                self.base_url + path,
                 headers={
                     "X-Inner-Api-Key": self.api_key,
                     "Content-Type": "application/json",
                 },
-                json=request_payload.model_dump(mode="json", by_alias=True),
+                json=payload,
             )
         except (httpx.InvalidURL, httpx.UnsupportedProtocol) as exc:
             raise DifyKnowledgeBaseClientError(
@@ -170,15 +230,7 @@ class DifyKnowledgeBaseClient:
         if response.status_code >= 400:
             raise _build_http_error(response)
 
-        try:
-            return DifyKnowledgeRetrieveResponse.model_validate_json(response.text)
-        except ValidationError as exc:
-            raise DifyKnowledgeBaseClientError(
-                "Invalid knowledge retrieval response from Dify API.",
-                status_code=response.status_code,
-                error_code="invalid_response",
-                retryable=False,
-            ) from exc
+        return response
 
 
 def _build_http_error(response: httpx.Response) -> DifyKnowledgeBaseClientError:
