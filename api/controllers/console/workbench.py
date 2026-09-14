@@ -22,10 +22,9 @@ from fields.base import ResponseModel
 from libs.helper import dump_response
 from libs.login import current_account_with_tenant
 from models.model import AppMode
-from models.workbench import WorkbenchRun
 from services.app_task_service import AppTaskService
 from services.workbench import scheduler, service
-from services.workbench.event_log import owned_statement, read_state, stream_events
+from services.workbench.event_log import append_locked, notify, owned_statement, read_state, stream_events, uses_journal
 from services.workbench.mentions import ResourceMentions
 from services.workbench.policy import Selection
 
@@ -601,12 +600,19 @@ class Stop(WorkbenchResource):
         tenant_id, account_id = self.owner()
         task_id = read_state(tenant_id, account_id, str(run_id))["task_id"]
         redis_client.setex(scheduler.PREFIX + "stop:" + str(run_id), 86400, "1")
+        end_event = None
         with session_factory.get_session_maker().begin() as session:
-            run = session.get(WorkbenchRun, str(run_id))
+            run = session.scalar(owned_statement(tenant_id, account_id, str(run_id)).with_for_update())
             if run is None:
                 raise NotFound()
             if run.status in ("queued", "running", "waiting_input", "environment_update", "environment_installing"):
                 run.status = "cancelled"
+                if uses_journal(run):
+                    end_event = append_locked(
+                        session, run, {"event": "workbench_end", "status": "cancelled", "error": None}
+                    )
+        if end_event is not None:
+            notify(str(run_id), end_event)
         if task_id:
             AppTaskService.stop_task(task_id, InvokeFrom.EXPLORE, account_id, AppMode.AGENT)
         from tasks.workbench_tasks import force_stop
@@ -669,11 +675,13 @@ class Events(WorkbenchResource):
                             yield "data: " + json.dumps(event) + "\n\n"
                     yield (
                         "data: "
-                        + json.dumps({
-                            "event": "workbench_end",
-                            "status": terminal_state["status"],
-                            "error": terminal_state["error"],
-                        })
+                        + json.dumps(
+                            {
+                                "event": "workbench_end",
+                                "status": terminal_state["status"],
+                                "error": terminal_state["error"],
+                            }
+                        )
                         + "\n\n"
                     )
                     return

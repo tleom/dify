@@ -22,6 +22,7 @@ from models.workbench import WorkbenchChat, WorkbenchRun, WorkbenchRunEvent
 from services.workbench.scheduler import event_key
 
 logger = logging.getLogger(__name__)
+TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 
 
 def uses_journal(run, payload=None):
@@ -45,7 +46,22 @@ def owned_statement(tenant_id, account_id, run_id):
 
 def append_locked(session, run, item):
     """Caller holds the run row lock; never replace a previous event or do network I/O here."""
+    if json.loads(run.payload).get("activity_closed"):
+        return None
+    if run.status in TERMINAL_STATUSES and item.get("event") != "workbench_end":
+        return None
     _append_tool_knowledge(session, run, item)
+    stored = _append_record_locked(session, run, item)
+    if item.get("event") == "workbench_end" and item.get("status") in TERMINAL_STATUSES:
+        payload = json.loads(run.payload)
+        payload["activity_closed"] = True
+        run.payload = json.dumps(payload)
+        session.flush()
+    return stored
+
+
+def _append_record_locked(session, run, item):
+    """Append one record; only the closing owner may flush known terminal results."""
     source = item.get("source_event_id")
     identity = f"{item.get('backend_run_id', '')}:{source}" if source else str(uuid4())
     identity = hashlib.sha256(identity.encode()).hexdigest()
@@ -118,7 +134,7 @@ def _append_tool_knowledge(session, run, item):
             and knowledge.get("status") in ("returned", "error")
             and knowledge.get("backend_run_id") == backend_run_id
         ):
-            append_locked(session, run, knowledge)
+            _append_record_locked(session, run, knowledge)
 
 
 def append_event(run_id, item, *, expected_backend_run_id=None):
@@ -130,14 +146,9 @@ def append_event(run_id, item, *, expected_backend_run_id=None):
             return None
         journal = uses_journal(run)
         if journal:
-            # Progress after a user stop cannot resurrect an activity. Terminal
-            # control records still close the stream and preserve known results.
-            if run.status in ("cancelled", "interrupted") and item.get("event") in (
-                "workbench_activity",
-                "workbench_context",
-            ):
-                return None
             item = append_locked(session, run, item)
+            if item is None:
+                return None
     if journal:
         notify(run_id, item)
         return item["_id"]

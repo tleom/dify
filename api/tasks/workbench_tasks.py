@@ -122,8 +122,9 @@ def reconcile():
             else []
         )
     for run_id in dict.fromkeys([*expired, *terminal]):
+        end_event = None
         with session_factory.get_session_maker().begin() as session:
-            run = session.get(WorkbenchRun, run_id)
+            run = session.scalar(select(WorkbenchRun).where(WorkbenchRun.id == run_id).with_for_update())
             if run is None:
                 continue
             owner = f"{run.tenant_id}:{run.account_id}"
@@ -131,7 +132,13 @@ def reconcile():
             if run.status in ("running", "queued"):
                 run.status = "interrupted"
                 run.error = "执行进程失联，任务不会自动重做。请核对外部操作结果。"
+                if uses_journal(run):
+                    end_event = append_locked(
+                        session, run, {"event": "workbench_end", "status": run.status, "error": run.error}
+                    )
             account_id = run.account_id
+        if end_event is not None:
+            notify(run_id, end_event)
         stop_native(run_id, account_id)
         try:
             if fence_remote(ticket):
@@ -303,7 +310,9 @@ def execute(owner, run_id):
                     status = run.status
                 elif run.status == "running":
                     pause_event = workbench_runtime.complete_pause(
-                        session, run, completed_stream=completed_stream and status == "completed",
+                        session,
+                        run,
+                        completed_stream=completed_stream and status == "completed",
                     )
                     if pause_event is not None:
                         status = run.status
@@ -315,7 +324,9 @@ def execute(owner, run_id):
                     run.event_log = json.dumps(events)
                 else:
                     end_event = append_locked(
-                        session, run, {"event": "workbench_end", "status": status, "error": error},
+                        session,
+                        run,
+                        {"event": "workbench_end", "status": status, "error": error},
                     )
             if pause_event is not None:
                 notify(run_id, pause_event)
@@ -399,6 +410,7 @@ def update_environment(tenant_id, account_id):
             logger.exception("Workbench environment update failed")
             # A lost response is not evidence that the installer stopped. Reconcile by request ID.
             return
+        end_event = None
         with session_factory.get_session_maker().begin() as session:
             run = session.scalar(select(WorkbenchRun).where(WorkbenchRun.id == run_id).with_for_update())
             if run is None:
@@ -412,11 +424,17 @@ def update_environment(tenant_id, account_id):
             if run.status == "environment_installing":
                 if redis_client.get(scheduler.PREFIX + "stop:" + run_id):
                     run.status = "cancelled"
+                    if uses_journal(run):
+                        end_event = append_locked(
+                            session, run, {"event": "workbench_end", "status": "cancelled", "error": None}
+                        )
                 else:
                     payload["continuation"] = {"calls": {payload["pending"]["tool_call_id"]: result}}
                     payload.pop("pending", None)
                     payload["attempt"] = payload.get("attempt", 0) + 1
                     run.payload, run.status, run.backend_run_id = json.dumps(payload), "queued", None
+        if end_event is not None:
+            notify(run_id, end_event)
         # A second deferred request keeps the same user's queue closed until it is processed.
         with session_factory.create_session() as session:
             remaining = session.scalar(
