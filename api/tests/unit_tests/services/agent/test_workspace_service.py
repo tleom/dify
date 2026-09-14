@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from dataclasses import replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -31,6 +32,10 @@ def _scope() -> WorkspaceOwnerScope:
         owner_type=AgentWorkspaceOwnerType.CONVERSATION,
         owner_id="conversation-1",
     )
+
+
+def _workbench_scope() -> WorkspaceOwnerScope:
+    return replace(_scope(), owner_type=AgentWorkspaceOwnerType.WORKBENCH_USER, owner_id="account-1")
 
 
 def _backend_client() -> MagicMock:
@@ -254,6 +259,127 @@ def test_get_active_binding_resolves_exact_participant(sqlite_session: Session) 
     assert resolved.id == conversation_binding.id
 
 
+def test_workbench_template_change_reuses_workspace_and_scopes_bindings_to_app(
+    monkeypatch: pytest.MonkeyPatch, sqlite_session: Session
+) -> None:
+    scope = _workbench_scope()
+    workspace = _workspace(owner_type=scope.owner_type, owner_id=scope.owner_id)
+    previous = _binding()
+    sqlite_session.add_all([workspace, previous])
+    sqlite_session.commit()
+    client = _backend_client()
+    monkeypatch.setattr(AgentWorkspaceService, "_client", lambda: nullcontext(client))
+    updated_scope = replace(scope, app_id="app-2")
+
+    current = AgentWorkspaceService.create_binding(
+        session=sqlite_session,
+        scope=updated_scope,
+        agent_id="agent-2",
+        base_home_snapshot_id=None,
+        agent_config_version_id="config-2",
+        agent_config_version_kind=AgentConfigVersionKind.SNAPSHOT,
+    )
+    sqlite_session.commit()
+
+    assert current.workspace_id == workspace.id
+    assert current.app_id == "app-2"
+    assert workspace.app_id == "app-1"
+    assert sqlite_session.scalars(select(AgentWorkspace)).all() == [workspace]
+    request = client.create_execution_binding_sync.call_args.args[0]
+    assert request.workspace_id == workspace.id
+    assert request.existing_workspace_ref == "workspace-ref"
+    for binding, own_scope, other_scope in ((previous, scope, updated_scope), (current, updated_scope, scope)):
+        assert (
+            AgentWorkspaceService.get_active_binding(
+                session=sqlite_session,
+                tenant_id=own_scope.tenant_id,
+                binding_id=binding.id,
+                expected_owner_scope=own_scope,
+            )
+            is binding
+        )
+        assert (
+            AgentWorkspaceService.get_active_binding(
+                session=sqlite_session,
+                tenant_id=other_scope.tenant_id,
+                binding_id=binding.id,
+                expected_owner_scope=other_scope,
+            )
+            is None
+        )
+        assert (
+            AgentWorkspaceService.resolve_active_binding_for_scope(
+                session=sqlite_session,
+                scope=own_scope,
+                agent_id=binding.agent_id,
+            )
+            is binding
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_scope",
+    [
+        replace(_workbench_scope(), tenant_id="tenant-2"),
+        replace(_workbench_scope(), owner_id="account-2"),
+        replace(_workbench_scope(), owner_scope_key="other"),
+        replace(_workbench_scope(), owner_type=AgentWorkspaceOwnerType.CONVERSATION),
+    ],
+)
+def test_workbench_workspace_reuse_preserves_owner_boundary(
+    sqlite_session: Session, invalid_scope: WorkspaceOwnerScope
+) -> None:
+    scope = _workbench_scope()
+    sqlite_session.add(_workspace(owner_type=scope.owner_type, owner_id=scope.owner_id))
+    sqlite_session.add(_binding())
+    sqlite_session.commit()
+
+    assert AgentWorkspaceService.resolve_active_workspace(session=sqlite_session, scope=invalid_scope) is None
+    assert (
+        AgentWorkspaceService.get_active_binding(
+            session=sqlite_session,
+            tenant_id=invalid_scope.tenant_id,
+            binding_id="binding-1",
+            expected_owner_scope=invalid_scope,
+        )
+        is None
+    )
+    assert (
+        AgentWorkspaceService.resolve_active_binding_for_scope(
+            session=sqlite_session,
+            scope=invalid_scope,
+            agent_id="agent-1",
+        )
+        is None
+    )
+
+
+def test_non_workbench_workspace_still_requires_its_app(sqlite_session: Session) -> None:
+    sqlite_session.add(_workspace())
+    sqlite_session.add(_binding())
+    sqlite_session.commit()
+    scope = replace(_scope(), app_id="app-2")
+
+    assert AgentWorkspaceService.resolve_active_workspace(session=sqlite_session, scope=scope) is None
+    assert (
+        AgentWorkspaceService.get_active_binding(
+            session=sqlite_session,
+            tenant_id=scope.tenant_id,
+            binding_id="binding-1",
+            expected_owner_scope=scope,
+        )
+        is None
+    )
+    assert (
+        AgentWorkspaceService.resolve_active_binding_for_scope(
+            session=sqlite_session,
+            scope=scope,
+            agent_id="agent-1",
+        )
+        is None
+    )
+
+
 def test_get_active_binding_rejects_wrong_owner(sqlite_session: Session) -> None:
     build_workspace = _workspace(
         workspace_id="workspace-build",
@@ -420,6 +546,38 @@ def test_retire_all_for_app_retires_only_active_workspaces_for_that_app(sqlite_s
     assert already_retired.status is AgentWorkingResourceStatus.RETIRED
     assert other_app.status is AgentWorkingResourceStatus.ACTIVE
     assert other_binding.status is AgentWorkingResourceStatus.ACTIVE
+
+
+def test_retiring_old_template_preserves_reused_personal_workspace(sqlite_session: Session) -> None:
+    workspace = _workspace(owner_type=AgentWorkspaceOwnerType.WORKBENCH_USER, owner_id="account-1")
+    previous = _binding()
+    current = _binding(binding_id="binding-2", app_id="app-2", agent_id="agent-2")
+    sqlite_session.add_all([workspace, previous, current])
+    sqlite_session.commit()
+
+    # App deletion retires its Agent's Bindings before collecting App-owned Workspaces.
+    AgentWorkspaceService.retire_binding(session=sqlite_session, tenant_id="tenant-1", binding_id=previous.id)
+    retired = AgentWorkspaceService.retire_all_for_app(session=sqlite_session, tenant_id="tenant-1", app_id="app-1")
+    sqlite_session.commit()
+
+    assert retired == []
+    assert previous.status is AgentWorkingResourceStatus.RETIRED
+    assert workspace.status is AgentWorkingResourceStatus.ACTIVE
+    assert current.status is AgentWorkingResourceStatus.ACTIVE
+    assert (
+        AgentWorkspaceService.get_active_binding(
+            session=sqlite_session,
+            tenant_id="tenant-1",
+            binding_id=current.id,
+            expected_owner_scope=replace(
+                _scope(),
+                app_id="app-2",
+                owner_type=AgentWorkspaceOwnerType.WORKBENCH_USER,
+                owner_id="account-1",
+            ),
+        )
+        is current
+    )
 
 
 def test_collect_binding_without_retired_workspace_destroys_binding_only(

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from dify_agent.client import Client
 from dify_agent.protocol import CreateExecutionBindingRequest, DestroyExecutionBindingRequest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from clients.agent_backend.factory import create_agent_backend_client
@@ -64,10 +64,14 @@ class AgentWorkspaceService:
 
     @classmethod
     def resolve_active_workspace(cls, *, session: Session, scope: WorkspaceOwnerScope) -> AgentWorkspace | None:
+        # Personal workspaces survive template changes; each Binding still belongs to its App.
         return session.scalar(
             select(AgentWorkspace).where(
                 AgentWorkspace.tenant_id == scope.tenant_id,
-                AgentWorkspace.app_id == scope.app_id,
+                or_(
+                    AgentWorkspace.owner_type == AgentWorkspaceOwnerType.WORKBENCH_USER,
+                    AgentWorkspace.app_id == scope.app_id,
+                ),
                 AgentWorkspace.owner_type == scope.owner_type,
                 AgentWorkspace.owner_id == scope.owner_id,
                 AgentWorkspace.owner_scope_key == scope.owner_scope_key,
@@ -94,9 +98,13 @@ class AgentWorkspaceService:
             .where(
                 AgentWorkspaceBinding.id == binding_id,
                 AgentWorkspaceBinding.tenant_id == tenant_id,
+                AgentWorkspaceBinding.app_id == expected_owner_scope.app_id,
                 AgentWorkspaceBinding.status == AgentWorkingResourceStatus.ACTIVE,
                 AgentWorkspace.tenant_id == expected_owner_scope.tenant_id,
-                AgentWorkspace.app_id == expected_owner_scope.app_id,
+                or_(
+                    AgentWorkspace.owner_type == AgentWorkspaceOwnerType.WORKBENCH_USER,
+                    AgentWorkspace.app_id == expected_owner_scope.app_id,
+                ),
                 AgentWorkspace.owner_type == expected_owner_scope.owner_type,
                 AgentWorkspace.owner_id == expected_owner_scope.owner_id,
                 AgentWorkspace.owner_scope_key == expected_owner_scope.owner_scope_key,
@@ -127,7 +135,10 @@ class AgentWorkspaceService:
                 AgentWorkspaceBinding.agent_id == agent_id,
                 AgentWorkspaceBinding.status == AgentWorkingResourceStatus.ACTIVE,
                 AgentWorkspace.tenant_id == scope.tenant_id,
-                AgentWorkspace.app_id == scope.app_id,
+                or_(
+                    AgentWorkspace.owner_type == AgentWorkspaceOwnerType.WORKBENCH_USER,
+                    AgentWorkspace.app_id == scope.app_id,
+                ),
                 AgentWorkspace.owner_type == scope.owner_type,
                 AgentWorkspace.owner_id == scope.owner_id,
                 AgentWorkspace.owner_scope_key == scope.owner_scope_key,
@@ -175,6 +186,7 @@ class AgentWorkspaceService:
         workspace_id = workspace.id if workspace is not None else str(uuidv7())
         if workspace is None and scope.owner_type == AgentWorkspaceOwnerType.WORKBENCH_USER:
             from services.workbench.files import workspace_id as workbench_workspace_id
+
             workspace_id = workbench_workspace_id(scope.tenant_id, scope.owner_id)
         binding_id = binding_id or str(uuidv7())
         with cls._client() as client:
@@ -315,12 +327,17 @@ class AgentWorkspaceService:
 
     @classmethod
     def retire_all_for_app(cls, *, session: Session, tenant_id: str, app_id: str) -> list[str]:
-        """Retire all ACTIVE Workspaces owned by an App in the caller's transaction."""
+        """Retire App-owned Workspaces; personal Workspaces outlive their template App.
+
+        Callers retire the App's Agent Bindings separately, preserving other
+        templates' Bindings in a shared personal Workspace.
+        """
 
         workspaces = session.scalars(
             select(AgentWorkspace).where(
                 AgentWorkspace.tenant_id == tenant_id,
                 AgentWorkspace.app_id == app_id,
+                AgentWorkspace.owner_type != AgentWorkspaceOwnerType.WORKBENCH_USER,
                 AgentWorkspace.status == AgentWorkingResourceStatus.ACTIVE,
             )
         ).all()
