@@ -30,7 +30,9 @@ continues the same result using `search_id` and `next_offset`; the current run
 retains its latest five results across suspension. `knowledge_base_list_documents`
 and `knowledge_base_read_document` use the authenticated inner document API to
 page through selected datasets. Each page rechecks the active run's owner,
-selection and current dataset permission. `complete`, `unavailable_count` and
+selection, current retrieval permission and full-content read permission. Document
+filters come from the frozen run configuration; query-dependent automatic filters
+require using search instead of full enumeration. `complete`, `unavailable_count` and
 `scope` describe indexed-content coverage; Top-K search and external providers
 without enumeration cannot establish complete document coverage. Native Agent
 tool availability, preview limits and error propagation remain unchanged.

@@ -14,6 +14,7 @@ from core.rag.retrieval.dataset_retrieval import DatasetRetrieval
 from core.workflow.nodes.knowledge_retrieval.entities import MetadataFilteringCondition
 from graphon.model_runtime.entities.llm_entities import LLMMode
 from graphon.nodes.llm.entities import ModelConfig
+from models.agent_config_entities import AgentKnowledgeMetadataFilteringConfig
 from models.dataset import Dataset, Document, DocumentSegment
 from models.workbench import WorkbenchChat, WorkbenchRun
 from services.entities.knowledge_documents import (
@@ -22,7 +23,8 @@ from services.entities.knowledge_documents import (
     KnowledgeDocumentsResponse,
     KnowledgeSegmentSlice,
 )
-from services.workbench.knowledge import available_sets, dataset_metadata_filter
+from services.workbench.authorization import can_read_dataset
+from services.workbench.knowledge import available_sets
 
 _PAGE_ITEMS = 20
 _PAGE_CONTENT_CHARS = 12000
@@ -54,7 +56,9 @@ def _decode_cursor(request: KnowledgeDocumentsPayload) -> _Cursor | None:
     return value
 
 
-def _authorize(session: Session, request: KnowledgeDocumentsPayload) -> Dataset:
+def _authorize(
+    session: Session, request: KnowledgeDocumentsPayload
+) -> tuple[Dataset, AgentKnowledgeMetadataFilteringConfig]:
     caller = request.caller
     if not dify_config.WORKBENCH_ENABLED or caller.user_from != "account":
         raise Forbidden()
@@ -75,13 +79,18 @@ def _authorize(session: Session, request: KnowledgeDocumentsPayload) -> Dataset:
     if run is None:
         raise Forbidden("知识库读取任务已结束或不可访问")
     selected = json.loads(run.payload).get("effective_soul", {}).get("knowledge", {}).get("sets", [])
-    allowed_ids = {item["id"] for knowledge_set in selected for item in knowledge_set.get("datasets", [])}
-    if request.dataset_id not in allowed_ids:
+    knowledge_set = next(
+        (item for item in selected if any(dataset["id"] == request.dataset_id for dataset in item.get("datasets", []))),
+        None,
+    )
+    if knowledge_set is None:
         raise Forbidden("只能读取当前任务已选择的知识库")
     # Recheck current account visibility and retrieval permission on every page,
     # including after a user pause or a knowledge permission change.
     if request.dataset_id not in {item["id"] for item in available_sets(caller.tenant_id, caller.user_id)}:
         raise Forbidden("知识库访问权限已变更")
+    if not can_read_dataset(caller.tenant_id, caller.user_id, request.dataset_id):
+        raise Forbidden("没有知识库内容查看权限，无法列举或读取完整文档")
     dataset = session.scalar(
         select(Dataset).where(Dataset.id == request.dataset_id, Dataset.tenant_id == caller.tenant_id)
     )
@@ -89,18 +98,27 @@ def _authorize(session: Session, request: KnowledgeDocumentsPayload) -> Dataset:
         raise NotFound("知识库已不存在")
     if dataset.provider == "external":
         raise Conflict("外部知识库没有提供文档枚举接口，无法据此确认全文或完整列表")
-    return dataset
+    filtering = AgentKnowledgeMetadataFilteringConfig.model_validate(knowledge_set.get("metadata_filtering") or {})
+    return dataset, filtering
 
 
-def _document_query(session: Session, request: KnowledgeDocumentsPayload, dataset: Dataset):
+def _document_query(
+    session: Session,
+    request: KnowledgeDocumentsPayload,
+    dataset: Dataset,
+    filtering: AgentKnowledgeMetadataFilteringConfig,
+):
     query = select(Document).where(
         Document.tenant_id == request.caller.tenant_id,
         Document.dataset_id == dataset.id,
         Document.enabled.is_(True),
         Document.archived.is_(False),
     )
-    filtering = dataset_metadata_filter(dataset.retrieval_model or {})
-    if filtering["mode"] == "manual":
+    if filtering.mode == "automatic":
+        raise Conflict("自动元数据过滤依赖具体查询，请先使用知识库检索")
+    if filtering.mode == "manual":
+        if filtering.conditions is None:
+            raise Conflict("任务的知识库过滤条件不完整，请重新选择知识库")
         ids, _ = DatasetRetrieval().get_metadata_filter_condition(
             session=session,
             dataset_ids=[dataset.id],
@@ -109,7 +127,7 @@ def _document_query(session: Session, request: KnowledgeDocumentsPayload, datase
             user_id=request.caller.user_id,
             metadata_filtering_mode="manual",
             metadata_model_config=ModelConfig(provider="", name="", mode=LLMMode.CHAT, completion_params={}),
-            metadata_filtering_conditions=MetadataFilteringCondition.model_validate(filtering["conditions"]),
+            metadata_filtering_conditions=MetadataFilteringCondition.model_validate(filtering.conditions.model_dump()),
             inputs={},
         )
         query = query.where(Document.id.in_((ids or {}).get(dataset.id, [])))
@@ -140,9 +158,9 @@ def _segment_cursor(request: KnowledgeDocumentsPayload, segment: DocumentSegment
 
 
 def read_documents(session: Session, request: KnowledgeDocumentsPayload) -> KnowledgeDocumentsResponse:
-    dataset = _authorize(session, request)
+    dataset, filtering = _authorize(session, request)
     cursor = _decode_cursor(request)
-    documents = _document_query(session, request, dataset)
+    documents = _document_query(session, request, dataset, filtering)
     if request.operation == "list":
         total = session.scalar(select(func.count()).select_from(documents.subquery())) or 0
         unavailable = (

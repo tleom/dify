@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Callable
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -9,11 +10,13 @@ from flask import Flask
 from sqlalchemy.orm import Session
 from werkzeug.exceptions import BadRequest, Conflict, Forbidden, NotFound
 
+from core.rbac import RBACPermission, RBACResourceScope
 from models.dataset import Dataset, Document, DocumentSegment
 from models.enums import SegmentStatus
 from models.workbench import WorkbenchChat, WorkbenchRun
 from services.entities.knowledge_documents import KnowledgeDocumentsPayload
 from services.entities.knowledge_retrieval_inner import InnerKnowledgeRetrieveCaller
+from services.workbench import authorization
 from services.workbench import knowledge_documents as service
 
 Context = tuple[Session, KnowledgeDocumentsPayload, WorkbenchChat, WorkbenchRun, Dataset, list[dict[str, str]]]
@@ -21,7 +24,7 @@ Context = tuple[Session, KnowledgeDocumentsPayload, WorkbenchChat, WorkbenchRun,
 
 @pytest.fixture
 def context(sqlite_session: Session, monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., None]) -> Context:
-    config_overrides(WORKBENCH_ENABLED=True)
+    config_overrides(WORKBENCH_ENABLED=True, RBAC_ENABLED=False)
     tenant, account, app, dataset_id = [str(uuid4()) for _ in range(4)]
     chat = WorkbenchChat(
         tenant_id=tenant,
@@ -183,6 +186,48 @@ def test_document_must_belong_to_dataset_and_be_indexed(context: Context) -> Non
         service.read_documents(session, request.model_copy(update={"document_id": pending.id}))
 
 
+@pytest.mark.parametrize("operation", ["list", "read"])
+def test_full_document_permission_is_distinct_from_recall_and_rechecked_on_each_page(
+    context: Context,
+    monkeypatch: pytest.MonkeyPatch,
+    config_overrides: Callable[..., None],
+    operation: str,
+) -> None:
+    session, request, *_ = context
+    docs = [add_document(context, i) for i in range(23)]
+    add_segment(context, docs[0], 1, "正文" * 6500)
+    request = request.model_copy(
+        update={"operation": operation, "document_id": docs[0].id if operation == "read" else None}
+    )
+    config_overrides(RBAC_ENABLED=True)
+    read_allowed = [False]
+    check = MagicMock(
+        side_effect=lambda *_args, scene, **_kwargs: scene == RBACPermission.DATASET_RETRIEVAL_RECALL or read_allowed[0]
+    )
+    monkeypatch.setattr(authorization.RBACResourceService, "get_dataset_maintainer", lambda *_args: "another-account")
+    monkeypatch.setattr(authorization.RBACService.CheckAccess, "check", check)
+    caller = request.caller
+    assert authorization.can_retrieve_dataset(caller.tenant_id, caller.user_id, request.dataset_id)
+    check.reset_mock()
+
+    with pytest.raises(Forbidden, match="内容查看权限"):
+        service.read_documents(session, request)
+    check.assert_called_once_with(
+        caller.tenant_id,
+        caller.user_id,
+        scene=RBACPermission.DATASET_READONLY,
+        resource_type=RBACResourceScope.DATASET,
+        resource_id=request.dataset_id,
+    )
+
+    read_allowed[0] = True
+    first = service.read_documents(session, request)
+    assert first.next_cursor is not None
+    read_allowed[0] = False
+    with pytest.raises(Forbidden, match="内容查看权限"):
+        service.read_documents(session, request.model_copy(update={"cursor": first.next_cursor}))
+
+
 def test_cursor_is_scoped_and_detects_changed_content(context: Context) -> None:
     session, request, *_ = context
     doc = add_document(context)
@@ -202,12 +247,23 @@ def test_cursor_is_scoped_and_detects_changed_content(context: Context) -> None:
         service.read_documents(session, request.model_copy(update={"cursor": page.next_cursor}))
 
 
-def test_saved_metadata_filter_applies_to_list_and_read(context: Context, monkeypatch: pytest.MonkeyPatch) -> None:
-    session, request, _, _, dataset, _ = context
-    dataset.retrieval_model = {
-        "metadata_filtering_conditions": {
+def test_frozen_metadata_filter_applies_after_live_dataset_settings_change(
+    context: Context, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, request, _, run, dataset, _ = context
+    filtering = {
+        "mode": "manual",
+        "conditions": {
             "logical_operator": "and",
             "conditions": [{"name": "category", "comparison_operator": "is", "value": "public"}],
+        },
+    }
+    payload = json.loads(run.payload)
+    payload["effective_soul"]["knowledge"]["sets"][0]["metadata_filtering"] = filtering
+    run.payload = json.dumps(payload)
+    dataset.retrieval_model = {
+        "metadata_filtering_conditions": {
+            "conditions": [{"name": "category", "comparison_operator": "is", "value": "private"}]
         }
     }
     allowed = add_document(context, 1)
@@ -216,11 +272,16 @@ def test_saved_metadata_filter_applies_to_list_and_read(context: Context, monkey
 
     def filter_documents(_self, **kwargs: object) -> tuple[dict[str, list[str]], None]:
         calls.append(kwargs)
-        return {dataset.id: [allowed.id]}, None
+        conditions = kwargs["metadata_filtering_conditions"]
+        assert isinstance(conditions, service.MetadataFilteringCondition)
+        assert conditions.conditions is not None
+        selected = allowed.id if conditions.conditions[0].value == "public" else excluded.id
+        return {dataset.id: [selected]}, None
 
     monkeypatch.setattr(service.DatasetRetrieval, "get_metadata_filter_condition", filter_documents)
     page = service.read_documents(session, request)
     assert [item.id for item in page.documents] == [allowed.id]
+    dataset.retrieval_model = {}
     with pytest.raises(NotFound):
         service.read_documents(session, request.model_copy(update={"operation": "read", "document_id": excluded.id}))
     assert len(calls) == 2
@@ -229,6 +290,36 @@ def test_saved_metadata_filter_applies_to_list_and_read(context: Context, monkey
     assert isinstance(conditions, service.MetadataFilteringCondition)
     assert conditions.conditions is not None
     assert conditions.conditions[0].value == "public"
+
+
+def test_frozen_disabled_filter_does_not_adopt_new_live_conditions(
+    context: Context, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, request, _, _, dataset, _ = context
+    expected = add_document(context)
+    dataset.retrieval_model = {
+        "metadata_filtering_conditions": {
+            "conditions": [{"name": "category", "comparison_operator": "is", "value": "new-filter"}]
+        }
+    }
+    filtering = MagicMock(side_effect=AssertionError("A frozen disabled filter must remain disabled"))
+    monkeypatch.setattr(service.DatasetRetrieval, "get_metadata_filter_condition", filtering)
+    page = service.read_documents(session, request)
+    assert [item.id for item in page.documents] == [expected.id]
+    filtering.assert_not_called()
+
+
+@pytest.mark.parametrize("filtering", [{"mode": "automatic"}, {"mode": "manual"}])
+def test_document_reads_reject_query_dependent_or_incomplete_filter_policy(
+    context: Context, filtering: dict[str, str]
+) -> None:
+    session, request, _, run, _, _ = context
+    add_document(context)
+    payload = json.loads(run.payload)
+    payload["effective_soul"]["knowledge"]["sets"][0]["metadata_filtering"] = filtering
+    run.payload = json.dumps(payload)
+    with pytest.raises(Conflict):
+        service.read_documents(session, request)
 
 
 def test_external_dataset_does_not_claim_full_coverage(context: Context) -> None:
