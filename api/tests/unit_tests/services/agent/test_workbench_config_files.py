@@ -8,12 +8,17 @@ import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
 from extensions.storage.storage_type import StorageType
-from models.agent import Agent, AgentConfigSnapshot, AgentConfigVersionKind, AgentScope, AgentSource
+from models.agent import Agent, AgentConfigSnapshot, AgentScope, AgentSource
 from models.agent_config_entities import AgentConfigFileRefConfig, AgentSoulConfig, AgentSoulModelConfig
 from models.enums import CreatorUserRole
 from models.model import UploadFile
 from models.workbench import WorkbenchChat, WorkbenchRun
-from services.agent_config_service import AgentConfigService, AgentConfigServiceError, ConfigDownloadRequest
+from services.agent_config_service import (
+    AgentConfigService,
+    AgentConfigServiceError,
+    AgentConfigVersionKind,
+    ConfigDownloadRequest,
+)
 from services.workbench.policy import Selection, compile_selection
 from tests.unit_tests.config_override import apply_config_overrides
 

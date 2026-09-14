@@ -5,7 +5,7 @@ from controllers.console.workbench import WorkbenchResumePayload
 
 
 @pytest.mark.parametrize("payload", [{"values": {"task": "other"}}, {"values": {"task": "other"}, "action": None}])
-def test_form_resume_accepts_answers_without_a_separate_action(payload) -> None:
+def test_form_resume_accepts_answers_without_a_separate_action(payload: dict[str, object]) -> None:
     request = WorkbenchResumePayload.model_validate(payload)
     assert request.values == {"task": "other"}
     assert request.action is None
