@@ -40,11 +40,6 @@ from tests.unit_tests.config_override import apply_config_overrides
 
 @pytest.fixture(autouse=True)
 def _no_runtime_agent_skills(monkeypatch: pytest.MonkeyPatch):
-    from services.workbench.mentions import ResourceMentions
-
-    monkeypatch.setattr(
-        "core.app.apps.agent_app.runtime_request_builder.load_run_mentions", lambda *_args: ResourceMentions(),
-    )
     monkeypatch.setattr(
         "core.app.apps.agent_app.runtime_request_builder.load_runtime_agent_skill_configs",
         lambda **_kwargs: [],
@@ -255,6 +250,7 @@ def _ctx(
         invoke_from=InvokeFrom.WEB_APP,
     )
     return AgentAppRuntimeBuildContext(
+        workbench_runtime=SimpleNamespace(resolve_run_requirements=lambda *_args: ([], [])),
         dify_context=dify_context,  # type: ignore[arg-type]
         agent_id="agent-1",
         agent_config_snapshot_id="snap-1",

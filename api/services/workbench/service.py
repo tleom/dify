@@ -39,6 +39,7 @@ class WorkbenchTemplate(TypedDict):
 
 
 EXECUTING_STATUSES = ("queued", "running", "environment_installing", "stopping")
+ACTIVE_STATUSES = (*EXECUTING_STATUSES, "environment_update", "waiting_input")
 
 
 def _chat_has_run(tenant_id, account_id, statuses):
@@ -225,6 +226,7 @@ def read_chat(tenant_id: str, account_id: str, chat_id: str):
             "version": chat.version,
             "is_running": any(run.status in EXECUTING_STATUSES for run in runs),
             "needs_input": any(run.status == "waiting_input" for run in runs),
+            "has_active_run": any(run.status in ACTIVE_STATUSES for run in runs),
             "template_snapshot_id": revision.template_snapshot_id or chat.base_snapshot_id,
             "selection": json.loads(revision.selection),
             "runs": annotate(runs, with_feedback(session, runs, [run_dto(run) for run in runs])),
@@ -285,13 +287,15 @@ def list_chats(tenant_id, account_id):
                 "pinned": c.pinned,
                 "is_running": is_running,
                 "needs_input": needs_input,
+                "has_active_run": has_active_run,
                 "file_directory": chat_directory(session, c),
             }
-            for c, is_running, needs_input in session.execute(
+            for c, is_running, needs_input, has_active_run in session.execute(
                 select(
                     WorkbenchChat,
                     _chat_has_run(tenant_id, account_id, EXECUTING_STATUSES),
                     _chat_has_run(tenant_id, account_id, ("waiting_input",)),
+                    _chat_has_run(tenant_id, account_id, ACTIVE_STATUSES),
                 )
                 .where(
                     WorkbenchChat.tenant_id == tenant_id,
@@ -331,6 +335,9 @@ def update_chat(tenant_id, account_id, chat_id, *, title=None, pinned=None):
             ),
             "needs_input": session.scalar(
                 select(_chat_has_run(tenant_id, account_id, ("waiting_input",))).where(WorkbenchChat.id == chat.id)
+            ),
+            "has_active_run": session.scalar(
+                select(_chat_has_run(tenant_id, account_id, ACTIVE_STATUSES)).where(WorkbenchChat.id == chat.id)
             ),
         }
 

@@ -3,7 +3,7 @@
 import sqlalchemy as sa
 from alembic import op
 
-from models.types import StringUUID
+from models.types import LongText, StringUUID
 
 revision = "wb20260914events"
 down_revision = "wb20260914merge"
@@ -18,7 +18,7 @@ def upgrade() -> None:
         sa.Column("run_id", StringUUID(), nullable=False),
         sa.Column("sequence", sa.BigInteger(), nullable=False),
         sa.Column("event_key", sa.String(128), nullable=False),
-        sa.Column("payload", sa.Text(), nullable=False),
+        sa.Column("payload", LongText(), nullable=False),
         sa.Column("created_at", sa.DateTime(), server_default=sa.func.current_timestamp(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), server_default=sa.func.current_timestamp(), nullable=False),
         sa.PrimaryKeyConstraint("id"),

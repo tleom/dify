@@ -4,7 +4,7 @@ from sqlalchemy import BigInteger, Boolean, Index, Integer, String, Text, Unique
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base, DefaultFieldsMixin
-from .types import StringUUID
+from .types import LongText, StringUUID
 
 
 class WorkbenchChat(DefaultFieldsMixin, Base):
@@ -64,4 +64,4 @@ class WorkbenchRunEvent(DefaultFieldsMixin, Base):
     run_id: Mapped[str] = mapped_column(StringUUID)
     sequence: Mapped[int] = mapped_column(BigInteger)
     event_key: Mapped[str] = mapped_column(String(128))
-    payload: Mapped[str] = mapped_column(Text)
+    payload: Mapped[str] = mapped_column(LongText)

@@ -40,7 +40,7 @@ from typing import Any, Literal, Protocol, cast, runtime_checkable
 import httpx
 from graphon.model_runtime.entities.llm_entities import LLMUsage
 from pydantic import JsonValue, TypeAdapter
-from pydantic_ai import capture_run_messages
+from pydantic_ai import RunContext, capture_run_messages
 from pydantic_ai.exceptions import ModelHTTPError, UsageLimitExceeded
 from pydantic_ai.messages import AgentStreamEvent, PartDeltaEvent, PartStartEvent, TextPart, TextPartDelta
 from pydantic_ai.output import OutputSpec
@@ -377,7 +377,7 @@ class AgentRunRunner:
                     else None
                 )
 
-                async def handle_events(_ctx: object, events: AsyncIterable[AgentStreamEvent]) -> None:
+                async def handle_events(_ctx: RunContext[Any], events: AsyncIterable[AgentStreamEvent]) -> None:
                     published_events = coalesce_agent_stream_events(
                         events,
                         enabled=self.stream_text_delta_coalescing_enabled,
@@ -395,7 +395,7 @@ class AgentRunRunner:
                         if text_delta is not None and mentions_layer is not None and mentions_layer.missing_groups:
                             continue
                         if activity is not None:
-                            await activity.observe(event, run_step=getattr(_ctx, "run_step", 0), text_delta=text_delta)
+                            await activity.observe(event, run_step=_ctx.run_step, text_delta=text_delta)
                         _ = await emit_pydantic_ai_event(
                             self.sink,
                             run_id=self.run_id,

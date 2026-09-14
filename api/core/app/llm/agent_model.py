@@ -12,6 +12,7 @@ from core.entities.provider_configuration import _model_type_db_literals
 from core.entities.provider_entities import CustomModelConfiguration, CustomProviderConfiguration
 from core.helper import encrypter
 from core.helper.credential_utils import runtime_check_credential_policy_compliance
+from core.helper.credential_visibility import apply_credential_visibility_filter
 from core.model_manager import ModelInstance
 from core.provider_manager import ProviderManager
 from graphon.model_runtime.entities.model_entities import ModelType
@@ -19,7 +20,6 @@ from models.account import Account
 from models.credential_permission import CredentialType
 from models.enums import PermissionEnum
 from models.provider import ProviderCredential, ProviderModelCredential, ProviderType
-from services.credential_permission_service import CredentialPermissionService
 
 
 def resolve_referenced_agent_model(
@@ -101,7 +101,7 @@ def _resolve_credentials(configuration, tenant_id, user_id, model, reference) ->
                     or_(ProviderCredential.visibility == PermissionEnum.ALL_TEAM, ProviderCredential.user_id.is_(None))
                 )
             else:
-                statement = CredentialPermissionService.apply_visibility_filter(
+                statement = apply_credential_visibility_filter(
                     statement,
                     model_id_column=ProviderCredential.id,
                     model_user_id_column=ProviderCredential.user_id,

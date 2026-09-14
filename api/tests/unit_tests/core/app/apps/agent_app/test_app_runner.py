@@ -66,6 +66,7 @@ from core.app.entities.queue_entities import (
     QueueAgentThoughtEvent,
     QueueLLMChunkEvent,
     QueueMessageEndEvent,
+    QueueWorkbenchActivityEvent,
 )
 from core.workflow.nodes.agent_v2.ask_human_resume import AskHumanResumeOutcome
 from core.workflow.nodes.agent_v2.dify_tools_builder import WorkflowAgentToolLayers
@@ -739,7 +740,8 @@ def _saved_user_query(qm: _FakeQueueManager) -> str:
     return content
 
 
-def test_context_status_reaches_injected_workbench_runtime() -> None:
+@pytest.mark.parametrize("journal", [False, True])
+def test_context_status_reaches_injected_workbench_runtime(journal: bool) -> None:
     class ContextClient(FakeAgentBackendRunClient):
         @override
         def stream_events(
@@ -759,6 +761,8 @@ def test_context_status_reaches_injected_workbench_runtime() -> None:
     workbench.conversation_owner.return_value = None
     workbench.execution_run_id.return_value = None
     workbench.continuation.return_value = None
+    context_item = {"event": "workbench_context", "used_tokens": 500, "window_tokens": 1000}
+    workbench.record_context_status.return_value = context_item if journal else None
     runner = _runner(ContextClient(), _FakeSessionStore())
     runner._workbench = workbench
     queue = _FakeQueueManager()
@@ -769,6 +773,11 @@ def test_context_status_reaches_injected_workbench_runtime() -> None:
     tenant_id, conversation_id, account_id, event = workbench.record_context_status.call_args.args
     assert (tenant_id, conversation_id, account_id) == ("tenant-1", "conv-1", "user-1")
     assert event.data.used_tokens == 500
+    published_context = [item for item in queue.events if isinstance(item, QueueWorkbenchActivityEvent)]
+    assert len(published_context) == int(journal)
+    if journal:
+        assert published_context[0].stream_event == "workbench_context"
+        assert published_context[0].data == context_item
     assert _message_end(queue) is not None
 
 

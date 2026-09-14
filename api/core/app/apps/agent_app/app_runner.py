@@ -855,6 +855,7 @@ class AgentAppRunner:
             )
         return self._request_builder.build(
             AgentAppRuntimeBuildContext(
+                workbench_runtime=self._workbench,
                 workbench_activity_protocol=(
                     self._workbench.activity_protocol(dify_context.tenant_id, conversation_id, dify_context.user_id)
                     if self._workbench is not None

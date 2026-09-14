@@ -148,9 +148,13 @@ def test_history_executing_state(history, status):
     listed = WorkbenchChatSummaryResponse.model_validate(service.list_chats(tenant, account)[0])
     assert listed.is_running is expected
     assert listed.needs_input is (status == "waiting_input")
+    expected_active = expected or status in {"environment_update", "waiting_input"}
+    assert listed.has_active_run is expected_active
     assert service.read_chat(tenant, account, chat_id)["is_running"] is expected
     assert service.read_chat(tenant, account, chat_id)["needs_input"] is (status == "waiting_input")
+    assert service.read_chat(tenant, account, chat_id)["has_active_run"] is expected_active
     assert service.update_chat(tenant, account, chat_id, pinned=True)["is_running"] is expected
+    assert service.update_chat(tenant, account, chat_id, pinned=True)["has_active_run"] is expected_active
 
 
 def test_history_executing_state_ignores_foreign_run_owners(history):
@@ -172,6 +176,7 @@ def test_history_executing_state_ignores_foreign_run_owners(history):
     assert service.list_chats(tenant, account)[0]["is_running"] is False
     assert service.read_chat(tenant, account, chat_id)["is_running"] is False
     assert service.list_chats(tenant, account)[0]["needs_input"] is False
+    assert service.list_chats(tenant, account)[0]["has_active_run"] is False
 
 
 def test_favorites_keep_their_chronological_position_and_activity_time(

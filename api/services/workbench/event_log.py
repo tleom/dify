@@ -133,6 +133,20 @@ def _history(session, run_id):
     ]
 
 
+def read_state(tenant_id, account_id, run_id):
+    """Authorize stream/control requests without loading the event transcript."""
+    with session_factory.create_session() as session:
+        run = session.scalar(owned_statement(tenant_id, account_id, run_id))
+        if run is None:
+            raise NotFound()
+        return {
+            "status": run.status,
+            "error": run.error,
+            "task_id": run.task_id,
+            "activity_protocol": 1 if uses_journal(run) else 0,
+        }
+
+
 def read_page(tenant_id, account_id, run_id, *, after=0, limit=100):
     """Recheck the full owner chain on every read without materializing the whole transcript."""
     with session_factory.create_session() as session:

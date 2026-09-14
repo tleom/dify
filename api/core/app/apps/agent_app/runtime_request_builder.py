@@ -59,9 +59,9 @@ from graphon.model_runtime.entities.message_entities import ImagePromptMessageCo
 from models.agent_config_entities import AgentSoulConfig, AgentSoulToolsConfig
 from models.provider_ids import ModelProviderID
 from services.agent.prompt_mentions import expand_prompt_mentions
-from services.workbench.mentions import load_run_mentions, required_tool_groups
 
 from .errors import AgentSessionSnapshotIncompatibleError
+from .workbench_runtime import AgentAppWorkbenchRuntime
 
 
 class AgentAppRuntimeRequestBuildError(ValueError):
@@ -94,6 +94,7 @@ class AgentAppRuntimeBuildContext:
     deferred_tool_results: DeferredToolResultsPayload | None = None
     workbench_run_id: str | None = None
     workbench_activity_protocol: int = 0
+    workbench_runtime: AgentAppWorkbenchRuntime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,10 +158,15 @@ class AgentAppRuntimeRequestBuilder:
         config_layer_config.reset_materialized_assets = bool(workbench_run_id)
         mention_groups = []
         if workbench_run_id:
-            mentions = load_run_mentions(workbench_run_id, context.dify_context.tenant_id, context.dify_context.user_id)
-            mention_groups = required_tool_groups(agent_soul.model_dump(mode="json"), mentions, tool_layers)
+            if context.workbench_runtime is None:
+                raise AgentAppRuntimeRequestBuildError(
+                    "workbench_runtime_missing", "Workbench runtime is required to resolve this turn's resources."
+                )
+            mentioned_skills, mention_groups = context.workbench_runtime.resolve_run_requirements(
+                workbench_run_id, context.dify_context.tenant_id, context.dify_context.user_id, agent_soul, tool_layers
+            )
             config_layer_config.mentioned_skill_names = list(dict.fromkeys([
-                *config_layer_config.mentioned_skill_names, *mentions.skills,
+                *config_layer_config.mentioned_skill_names, *mentioned_skills,
             ]))
         append_runtime_warnings(metadata, config_warnings)
         soul_prompt_resolver = build_config_aware_soul_mention_resolver(

@@ -1,11 +1,11 @@
 from collections.abc import Sequence
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import InstrumentedAttribute, Session
 
+from core.helper.credential_visibility import apply_credential_visibility_filter
 from models.account import Account
 from models.credential_permission import CredentialPermission
-from models.enums import PermissionEnum
 
 
 class CredentialPermissionService:
@@ -46,25 +46,11 @@ class CredentialPermissionService:
         - Legacy rows with NULL user_id are treated as all_team_members
         - No admin bypass: personal credentials are private regardless of role
         """
-        # Subquery: credential_ids where user has partial-member permission
-        partial_subquery = (
-            select(CredentialPermission.credential_id)
-            .where(
-                CredentialPermission.credential_type == credential_type,
-                CredentialPermission.account_id == user.id,
-            )
-            .correlate_except(CredentialPermission)
-        )
-
-        return query.where(
-            or_(
-                # all_team is always visible
-                model_visibility_column == PermissionEnum.ALL_TEAM,
-                # legacy rows with NULL user_id treated as all_team
-                model_user_id_column.is_(None),
-                # only_me: creator sees their own
-                (model_user_id_column == user.id),
-                # partial_members: user is in the permission table
-                model_id_column.in_(partial_subquery),
-            )
+        return apply_credential_visibility_filter(
+            query,
+            model_id_column=model_id_column,
+            model_user_id_column=model_user_id_column,
+            model_visibility_column=model_visibility_column,
+            credential_type=credential_type,
+            user=user,
         )

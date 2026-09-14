@@ -52,6 +52,13 @@ def resolve_run_config(run_id, tenant_id, account_id):
     return resolve(run_id, tenant_id, account_id)
 
 
+def resolve_run_requirements(run_id, tenant_id, account_id, soul, tool_layers):
+    from services.workbench.mentions import load_run_mentions, required_tool_groups
+
+    mentions = load_run_mentions(run_id, tenant_id, account_id)
+    return mentions.skills, required_tool_groups(soul.model_dump(mode="json"), mentions, tool_layers)
+
+
 def resolve_run_generation(run_id, tenant_id, account_id):
     from services.workbench.service import resolve_run_generation as resolve
 

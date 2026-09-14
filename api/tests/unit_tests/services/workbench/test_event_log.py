@@ -1,7 +1,7 @@
 """SQLite exercises persisted event order/ownership, with Redis failure isolated at the wake-up boundary."""
 
 import json
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -97,6 +97,35 @@ def test_every_page_rechecks_full_ownership(journal, boundary):
                     1 if boundary == "deleted" else str(uuid4()))
     with pytest.raises(NotFound):
         event_log.read_page(tenant, account, run_id)
+    with pytest.raises(NotFound):
+        event_log.read_state(tenant, account, run_id)
+
+
+def test_events_endpoint_reconnects_without_materializing_the_full_journal(journal, monkeypatch):
+    from flask import Flask
+
+    from controllers.console import workbench
+
+    factory, tenant, account, run_id, _ = journal
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        for index in range(3):
+            event_log.append_locked(session, run, {"event": "agent_message", "answer": f"{index}:" + "x" * 100_000})
+        run.status = "completed"
+
+    def unexpected_history(*_args, **_kwargs):
+        raise AssertionError("SSE must read only pages after the requested cursor")
+
+    monkeypatch.setattr(workbench.WorkbenchResource, "owner", lambda _self: (tenant, account))
+    monkeypatch.setattr(workbench, "owned_run", unexpected_history)
+    monkeypatch.setattr(event_log, "history_events", unexpected_history)
+    with Flask(__name__).test_request_context(headers={"Last-Event-ID": "2-0"}):
+        response = workbench.Events().get(UUID(run_id))
+        text = "".join(response.response)
+    assert "id: 3-0\n" in text
+    assert "id: 1-0\n" not in text
+    assert "id: 2-0\n" not in text
+    assert '"status": "completed"' in text
 
 
 def test_terminal_stream_drains_all_pages_and_ignores_old_attempt_end(journal):

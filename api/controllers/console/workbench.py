@@ -25,7 +25,7 @@ from models.model import AppMode
 from models.workbench import WorkbenchRun
 from services.app_task_service import AppTaskService
 from services.workbench import scheduler, service
-from services.workbench.event_log import owned_statement, stream_events
+from services.workbench.event_log import owned_statement, read_state, stream_events
 from services.workbench.mentions import ResourceMentions
 from services.workbench.policy import Selection
 
@@ -203,6 +203,10 @@ class WorkbenchChatSummaryResponse(ResponseModel):
         default=None, description="Whether this conversation has a queued or executing run; excludes waiting for input"
     )
     needs_input: bool | None = Field(default=None, description="Whether this conversation is waiting for user input")
+    has_active_run: bool | None = Field(
+        default=None,
+        description="Whether run status still needs refreshing, including environment updates and input waits",
+    )
 
 
 class WorkbenchChatSummaryEnvelopeResponse(ResponseModel):
@@ -595,7 +599,7 @@ class Stop(WorkbenchResource):
     )
     def post(self, run_id):
         tenant_id, account_id = self.owner()
-        dto, task_id = owned_run(tenant_id, account_id, str(run_id))
+        task_id = read_state(tenant_id, account_id, str(run_id))["task_id"]
         redis_client.setex(scheduler.PREFIX + "stop:" + str(run_id), 86400, "1")
         with session_factory.get_session_maker().begin() as session:
             run = session.get(WorkbenchRun, str(run_id))
@@ -617,7 +621,7 @@ class Events(WorkbenchResource):
     @console_ns.response(200, "Resumable server-sent events; Last-Event-ID overrides cursor")
     def get(self, run_id):
         owner = self.owner()
-        dto, _ = owned_run(*owner, str(run_id))
+        state = read_state(*owner, str(run_id))
         query = WorkbenchEventsQuery.model_validate(
             {"cursor": request.headers.get("Last-Event-ID") or request.args.get("cursor") or "0-0"}
         )
@@ -625,7 +629,7 @@ class Events(WorkbenchResource):
 
         def generate() -> Iterator[str]:
             nonlocal cursor
-            if dto.get("activity_protocol") == 1:
+            if state["activity_protocol"] == 1:
                 for item in stream_events(*owner, str(run_id), after=int(cursor.split("-")[0])):
                     if item is None:
                         yield ": keepalive\n\n"
@@ -640,8 +644,8 @@ class Events(WorkbenchResource):
                     data = fields.get(b"data", fields.get("data"))
                     text = data.decode() if isinstance(data, bytes) else data
                     if json.loads(text).get("event") == "workbench_end":
-                        state, _ = owned_run(*owner, str(run_id))
-                        if state["status"] == "stopping":
+                        terminal_state = read_state(*owner, str(run_id))
+                        if terminal_state["status"] == "stopping":
                             yield (
                                 f"id: {cursor}\ndata: "
                                 + json.dumps({"event": "workbench_status", "status": "stopping"})
@@ -651,8 +655,8 @@ class Events(WorkbenchResource):
                     yield f"id: {cursor}\ndata: {text}\n\n"
                     if json.loads(text).get("event") == "workbench_end":
                         return
-                state, _ = owned_run(*owner, str(run_id))
-                if state["status"] not in (
+                terminal_state = read_state(*owner, str(run_id))
+                if terminal_state["status"] not in (
                     "queued",
                     "running",
                     "environment_update",
@@ -660,11 +664,16 @@ class Events(WorkbenchResource):
                     "stopping",
                 ):
                     if cursor == "0-0":
-                        for event in state["events"]:
+                        legacy_dto, _ = owned_run(*owner, str(run_id))
+                        for event in legacy_dto["events"]:
                             yield "data: " + json.dumps(event) + "\n\n"
                     yield (
                         "data: "
-                        + json.dumps({"event": "workbench_end", "status": state["status"], "error": state["error"]})
+                        + json.dumps({
+                            "event": "workbench_end",
+                            "status": terminal_state["status"],
+                            "error": terminal_state["error"],
+                        })
                         + "\n\n"
                     )
                     return

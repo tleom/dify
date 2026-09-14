@@ -291,7 +291,15 @@ def test_background_output_does_not_allow_premature_close(monkeypatch):
 
 
 def test_compacted_environment_resume_preserves_activity_and_call_identity(monkeypatch):
-    from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest, ModelResponse, TextPart, UserPromptPart
+    from pydantic_ai.messages import (
+        ModelMessagesTypeAdapter,
+        ModelRequest,
+        ModelResponse,
+        TextPart,
+        ToolCallPart,
+        ToolReturnPart,
+        UserPromptPart,
+    )
 
     requests = 0
     summaries = 0
@@ -369,7 +377,7 @@ def test_compacted_environment_resume_preserves_activity_and_call_identity(monke
     from .test_runner import _history_messages_from_snapshot
 
     assert not any(
-        getattr(part, "tool_call_id", None) == "begin"
+        isinstance(part, ToolCallPart | ToolReturnPart) and part.tool_call_id == "begin"
         for message in _history_messages_from_snapshot(second[-1].data.session_snapshot)
         for part in message.parts
     )

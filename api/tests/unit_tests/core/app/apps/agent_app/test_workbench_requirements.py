@@ -4,8 +4,12 @@ from dataclasses import replace
 
 import pytest
 
-from core.app.apps.agent_app.runtime_request_builder import AgentAppRuntimeRequestBuilder
+from core.app.apps.agent_app.runtime_request_builder import (
+    AgentAppRuntimeRequestBuilder,
+    AgentAppRuntimeRequestBuildError,
+)
 from models.agent_config_entities import AgentSoulConfig
+from services.workbench import runtime
 from services.workbench.mentions import ResourceMentions
 from services.workbench.policy import resource_key
 from tests.unit_tests.core.app.apps.agent_app.test_runtime_request_builder import (
@@ -33,20 +37,28 @@ def test_user_only_skill_and_plugin_mentions_are_required_only_for_this_turn(mon
     monkeypatch.setattr(
         "core.app.apps.agent_app.runtime_request_builder.resolve_model_context_window", lambda **_kwargs: 8192
     )
-    monkeypatch.setattr("core.app.apps.agent_app.runtime_request_builder.load_run_mentions", lambda *_args: mentions)
+    monkeypatch.setattr("services.workbench.mentions.load_run_mentions", lambda *_args: mentions)
     builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_PluginLayerBuilder())
-    first = builder.build(replace(_ctx(soul), workbench_run_id="first-run")).request
+    context = replace(_ctx(soul), workbench_runtime=runtime)
+    first = builder.build(replace(context, workbench_run_id="first-run")).request
     config = next(layer.config for layer in first.composition.layers if layer.name == "config")
     assert config.mentioned_skill_names == ["tender-analyzer"]
     required = next(layer.config for layer in first.composition.layers if layer.name == "workbench_mentions")
     assert required.workbench_run_id == "first-run"
     assert required.tool_groups[0].tool_names == ["current_time"]
     mentions = ResourceMentions()
-    second = builder.build(replace(_ctx(soul), workbench_run_id="second-run")).request
+    second = builder.build(replace(context, workbench_run_id="second-run")).request
     config = next(layer.config for layer in second.composition.layers if layer.name == "config")
     assert config.mentioned_skill_names == []
     assert all(layer.name != "workbench_mentions" for layer in second.composition.layers)
     assert soul.prompt.system_prompt == "Answer the request."
+
+
+def test_workbench_requires_the_injected_runtime_to_enforce_turn_resources():
+    builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_PluginLayerBuilder())
+    context = replace(_ctx(_soul_with_model_and_skill()), workbench_run_id="run", workbench_runtime=None)
+    with pytest.raises(AgentAppRuntimeRequestBuildError, match="Workbench runtime is required"):
+        builder.build(context)
 
 
 @pytest.mark.parametrize("kind", ["provider", "model"])
