@@ -23,3 +23,4 @@ def test_environment_instructions_are_accepted_by_pydantic_ai_prompt_registratio
     assert any(
         "update_shared_environment" in prompt and "current conversation directory" in prompt for prompt in prompts
     )
+    assert all("/opt/office/" not in prompt and "preinstalled" not in prompt for prompt in prompts)

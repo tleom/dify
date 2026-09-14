@@ -14,6 +14,7 @@ timeouts, and authorization for the human request.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, ClassVar, cast
 
@@ -83,6 +84,51 @@ class DifyAskHumanLayer(PydanticAILayer[NoLayerDeps, object, DifyAskHumanLayerCo
             field_count_hint = "Do not add any fields."
         else:
             field_count_hint = f"Use at most {self.config.max_fields} field(s)."
+        supports_other = (
+            self.config.max_fields >= 2
+            and "select" in self.config.allowed_field_types
+            and "paragraph" in self.config.allowed_field_types
+        )
+        example: dict[str, JsonValue] = {"question": "Please clarify."[: self.config.max_question_chars]}
+        if self.config.max_fields > 0:
+            if "select" in self.config.allowed_field_types:
+                example["fields"] = [
+                    {
+                        "type": "select",
+                        "name": "choice",
+                        "label": "Choice"[: self.config.max_field_label_chars],
+                        "options": [{"value": "yes", "label": "Yes"}, {"value": "no", "label": "No"}],
+                    }
+                ]
+                if supports_other:
+                    example["fields"] = [
+                        {
+                            "type": "select",
+                            "name": "choice",
+                            "label": "Choice"[: self.config.max_field_label_chars],
+                            "required": True,
+                            "options": [
+                                {"value": "revise", "label": "Polish wording"},
+                                {"value": "review", "label": "Review reasoning"},
+                                {"value": "verify", "label": "Verify references"},
+                                {"value": "other", "label": "Other"},
+                            ],
+                        },
+                        {
+                            "type": "paragraph",
+                            "name": "choice_other",
+                            "label": "Your request"[: self.config.max_field_label_chars],
+                            "required": False,
+                        },
+                    ]
+            elif "paragraph" in self.config.allowed_field_types:
+                example["fields"] = [
+                    {
+                        "type": "paragraph",
+                        "name": "answer",
+                        "label": "Answer"[: self.config.max_field_label_chars],
+                    }
+                ]
         return (
             f"You may call the external tool '{self.config.tool_name}' only when human input is required to continue. "
             "Do not ask a human for information that can be inferred from the conversation, current context, or other tools.\n\n"
@@ -95,8 +141,27 @@ class DifyAskHumanLayer(PydanticAILayer[NoLayerDeps, object, DifyAskHumanLayerCo
             f"- Keep 'markdown' under {self.config.max_markdown_chars} characters.\n"
             f"- Keep each field label under {self.config.max_field_label_chars} characters.\n"
             f"- Keep each action label under {self.config.max_action_label_chars} characters.\n"
+            "- Always include the required non-empty 'question'.\n"
+            "- Each field requires 'type', 'name' and 'label'. Field names and action IDs are ASCII identifiers; "
+            "put human-readable text in 'label'.\n"
+            "- Each select option is an object with 'value' and 'label'.\n"
+            "- Present each choice once, in select options or in actions for a question without fields. "
+            "Keep the question concise and put option-specific details in option labels. "
+            "Do not repeat choices in 'question', 'markdown', or a separate actions list.\n"
+            "- For questions with selectable choices, omit 'markdown' and put essential context in 'question'. "
+            "For free-text questions, use 'markdown' only for necessary background.\n"
+            + (
+                "- For a decision, offer up to three concise, distinct select options and a final option with "
+                "value 'other', labeled Other in the user's language. Add an optional paragraph named "
+                "'<select_field_name>_other' for the custom answer. Use that paragraph only when Other is selected. "
+                "Do not also add a general optional comments field.\n"
+                if supports_other
+                else ""
+            )
+            + "- Use only the properties declared in the tool schema.\n"
             "- If you omit actions, the system will add one primary action: Submit.\n"
-            "Prefer concise, structured requests that stay comfortably within these limits."
+            "Prefer concise, structured requests that stay comfortably within these limits.\n"
+            f"Example arguments: {json.dumps(example, ensure_ascii=False)}"
         )
 
     def build_deferred_tool_call_payload(self, requests: DeferredToolRequests) -> DeferredToolCallPayload:

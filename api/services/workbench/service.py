@@ -569,11 +569,19 @@ def resume(tenant_id, account_id, run_id, values, action):
                 raise ValueError(f"请填写 {field.label}")
             if field.type == "select" and value is not None and value not in {option.value for option in field.options}:
                 raise ValueError(f"{field.label} 选项无效")
-        selected = next((item for item in args.actions if item.id == action), None)
-        if selected is None:
-            raise ValueError("操作选项无效")
+        selected = None
+        if action is not None:
+            selected = next((item for item in args.actions if item.id == action), None)
+            if selected is None:
+                raise ValueError("操作选项无效")
+        elif not args.fields and args.actions:
+            raise ValueError("请选择操作")
+        # Form answers stand on their own. Do not fabricate a separate action
+        # that could contradict the user's selected field values.
         result = AskHumanToolResult(
-            status="submitted", values=values, action=AskHumanSelectedAction(id=selected.id, label=selected.label)
+            status="submitted",
+            values=values,
+            action=AskHumanSelectedAction(id=selected.id, label=selected.label) if selected else None,
         )
         payload["continuation"] = {"calls": {pending["tool_call_id"]: result.model_dump(mode="json")}}
         payload["submitted_input"] = {"values": values, "action": action}

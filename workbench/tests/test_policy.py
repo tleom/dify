@@ -9,7 +9,8 @@ def template():
         'enabled':True,'runtime_parameters':{'secret':'private-value','limit':3}}], 'cli_tools':[{'command':'private'}]},
         'config_skills':[{'name':'alpha','file_id':'skill-1'},{'name':'beta','file_id':'skill-2'}],
         'knowledge':{'sets':[{'id':'kb-1','name':'Knowledge 1'}]},
-        'env':{'variables':[{'name':'SECRET','value':'private-value'}]},'config_files':[{'name':'secret.txt'}]}
+        'env':{'variables':[{'name':'SECRET','value':'private-value'}]},
+        'config_files':[{'name':'guide.md','file_kind':'upload_file','file_id':'published-file'}]}
 
 
 def test_selection_is_frozen_and_only_exposes_selected_resources(template):
@@ -20,14 +21,18 @@ def test_selection_is_frozen_and_only_exposes_selected_resources(template):
     assert template==original
     assert [skill['name'] for skill in result['config_skills']]==['beta']
     assert result['tools']['dify_tools'][0]['runtime_parameters']['limit']==4
-    assert result['tools']['cli_tools']==[] and result['config_files']==[] and result['env']=={'variables':[],'secret_refs':[]}
+    assert result['tools']['cli_tools']==[] and result['env']=={'variables':[],'secret_refs':[]}
+    assert result['config_files']==original['config_files']
     template['tools']['dify_tools'][0]['tool_name']='changed'
+    template['config_files'][0]['file_id']='replacement-file'
     assert result['tools']['dify_tools'][0]['tool_name']=='read'
+    assert result['config_files'][0]['file_id']=='published-file'
 
 
 @pytest.mark.parametrize('changes',[
     {'model':'forged'}, {'skills':['forged']}, {'knowledge':['forged']}, {'tools':['forged']},
     {'skills':['alpha','alpha']}, {'model_parameters':{'api_key':'forged'}},
+    {'config_files':[{'name':'forged.md','file_kind':'upload_file','file_id':'forged'}]},
 ])
 def test_forged_selection_rejected(template,changes):
     with pytest.raises(ValueError):
