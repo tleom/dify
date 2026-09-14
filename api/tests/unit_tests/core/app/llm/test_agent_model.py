@@ -15,7 +15,6 @@ from core.entities.provider_configuration import ProviderConfiguration, Provider
 from core.entities.provider_entities import CustomConfiguration, ModelSettings
 from graphon.model_runtime.entities.model_entities import ModelType
 from models.account import Account
-from models.credential_permission import CredentialPermission, CredentialType
 from models.enums import PermissionEnum
 from models.provider import ProviderCredential, ProviderModelCredential, ProviderType
 
@@ -73,7 +72,7 @@ def add_credential(
 def test_reference_uses_scoped_saved_credential(context: CredentialContext, kind: Literal["provider", "model"]) -> None:
     _, configuration, tenant, user, decrypt = context
     reference = add_credential(context, kind)
-    values = agent_model._resolve_credentials(configuration, tenant, user, "test-model", reference)
+    values = agent_model._resolve_credentials(configuration, tenant, "test-model", reference)
     assert values == {"api_key": "decrypted-test-secret", "endpoint": "test"}
     decrypt.assert_called_once_with(tenant_id=tenant, token="encrypted-test-value")
 
@@ -83,37 +82,55 @@ def test_reference_uses_scoped_saved_credential(context: CredentialContext, kind
     [
         ("provider", {"tenant_id": str(uuid4())}),
         ("provider", {"provider_name": "other-provider"}),
-        ("provider", {"user_id": str(uuid4()), "visibility": PermissionEnum.ONLY_ME}),
         ("model", {"model_name": "different-model"}),
         ("model", {"model_type": ModelType.TEXT_EMBEDDING}),
         ("model", {"tenant_id": str(uuid4())}),
     ],
 )
-def test_reference_rejects_wrong_owner_provider_model_or_visibility(
+def test_reference_rejects_wrong_tenant_provider_or_model(
     context: CredentialContext, kind: Literal["provider", "model"], changes: dict[str, object]
 ) -> None:
     _, configuration, tenant, user, decrypt = context
     reference = add_credential(context, kind, **changes)
     with pytest.raises(ValueError, match="unavailable or not authorized"):
-        agent_model._resolve_credentials(configuration, tenant, user, "test-model", reference)
+        agent_model._resolve_credentials(configuration, tenant, "test-model", reference)
     decrypt.assert_not_called()
 
 
-def test_partial_credential_visibility_uses_shared_permission_owner(context: CredentialContext) -> None:
-    session, configuration, tenant, user, _ = context
-    reference = add_credential(context, user_id=str(uuid4()), visibility=PermissionEnum.PARTIAL_TEAM)
-    with pytest.raises(ValueError, match="unavailable or not authorized"):
-        agent_model._resolve_credentials(configuration, tenant, user, "test-model", reference)
-    session.add(
-        CredentialPermission(
-            tenant_id=tenant,
-            credential_id=reference.id,
-            credential_type=CredentialType.PROVIDER_CREDENTIAL,
-            account_id=user,
-        )
+@pytest.mark.parametrize("visibility", [PermissionEnum.ONLY_ME, PermissionEnum.PARTIAL_TEAM])
+@pytest.mark.parametrize("caller_kind", ["end-user", "other-account"])
+def test_saved_reference_remains_executable_for_published_callers(
+    context: CredentialContext, monkeypatch: pytest.MonkeyPatch, visibility: PermissionEnum, caller_kind: str
+) -> None:
+    _, configuration, tenant, user, _ = context
+    reference = add_credential(context, user_id=str(uuid4()), visibility=visibility)
+    monkeypatch.setattr(ProviderConfiguration, "get_provider_model", lambda _self, **_kwargs: MagicMock())
+    bundle = ProviderModelBundle.model_construct(
+        configuration=configuration, model_type_instance=MagicMock(model_type=ModelType.LLM)
     )
-    session.commit()
-    assert agent_model._resolve_credentials(configuration, tenant, user, "test-model", reference)["endpoint"] == "test"
+    manager = MagicMock()
+    manager.get_provider_model_bundle.return_value = bundle
+    instance = agent_model.resolve_referenced_agent_model(
+        provider_manager=manager,
+        tenant_id=tenant,
+        user_id=str(uuid4()) if caller_kind == "end-user" else user,
+        provider="langgenius/demo/demo",
+        model="test-model",
+        credential_ref=reference,
+    )
+    assert instance.credentials["endpoint"] == "test"
+
+
+def test_saved_private_reference_still_enforces_credential_policy(
+    context: CredentialContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, configuration, tenant, _, decrypt = context
+    reference = add_credential(context, user_id=str(uuid4()), visibility=PermissionEnum.ONLY_ME)
+    policy = MagicMock(side_effect=ValueError("credential policy denied"))
+    monkeypatch.setattr(agent_model, "runtime_check_credential_policy_compliance", policy)
+    with pytest.raises(ValueError, match="credential policy denied"):
+        agent_model._resolve_credentials(configuration, tenant, "test-model", reference)
+    decrypt.assert_not_called()
 
 
 def test_deleted_or_undecodable_reference_never_falls_back(context: CredentialContext) -> None:
@@ -121,13 +138,13 @@ def test_deleted_or_undecodable_reference_never_falls_back(context: CredentialCo
     reference = add_credential(context)
     decrypt.side_effect = ValueError("invalid encrypted token")
     with pytest.raises(ValueError, match="could not be decoded"):
-        agent_model._resolve_credentials(configuration, tenant, user, "test-model", reference)
+        agent_model._resolve_credentials(configuration, tenant, "test-model", reference)
     record = session.get(ProviderCredential, reference.id)
     assert record is not None
     session.delete(record)
     session.commit()
     with pytest.raises(ValueError, match="unavailable or not authorized"):
-        agent_model._resolve_credentials(configuration, tenant, user, "test-model", reference)
+        agent_model._resolve_credentials(configuration, tenant, "test-model", reference)
 
 
 def test_pinned_model_uses_custom_billing_and_disables_load_balancing_without_mutation(

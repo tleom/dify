@@ -49,8 +49,10 @@ events are non-terminal; consumers that do not display context can ignore them.
 
 The LLM layer accepts an optional `credential_ref` with `type` (`provider` or
 `model`), `id`, and optional `provider`. The API resolves it for the caller's
-tenant and selected provider/model on every invocation, including credential
-visibility and runtime policy checks. An explicit reference pins the call to
+tenant and selected provider/model on every invocation, including runtime
+credential policy checks. Saved configuration references remain executable by
+published apps even when the invoking user cannot see them in credential lists.
+An explicit reference pins the call to
 that credential and uses the custom-provider billing path; load balancing cannot
 replace it. Invalid references fail explicitly. Context-window and vision
 capabilities use the same reference. Secrets remain inside the API runtime.

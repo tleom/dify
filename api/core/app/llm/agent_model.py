@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from dify_agent.layers.dify_plugin.configs import DifyModelCredentialRef
-from sqlalchemy import or_, select
+from sqlalchemy import select
 
 from core.db.session_factory import session_factory
 from core.entities import PluginCredentialType
@@ -12,13 +12,9 @@ from core.entities.provider_configuration import _model_type_db_literals
 from core.entities.provider_entities import CustomModelConfiguration, CustomProviderConfiguration
 from core.helper import encrypter
 from core.helper.credential_utils import runtime_check_credential_policy_compliance
-from core.helper.credential_visibility import apply_credential_visibility_filter
 from core.model_manager import ModelInstance
 from core.provider_manager import ProviderManager
 from graphon.model_runtime.entities.model_entities import ModelType
-from models.account import Account
-from models.credential_permission import CredentialType
-from models.enums import PermissionEnum
 from models.provider import ProviderCredential, ProviderModelCredential, ProviderType
 
 
@@ -33,10 +29,12 @@ def resolve_referenced_agent_model(
 ) -> ModelInstance:
     """Pin this invocation to a validated reference, with no default/LB fallback.
 
-    The reference contains no secrets. Ownership, visibility, credential policy
-    and provider/model identity are checked again on each invocation. The
-    provider configuration is copied so hosted/custom preference and load
-    balancing for unrelated calls are never mutated.
+    The API runtime supplies this reference from the saved Agent configuration;
+    it is not a credential-selection endpoint. A published app keeps using its
+    configured credential even when it is hidden from the invoking EndUser or
+    another workspace member. Tenant ownership, credential policy and exact
+    provider/model identity are still checked on each invocation. The provider
+    configuration is copied so unrelated calls are never mutated.
     """
     bundle = provider_manager.get_provider_model_bundle(
         tenant_id=tenant_id, provider=provider, model_type=ModelType.LLM
@@ -45,7 +43,7 @@ def resolve_referenced_agent_model(
     names = configuration._get_provider_names()
     if credential_ref.provider and credential_ref.provider not in names:
         raise ValueError("Model credential reference does not match the selected provider")
-    credentials = _resolve_credentials(configuration, tenant_id, user_id, model, credential_ref)
+    credentials = _resolve_credentials(configuration, tenant_id, model, credential_ref)
     custom = configuration.custom_configuration.model_copy(deep=True)
     if credential_ref.type == "provider":
         custom.provider = CustomProviderConfiguration(credentials=credentials, current_credential_id=credential_ref.id)
@@ -81,7 +79,7 @@ def resolve_referenced_agent_model(
     return ModelInstance(bundle.model_copy(update={"configuration": configuration}), model, credentials=credentials)
 
 
-def _resolve_credentials(configuration, tenant_id, user_id, model, reference) -> dict[str, Any]:
+def _resolve_credentials(configuration, tenant_id, model, reference) -> dict[str, Any]:
     record_type: type[ProviderCredential] | type[ProviderModelCredential] = (
         ProviderCredential if reference.type == "provider" else ProviderModelCredential
     )
@@ -96,21 +94,6 @@ def _resolve_credentials(configuration, tenant_id, user_id, model, reference) ->
             ProviderModelCredential.model_type.in_(_model_type_db_literals(ModelType.LLM)),
         )
     with session_factory.create_session() as session:
-        if reference.type == "provider":
-            account = session.get(Account, user_id) if user_id else None
-            if account is None:
-                statement = statement.where(
-                    or_(ProviderCredential.visibility == PermissionEnum.ALL_TEAM, ProviderCredential.user_id.is_(None))
-                )
-            else:
-                statement = apply_credential_visibility_filter(
-                    statement,
-                    model_id_column=ProviderCredential.id,
-                    model_user_id_column=ProviderCredential.user_id,
-                    model_visibility_column=ProviderCredential.visibility,
-                    credential_type=CredentialType.PROVIDER_CREDENTIAL,
-                    user=account,
-                )
         encrypted = session.scalar(statement)
         if not encrypted:
             raise ValueError("Referenced model credential is unavailable or not authorized")
