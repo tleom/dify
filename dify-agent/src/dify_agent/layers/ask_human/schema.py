@@ -39,8 +39,8 @@ class AskHumanSelectOption(BaseModel):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
-    value: str = Field(min_length=1)
-    label: str = Field(min_length=1)
+    value: str = Field(min_length=1, description="Stable option value returned in the human's answer.")
+    label: str = Field(min_length=1, description="Human-readable option text; may use the user's language.")
 
     @field_validator("value", "label")
     @classmethod
@@ -53,8 +53,12 @@ class AskHumanFieldBase(BaseModel):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1)
-    label: str = Field(min_length=1)
+    name: str = Field(
+        min_length=1,
+        json_schema_extra={"pattern": _IDENTIFIER_PATTERN.pattern},
+        description="Field key, such as grouping or extra. Use ASCII letters, digits and underscores; not display text.",
+    )
+    label: str = Field(min_length=1, description="Human-readable field label; may use the user's language.")
     required: bool = False
 
     @field_validator("name")
@@ -82,7 +86,10 @@ class AskHumanSelectField(AskHumanFieldBase):
     """Single-choice select field."""
 
     type: Literal["select"] = "select"
-    options: list[AskHumanSelectOption] = Field(default_factory=list)
+    options: list[AskHumanSelectOption] = Field(
+        default_factory=list,
+        description="Options are objects with both value and label, for example {\"value\": \"yes\", \"label\": \"Yes\"}.",
+    )
     default: str | None = None
 
     @model_validator(mode="after")
@@ -125,7 +132,11 @@ class AskHumanAction(BaseModel):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
-    id: str = Field(min_length=1)
+    id: str = Field(
+        min_length=1,
+        json_schema_extra={"pattern": _IDENTIFIER_PATTERN.pattern},
+        description="Action key, such as submit. Use ASCII letters, digits and underscores; not display text.",
+    )
     label: str = Field(min_length=1)
     style: AskHumanActionStyle = "default"
 
@@ -169,7 +180,7 @@ class AskHumanToolArgs(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
     title: str | None = None
-    question: str = Field(min_length=1)
+    question: str = Field(min_length=1, description="Required, non-empty question to show the human.")
     markdown: str | None = None
     fields: list[AskHumanField] = Field(default_factory=list)
     actions: list[AskHumanAction] = Field(default_factory=list)

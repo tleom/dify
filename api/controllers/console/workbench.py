@@ -100,7 +100,7 @@ class WorkbenchFilePayload(BaseModel):
 class WorkbenchResumePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     values: dict[str, str] = Field(default_factory=dict)
-    action: str = Field(min_length=1, max_length=100)
+    action: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class WorkbenchFeedbackPayload(BaseModel):

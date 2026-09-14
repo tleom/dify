@@ -38,7 +38,6 @@ RUN npm ci --prefix /opt/office/node --no-fund --no-audit \
     && npm ls --prefix /opt/office/node --all \
     && npm cache clean --force
 
-COPY RUNTIME.md /opt/office/README.md
 COPY smoke.py smoke.cjs /opt/office/
 COPY office.py uno_worker.py /opt/office/
 COPY fonts/ /usr/local/share/fonts/workbench/

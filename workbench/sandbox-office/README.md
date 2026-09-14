@@ -15,7 +15,7 @@ docker run --rm --network none --shm-size 1g \
 
 将沙箱管理器的 `WORKBENCH_SANDBOX_IMAGE` 配置为构建后的镜像。运行中的用户容器继续完成当前任务；停止的旧容器在下一次启动时保留为备份，并复用该用户已有的 home、files、env 数据卷创建新容器。
 
-`RUNTIME.md` 是供沙箱内任务读取的工具说明。`office.py` 和 `uno_worker.py` 提供格式转换、预览、公式重算和接受修订；每次 LibreOffice 操作使用独立 profile，输出文件不得覆盖源文件或已有文件。
+Office、浏览器和环境使用说明由管理员在 Agent 的配置文件中维护并发布，运行时通过配置文件能力读取。`office.py` 和 `uno_worker.py` 提供格式转换、预览、公式重算和接受修订；每次 LibreOffice 操作使用独立 profile，输出文件不得覆盖源文件或已有文件。
 
 沙箱管理器和文件操作的回归检查位于 `../tests/`，应在 Linux 环境运行：
 

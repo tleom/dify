@@ -33,9 +33,6 @@ class WorkbenchEnvironmentLayer(PydanticAILayer[NoLayerDeps, object, EmptyLayerC
     @staticmethod
     def _environment_prompt() -> str:
         return (
-            "Common Office/PDF/OCR/image/data libraries, LibreOffice, Chinese fonts and Google Chrome are preinstalled. "
-            "Read /opt/office/README.md and use python/node directly before requesting extra packages. "
-            "Use /opt/office/office.py for isolated Office conversion, previews and formula recalculation. "
             "Use update_shared_environment only for missing or explicitly requested Python/Node registry packages. "
             "The environment is shared by this user's conversations and mounted read-only. "
             "The task will pause while other runs finish, then resume with the result. "

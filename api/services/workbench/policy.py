@@ -106,9 +106,9 @@ def compile_selection(
         result["tools"]["dify_tools"].append(tool)
     result["config_skills"] = [copy.deepcopy(resources["skills"][key]) for key in selection.skills]
     result["knowledge"] = {"sets": [copy.deepcopy(resources["knowledge"][key]) for key in selection.knowledge]}
-    # An account sandbox must not inherit template environment secrets or private attachments.
+    # Published reference files are inherited from the copied template.
+    # Keep template environment secrets out of account sandboxes.
     result["env"] = {"variables": [], "secret_refs": []}
-    result["config_files"] = []
     return result
 
 
