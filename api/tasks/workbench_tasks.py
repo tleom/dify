@@ -25,7 +25,7 @@ from models.workbench import WorkbenchChat, WorkbenchRun
 from services.app_task_service import AppTaskService
 from services.workbench import maintenance, scheduler
 from services.workbench import runtime as workbench_runtime
-from services.workbench.event_log import append_event, uses_journal
+from services.workbench.event_log import append_event, append_locked, notify, uses_journal
 from services.workbench.service import authorize
 
 logger = logging.getLogger(__name__)
@@ -289,6 +289,8 @@ def execute(owner, run_id):
     finally:
         done.set()
         if claimed:
+            pause_event = None
+            end_event = None
             with session_factory.get_session_maker().begin() as session:
                 run = session.scalar(select(WorkbenchRun).where(WorkbenchRun.id == run_id).with_for_update())
                 if run is None:
@@ -300,11 +302,25 @@ def execute(owner, run_id):
                 elif run.status in ("environment_update", "waiting_input"):
                     status = run.status
                 elif run.status == "running":
-                    run.status, run.error = status, error
+                    pause_event = workbench_runtime.complete_pause(
+                        session, run, completed_stream=completed_stream and status == "completed",
+                    )
+                    if pause_event is not None:
+                        status = run.status
+                    else:
+                        run.status, run.error = status, error
                 else:
                     status, error = run.status, run.error
                 if not journal:
                     run.event_log = json.dumps(events)
+                else:
+                    end_event = append_locked(
+                        session, run, {"event": "workbench_end", "status": status, "error": error},
+                    )
+            if pause_event is not None:
+                notify(run_id, pause_event)
+            if end_event is not None:
+                notify(run_id, end_event)
             safe_to_release = completed_stream and status in ("completed", "environment_update", "waiting_input")
             if not safe_to_release:
                 try:
@@ -313,7 +329,8 @@ def execute(owner, run_id):
                     logger.warning("Could not confirm remote cleanup for %s", run_id, exc_info=True)
             if safe_to_release:
                 scheduler.release(owner, run_id)
-            event(run_id, {"event": "workbench_end", "status": status, "error": error})
+            if not journal:
+                event(run_id, {"event": "workbench_end", "status": status, "error": error})
             if status == "environment_update":
                 update_environment.delay(tenant_id, account_id)
             dispatch.delay()

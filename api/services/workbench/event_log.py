@@ -45,6 +45,7 @@ def owned_statement(tenant_id, account_id, run_id):
 
 def append_locked(session, run, item):
     """Caller holds the run row lock; never replace a previous event or do network I/O here."""
+    _append_tool_knowledge(session, run, item)
     source = item.get("source_event_id")
     identity = f"{item.get('backend_run_id', '')}:{source}" if source else str(uuid4())
     identity = hashlib.sha256(identity.encode()).hexdigest()
@@ -90,7 +91,9 @@ def notify(run_id, item):
 
 
 def _append_tool_knowledge(session, run, item):
-    terminal = item.get("event") == "workbench_end"
+    terminal = item.get("event") == "workbench_end" or (
+        item.get("event") == "workbench_status" and item.get("status") in ("waiting_input", "environment_update")
+    )
     data = item.get("data")
     if not terminal and (
         item.get("event") != "workbench_activity"
@@ -134,7 +137,6 @@ def append_event(run_id, item, *, expected_backend_run_id=None):
                 "workbench_context",
             ):
                 return None
-            _append_tool_knowledge(session, run, item)
             item = append_locked(session, run, item)
     if journal:
         notify(run_id, item)

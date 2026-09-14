@@ -267,7 +267,7 @@ def pause(tenant_id, conversation_id, account_id, terminal, binding_id):
         return False
     from extensions.ext_redis import redis_client
     from models.agent import AgentWorkspaceBinding
-    from services.workbench.event_log import append_locked, notify, uses_journal
+    from services.workbench.event_log import uses_journal
     from services.workbench.scheduler import PREFIX, event_key
 
     with session_factory.get_session_maker().begin() as session:
@@ -278,22 +278,51 @@ def pause(tenant_id, conversation_id, account_id, terminal, binding_id):
         payload = json.loads(run.payload)
         payload["pending"] = pending
         payload.pop("continuation", None)
+        status = "environment_update" if pending["tool_name"] == "update_shared_environment" else "waiting_input"
+        journal = uses_journal(run, payload)
+        if journal:
+            # The producer may still have earlier tools/text in the queue.
+            # The task consumer exposes this pause after draining that queue.
+            payload["pending_pause"] = {"backend_run_id": run.backend_run_id, "status": status}
+        else:
+            run.status = status
         run.payload = json.dumps(payload)
         binding = session.get(AgentWorkspaceBinding, binding_id)
         if binding is None or binding.tenant_id != tenant_id:
             raise Forbidden()
         binding.session_snapshot = terminal.session_snapshot.model_dump_json()
-        run.status = "environment_update" if pending["tool_name"] == "update_shared_environment" else "waiting_input"
-        run_id, status = run.id, run.status
+        run_id = run.id
         item = {"event": "workbench_status", "status": status}
-        journal = uses_journal(run)
-        if journal:
-            item = append_locked(session, run, item)
         # Gate new user jobs before releasing this task's normal lease.
         if status == "environment_update":
             redis_client.set(PREFIX + f"maintenance:{tenant_id}:{account_id}", "1")
-    if journal:
-        notify(run_id, item)
-    else:
+    if not journal:
         redis_client.xadd(event_key(run_id), {"data": json.dumps(item)})
     return True
+
+
+def complete_pause(session, run, *, completed_stream):
+    """Commit a saved pause only after the task consumed the producer queue.
+
+    The caller holds the run row lock. Status and its journal record become
+    visible together, after all preceding activity/text/message-end records.
+    """
+    from services.workbench.event_log import append_locked
+
+    payload = json.loads(run.payload)
+    pending = payload.pop("pending_pause", None)
+    if pending is None:
+        return None
+    run.payload = json.dumps(payload)
+    if (
+        not completed_stream
+        or run.status != "running"
+        or pending.get("backend_run_id") != run.backend_run_id
+        or pending.get("status") not in ("waiting_input", "environment_update")
+    ):
+        return None
+    run.status = pending["status"]
+    return append_locked(session, run, {
+        "event": "workbench_status", "status": run.status,
+        "backend_run_id": run.backend_run_id, "source_event_id": "workbench-pause",
+    })

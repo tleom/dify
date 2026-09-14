@@ -2,14 +2,19 @@
 
 import json
 from collections.abc import Callable, Iterator
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
+from agenton.compositor import CompositorSessionSnapshot
+from dify_agent.protocol.schemas import DeferredToolCallPayload
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from werkzeug.exceptions import NotFound
 
+from clients.agent_backend import AgentBackendDeferredToolCallInternalEvent
 from core.db import session_factory as factory_module
+from models.agent import AgentConfigVersionKind, AgentWorkspaceBinding
 from models.base import TypeBase
 from models.workbench import WorkbenchChat, WorkbenchRun, WorkbenchRunEvent
 from services.workbench import event_log
@@ -22,7 +27,7 @@ type Journal = tuple[sessionmaker[Session], str, str, str, str]
 def journal(monkeypatch: pytest.MonkeyPatch) -> Iterator[Journal]:
     engine = create_engine("sqlite://")
     TypeBase.metadata.create_all(engine, tables=[TypeBase.metadata.tables[model.__tablename__] for model in (
-        WorkbenchChat, WorkbenchRun, WorkbenchRunEvent,
+        WorkbenchChat, WorkbenchRun, WorkbenchRunEvent, AgentWorkspaceBinding,
     )])
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     monkeypatch.setattr(factory_module, "_session_maker", factory)
@@ -251,6 +256,126 @@ def test_knowledge_callback_cannot_overtake_queued_tool_start(
         history = saved if consumer_event == "tool" else saved[:-1]
         assert event_log.history_events(run) == history
     assert list(event_log.stream_events(tenant, account, run_id))[:-1] == history
+
+
+@pytest.mark.parametrize("protocol", [0, 1])
+@pytest.mark.parametrize("tool_name", ["ask_human", "update_shared_environment"])
+def test_pause_waits_for_the_ordered_consumer_before_closing_live_progress(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., None],
+    protocol: int, tool_name: str,
+) -> None:
+    from extensions.ext_redis import redis_client
+    from services.workbench import runtime
+
+    config_overrides(WORKBENCH_ENABLED=True)
+    xadd = MagicMock()
+    monkeypatch.setattr(redis_client, "xadd", xadd)
+    monkeypatch.setattr(redis_client, "set", MagicMock())
+    monkeypatch.setattr(redis_client, "xread", MagicMock(return_value=[]))
+    factory, tenant, account, run_id, chat_id = journal
+    conversation_id, binding_id = str(uuid4()), str(uuid4())
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        chat = session.get(WorkbenchChat, chat_id)
+        assert run is not None
+        assert chat is not None
+        ticket = run.backend_run_id
+        assert ticket is not None
+        run.payload = json.dumps({"activity_protocol": protocol})
+        chat.conversation_id = conversation_id
+        session.add(AgentWorkspaceBinding(
+            id=binding_id, tenant_id=tenant, app_id=chat.app_id, workspace_id=str(uuid4()),
+            agent_id=chat.agent_id, agent_config_version_id=str(uuid4()),
+            agent_config_version_kind=AgentConfigVersionKind.SNAPSHOT, backend_binding_ref="binding",
+        ))
+    terminal = AgentBackendDeferredToolCallInternalEvent(
+        run_id=ticket,
+        deferred_tool_call=DeferredToolCallPayload(tool_call_id="pause-call", tool_name=tool_name, args={}),
+        session_snapshot=CompositorSessionSnapshot(layers=[]),
+    )
+    assert runtime.pause(tenant, conversation_id, account, terminal, binding_id)
+    paused_status = "waiting_input" if tool_name == "ask_human" else "environment_update"
+    if protocol == 0:
+        assert event_log.read_state(tenant, account, run_id)["status"] == paused_status
+        xadd.assert_called_once()
+        return
+    assert event_log.read_state(tenant, account, run_id)["status"] == "running"
+    assert event_log.read_page(tenant, account, run_id)[0] == []
+    xadd.assert_not_called()
+    stream = event_log.stream_events(tenant, account, run_id)
+    assert next(stream) is None
+    # The producer has paused before the task drains these previously queued events.
+    event_log.append_event(run_id, {"event": "workbench_activity", "data": {"kind": "tool", "stage": "returned"}})
+    event_log.append_event(run_id, {"event": "message_end"})
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        saved = runtime.complete_pause(session, run, completed_stream=True)
+        assert saved is not None
+        assert saved["_sequence"] == 3
+        assert run.status == paused_status
+        assert "pending_pause" not in json.loads(run.payload)
+        assert runtime.complete_pause(session, run, completed_stream=True) is None
+    items = [next(stream), next(stream), next(stream)]
+    assert [item["event"] for item in items if item is not None] == [
+        "workbench_activity", "message_end", "workbench_status",
+    ]
+    last = next(stream)
+    if protocol == 1 and tool_name == "ask_human":
+        assert last is not None
+        assert last["event"] == "workbench_end"
+        assert last["status"] == paused_status
+    else:
+        assert last is None
+    stream.close()
+
+
+@pytest.mark.parametrize("status", ["completed", "waiting_input"])
+def test_terminal_status_commits_with_remaining_knowledge_results(journal: Journal, status: str) -> None:
+    factory, tenant, account, run_id, _ = journal
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        payload = json.loads(run.payload)
+        payload["knowledge_events"] = [{
+            "event": "workbench_knowledge", "status": "returned", "search_id": "last-search",
+            "backend_run_id": run.backend_run_id, "source_event_id": "last-result",
+            "results": [{"content": "最后片段"}],
+        }]
+        run.payload = json.dumps(payload)
+        run.status = status
+        # The task commits its status and closing records under this same lock.
+        if status == "waiting_input":
+            event_log.append_locked(session, run, {"event": "workbench_status", "status": status})
+        event_log.append_locked(session, run, {"event": "workbench_end", "status": status})
+    items = list(event_log.stream_events(tenant, account, run_id))
+    first, last = items[0], items[-1]
+    assert first is not None
+    assert last is not None
+    assert first["event"] == "workbench_knowledge"
+    assert first["results"] == [{"content": "最后片段"}]
+    assert last["status"] == status
+    assert len([item for item in items if item and item["event"] == "workbench_knowledge"]) == 1
+
+
+@pytest.mark.parametrize("boundary", ["incomplete", "cancelled", "old-attempt"])
+def test_pending_pause_cannot_override_failed_cancelled_or_newer_attempts(journal: Journal, boundary: str) -> None:
+    from services.workbench import runtime
+
+    factory, _, _, run_id, _ = journal
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        payload = json.loads(run.payload)
+        payload["pending_pause"] = {
+            "status": "waiting_input", "backend_run_id": "old" if boundary == "old-attempt" else run.backend_run_id,
+        }
+        run.payload = json.dumps(payload)
+        if boundary == "cancelled":
+            run.status = "cancelled"
+        assert runtime.complete_pause(session, run, completed_stream=boundary != "incomplete") is None
+        assert run.status == ("cancelled" if boundary == "cancelled" else "running")
+        assert event_log.history_events(run) == []
 
 
 def test_notification_failure_does_not_lose_committed_event(journal: Journal, monkeypatch: pytest.MonkeyPatch) -> None:
