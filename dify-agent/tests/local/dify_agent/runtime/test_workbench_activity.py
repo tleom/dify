@@ -7,7 +7,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 from pydantic_ai import ModelRetry, Tool
-from pydantic_ai.messages import RetryPromptPart
+from pydantic_ai.messages import RetryPromptPart, ToolReturn, ToolReturnPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from dify_agent.layers.dify_plugin.configs import DifyPluginToolConfig, DifyPluginToolsLayerConfig
@@ -400,6 +400,7 @@ def test_disabled_reporting_keeps_business_events_for_existing_journal_runs(monk
         nonlocal requests
         requests += 1
         assert "report_activity" not in {tool.name for tool in info.function_tools}
+        assert "report_activity" not in (info.instructions or "")
         if requests == 1:
             yield {0: _call("work", {}, "work")}
         else:
@@ -412,6 +413,32 @@ def test_disabled_reporting_keeps_business_events_for_existing_journal_runs(monk
     assert not _progress(events, "activity")
     assert [item.stage for item in _progress(events, "tool")] == ["started", "returned"]
     assert "".join(item.text for item in _progress(events, "text")) == "已完成。"
+
+
+@pytest.mark.parametrize("wrapped_failure", [True, False])
+def test_tool_failure_metadata_preserves_the_original_observation(monkeypatch, wrapped_failure):
+    requests = 0
+    observation = "tool invoke error: provider rejected the request"
+
+    async def work():
+        return ToolReturn(return_value=observation, metadata={"is_error": True}) if wrapped_failure else observation
+
+    async def stream(messages, info):
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            yield {0: _call("work", {}, "work")}
+        else:
+            parts = [part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
+            assert parts[-1].content == observation
+            yield "已读取工具结果。"
+
+    _, _, execute = _setup(monkeypatch, stream, [Tool(work)])
+    events = asyncio.run(execute())
+    calls = _progress(events, "tool")
+    assert [item.stage for item in calls] == ["started", "error" if wrapped_failure else "returned"]
+    assert calls[-1].output == observation
+    assert next(iter(_state(events).calls.values())).state == ("error" if wrapped_failure else "returned")
 
 
 def test_invalid_report_does_not_abort_or_repeat_business_tools(monkeypatch):

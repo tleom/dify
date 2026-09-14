@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from pydantic import JsonValue
+from pydantic_ai.messages import ToolReturn
 
 from agenton.compositor import Compositor, LayerNode, LayerProvider
 from dify_agent.adapters.llm import DifyLLMAdapterModel
@@ -786,7 +787,9 @@ def test_dify_plugin_tools_layer_rejects_multiple_values_for_single_file() -> No
                     {"source": ["https://example.com/a.txt", "https://example.com/b.txt"]},
                     None,  # pyright: ignore[reportArgumentType]
                 )
-        assert "only accepts one file" in result
+        assert isinstance(result, ToolReturn)
+        assert "only accepts one file" in str(result.return_value)
+        assert result.metadata == {"is_error": True}
 
     asyncio.run(scenario())
 
@@ -813,7 +816,9 @@ def test_dify_plugin_tools_layer_rejects_path_without_shell() -> None:
                     {"source": "outputs/report.pdf"},
                     None,  # pyright: ignore[reportArgumentType]
                 )
-        assert "require an active shell layer" in result
+        assert isinstance(result, ToolReturn)
+        assert "require an active shell layer" in str(result.return_value)
+        assert result.metadata == {"is_error": True}
 
     asyncio.run(scenario())
 
@@ -921,7 +926,12 @@ def test_dify_plugin_tools_layer_returns_agent_friendly_error_text() -> None:
                     None,  # pyright: ignore[reportArgumentType]
                 )
 
-                assert result == "tool parameters validation error: missing query, please check your tool parameters"
+                assert isinstance(result, ToolReturn)
+                assert (
+                    result.return_value
+                    == "tool parameters validation error: missing query, please check your tool parameters"
+                )
+                assert result.metadata == {"is_error": True}
 
     asyncio.run(scenario())
 
@@ -1014,7 +1024,9 @@ def test_dify_plugin_tools_layer_maps_nested_plugin_invoke_errors_to_agent_text(
                     None,  # pyright: ignore[reportArgumentType]
                 )
 
-                assert result == expected_text
+                assert isinstance(result, ToolReturn)
+                assert result.return_value == expected_text
+                assert result.metadata == {"is_error": True}
 
     asyncio.run(scenario())
 

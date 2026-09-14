@@ -11,6 +11,7 @@ from pydantic_ai.messages import (
     RetryPromptPart,
     ThinkingPart,
     ThinkingPartDelta,
+    ToolReturnPart,
 )
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import RunContext
@@ -68,7 +69,12 @@ class WorkbenchActivityCapability(AbstractCapability[None]):
                 part.tool_call_id,
                 part.tool_name or "unknown",
                 part.content,
-                failed=isinstance(part, RetryPromptPart),
+                failed=isinstance(part, RetryPromptPart)
+                or (
+                    isinstance(part, ToolReturnPart)
+                    and isinstance(part.metadata, dict)
+                    and part.metadata.get("is_error") is True
+                ),
             )
         if text_delta:
             await self.emit(

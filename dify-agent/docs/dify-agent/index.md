@@ -83,6 +83,8 @@ restores the same identity when human input or environment installation resumes
 in a different native run. Parallel business calls remain parallel. Tool retries
 become error records only when an execution binding exists; argument-validation
 failures do not start tool work, while actual execution failures remain visible.
+Plugin and core-tool error observations carry application-only SDK failure metadata;
+their original model-facing text is preserved and the activity records an error.
 Reports do not appear as business tool rows; malformed or repeated reports become
 no-ops without using the task's retry budget. Four reports without business work hide
 the report tool until work resumes. Reporting still uses the normal model token
@@ -101,6 +103,6 @@ authority for history and live SSE, with an increasing sequence per logical run;
 Redis is a wake-up channel. Install the migration and upgrade all API/Agent
 readers before enabling the producer. To roll back reporting, disable the flag
 while retaining the new readers and journal. Existing protocol-1 continuations
-still emit tool and text records with the reporting tool disabled. Legacy runs
+still emit tool and text records with both the reporting tool and its prompt disabled. Legacy runs
 retain their previous reader and composition contract. Do not drop the journal
 when merely disabling reporting.

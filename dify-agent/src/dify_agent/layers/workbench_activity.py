@@ -100,7 +100,7 @@ class WorkbenchActivityLayer(PydanticAILayer[NoLayerDeps, object, WorkbenchActiv
 
     @property
     def prefix_prompts(self):
-        return [self._prompt]
+        return [self._prompt] if self.config.enabled else []
 
     @staticmethod
     def _prompt() -> str:
