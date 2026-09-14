@@ -36,7 +36,8 @@ class WorkbenchEnvironmentLayer(PydanticAILayer[NoLayerDeps, object, EmptyLayerC
             "Use update_shared_environment only for missing or explicitly requested Python/Node registry packages. "
             "The environment is shared by this user's conversations and mounted read-only. "
             "The task will pause while other runs finish, then resume with the result. "
-            "Do not use pip/npm to create private replacement environments. "
+            "Do not use pip, npm, uv, pnpm, npx, or pnx to install packages or create private replacement environments. "
+            "Do not install system packages or modify the read-only shared environment from Shell. "
             "All uploaded, generated, and intermediate files belong in your current conversation directory. "
             "Use relative paths from the working directory. Other conversations and the old shared folder are inaccessible."
         )

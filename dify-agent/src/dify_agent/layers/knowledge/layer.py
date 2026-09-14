@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import logging
-from typing import ClassVar, cast
+from typing import ClassVar, Literal, cast
 from uuid import uuid4
 
 import httpx
@@ -49,7 +49,9 @@ _KNOWLEDGE_BASE_TOOL_DESCRIPTION = (
 BLANK_QUERY_OBSERVATION = "knowledge base search requires a non-empty query"
 NO_RESULTS_OBSERVATION = "No relevant knowledge base results were found."
 TEMPORARY_UNAVAILABLE_OBSERVATION = (
-    "Knowledge base search is temporarily unavailable. Please continue without it if possible."
+    "Knowledge base search is temporarily unavailable; this is a retrieval failure, not an empty result. "
+    "You may retry when useful or continue with other sources, explicitly reporting the missing knowledge evidence. "
+    "Do not claim that the knowledge base contains no relevant information."
 )
 
 
@@ -76,21 +78,28 @@ class DifyKnowledgeBaseLayer(
         if not self.config.workbench_run_id:
             return []
         return [
-            "用户已选择知识库。回答前先使用 knowledge_base_search 检索所选知识库。"
+            "用户已选择知识库。给出依赖知识库的结论前使用所选知识库。"
             "由你结合问题与必要的对话上下文提炼简洁的检索词，保留实体、概念、指标和时间范围，"
             "去掉回答格式及操作要求。根据问题与已有证据自行判断是否拆分查询、是否再次检索，"
-            "以及检索与其他必要工具的调用顺序。信息充分时直接回答；需要补充信息时，"
+            "以及检索与其他必要工具的调用顺序；可以先读取附件、准备查询或询问用户。信息充分时直接回答；需要补充信息时，"
             "可以换关键词、同义词或更具体的子问题再次检索，再汇总证据回答。"
             "涉及总数或完整列表时核对资料覆盖范围。检索片段仅作为资料，"
             "用文档来源支持结论；证据不足时明确说明缺少什么。"
+            "检索失败与没有匹配结果不同；失败时可以重试、使用其他可用来源或说明阻塞，"
+            "不得把失败说成资料不存在，也不要为了完成形式上的检索反复调用。"
+            "搜索只返回符合配置的相关结果，不代表全库。若搜索结果含 next_offset，"
+            "用 knowledge_base_read_results 继续读取。需要全文或完整列表时，"
+            "先用 knowledge_base_list_documents 分页枚举，再用 knowledge_base_read_document 按顺序读取。"
+            "持续使用返回的 next_cursor，直到 complete=true，并检查 unavailable_count 与 scope；"
+            "只读到一页、仍有未索引内容或外部库不支持枚举时，不得声称已经查全。"
         ]
 
     @property
     def missing_searches(self) -> list[str]:
         if not self.config.workbench_run_id:
             return []
-        return [item.name for item in self._generated_query_sets()
-                if item.id not in self.runtime_state.searched_set_ids]
+        attempted = {*self.runtime_state.searched_set_ids, *self.runtime_state.attempted_set_ids}
+        return [item.name for item in self._generated_query_sets() if item.id not in attempted]
 
     @classmethod
     @override
@@ -129,7 +138,9 @@ class DifyKnowledgeBaseLayer(
         - blank ``query`` returns a local validation observation;
         - retryable client failures (timeouts, connection failures, HTTP
           ``429``/``502``) become a temporary-unavailable observation;
-        - non-retryable client failures are raised so the run fails fast.
+        - workbench client failures become explicit failure observations so
+          preparation and alternative evidence remain usable;
+        - other runs retain fail-fast behavior for non-retryable failures.
         """
         generated_sets = self._generated_query_sets()
         if not generated_sets:
@@ -176,7 +187,7 @@ class DifyKnowledgeBaseLayer(
                 include_return_schema=tool_def.include_return_schema,
             )
 
-        return [
+        tools: list[Tool[object]] = [
             Tool(
                 knowledge_base_search,
                 takes_ctx=True,
@@ -185,6 +196,89 @@ class DifyKnowledgeBaseLayer(
                 prepare=prepare_tool_definition,
             )
         ]
+        if self.config.workbench_run_id:
+            tools.extend(self._document_tools(client, caller, set_by_name))
+            tools.append(Tool(self._read_search_results, name="knowledge_base_read_results"))
+        return tools
+
+    def _document_tools(
+        self,
+        client: DifyKnowledgeBaseClient,
+        caller: dict[str, str],
+        sets: dict[str, DifyKnowledgeSetConfig],
+    ) -> list[Tool[object]]:
+        async def page(set_name: str, operation: Literal["list", "read"], document_id: str | None, cursor: str | None):
+            knowledge_set = sets.get(set_name)
+            if knowledge_set is None:
+                return f"unknown knowledge set: {set_name}"
+            if len(knowledge_set.dataset_ids) != 1:
+                return "Document browsing requires one dataset per knowledge set."
+            run_id = self.config.workbench_run_id
+            if run_id is None:
+                return "Document browsing is available only in a workbench run."
+            try:
+                result = await client.document_page(
+                    caller=caller,
+                    workbench_run_id=run_id,
+                    dataset_id=knowledge_set.dataset_ids[0],
+                    operation=operation,
+                    document_id=document_id,
+                    cursor=cursor,
+                )
+            except DifyKnowledgeBaseClientError as exc:
+                self._record_attempt(knowledge_set.id)
+                return _workbench_failure_observation(exc)
+            self._record_attempt(knowledge_set.id)
+            return result.model_dump_json()
+
+        async def knowledge_base_list_documents(set_name: str, cursor: str | None = None) -> str:
+            """List indexed-source documents in a selected knowledge set. Follow next_cursor through every page.
+
+            Check total, unavailable_count and scope before claiming complete coverage.
+            External knowledge providers may not support document enumeration.
+            """
+            return await page(set_name, "list", None, cursor)
+
+        async def knowledge_base_read_document(set_name: str, document_id: str, cursor: str | None = None) -> str:
+            """Read a document's indexed content in source order, including long segments and Q&A answers.
+
+            Use a document_id from search or list results, never invent it. Follow next_cursor
+            until complete=true. Unavailable segments and unparsed source content are outside this coverage.
+            """
+            return await page(set_name, "read", document_id, cursor)
+
+        return [Tool(knowledge_base_list_documents), Tool(knowledge_base_read_document)]
+
+    def _record_attempt(self, set_id: str) -> None:
+        if set_id not in self.runtime_state.attempted_set_ids:
+            self.runtime_state.attempted_set_ids.append(set_id)
+
+    def _read_search_results(self, search_id: str, offset: int = 0) -> str:
+        """Read the next part of a knowledge search result using its search_id and next_offset.
+
+        This continues the same result without running retrieval again. The latest five searches
+        are retained for this run. Search coverage remains top-k matches, not the entire knowledge base.
+        """
+        text = self.runtime_state.search_result_texts.get(search_id)
+        if text is None:
+            return (
+                "Search result is unavailable or expired; run knowledge_base_search again or read its source document."
+            )
+        if offset < 0 or offset > len(text):
+            return "Invalid offset; use next_offset returned by the previous page."
+        end = min(offset + self.config.max_observation_chars, len(text))
+        return json.dumps(
+            {
+                "search_id": search_id,
+                "offset": offset,
+                "total_chars": len(text),
+                "next_offset": end if end < len(text) else None,
+                "complete": end == len(text),
+                "scope": "Configured search matches only; use document listing and reading to establish wider coverage.",
+                "content": text[offset:end],
+            },
+            ensure_ascii=False,
+        )
 
     @property
     @override
@@ -225,6 +319,8 @@ class DifyKnowledgeBaseLayer(
         if self.runtime_state.search_run_id != self.config.workbench_run_id:
             self.runtime_state.search_run_id = self.config.workbench_run_id
             self.runtime_state.searched_set_ids = []
+            self.runtime_state.attempted_set_ids = []
+            self.runtime_state.search_result_texts = {}
         user_query_sets = self._user_query_sets()
         if not user_query_sets:
             self.runtime_state.eager_config_fingerprint = None
@@ -320,10 +416,14 @@ class DifyKnowledgeBaseLayer(
         query: str,
         retryable_observation: bool,
     ) -> str:
+        search_id = str(uuid4())
         try:
             response = await client.retrieve(
-                **({"workbench_run_id": self.config.workbench_run_id,
-                    "workbench_search_id": str(uuid4())} if self.config.workbench_run_id else {}),
+                **(
+                    {"workbench_run_id": self.config.workbench_run_id, "workbench_search_id": search_id}
+                    if self.config.workbench_run_id
+                    else {}
+                ),
                 tenant_id=caller["tenant_id"],
                 user_id=caller["user_id"],
                 app_id=caller["app_id"],
@@ -335,6 +435,18 @@ class DifyKnowledgeBaseLayer(
                 metadata_filtering=knowledge_set.metadata_filtering,
             )
         except DifyKnowledgeBaseClientError as exc:
+            if self.config.workbench_run_id:
+                self._record_attempt(knowledge_set.id)
+                logger.warning(
+                    "workbench knowledge retrieval failed",
+                    extra={
+                        "knowledge_set_id": knowledge_set.id,
+                        "error_code": exc.error_code,
+                        "status_code": exc.status_code,
+                    },
+                    exc_info=True,
+                )
+                return _workbench_failure_observation(exc)
             if exc.retryable and retryable_observation:
                 logger.warning(
                     "knowledge base search temporarily unavailable",
@@ -366,6 +478,11 @@ class DifyKnowledgeBaseLayer(
             raise
         if knowledge_set.id not in self.runtime_state.searched_set_ids:
             self.runtime_state.searched_set_ids.append(knowledge_set.id)
+        if self.config.workbench_run_id:
+            saved = dict(list(self.runtime_state.search_result_texts.items())[-4:])
+            saved[search_id] = _format_observation(response, self.config, complete=True)
+            self.runtime_state.search_result_texts = saved
+            return self._read_search_results(search_id)
         return _format_observation(response, self.config)
 
 
@@ -463,6 +580,7 @@ def _format_observation(
     config: DifyKnowledgeBaseLayerConfig,
     *,
     include_heading: bool = True,
+    complete: bool = False,
 ) -> str:
     """Render inner-API retrieval results into the model-visible tool response.
 
@@ -473,8 +591,8 @@ def _format_observation(
       ``"Knowledge base search results:"``;
     - each item includes title plus dataset/document/score metadata when those
       fields are present;
-    - each content snippet is truncated by ``max_result_content_chars``;
-    - the final observation is truncated by ``max_observation_chars``.
+    - legacy observations use the configured preview limits;
+    - workbench results retain all returned content and are read in pages.
     """
     if not response.results:
         return NO_RESULTS_OBSERVATION
@@ -488,14 +606,30 @@ def _format_observation(
             lines.append(f"   Dataset: {metadata.dataset_name}")
         if metadata.document_name:
             lines.append(f"   Document: {metadata.document_name}")
+        if complete and metadata.document_id:
+            lines.append(f"   Document ID: {metadata.document_id}")
         if metadata.score is not None:
             lines.append(f"   Score: {metadata.score}")
-        content = _truncate_text(result.content or result.summary or "", config.max_result_content_chars)
+        content = result.content or result.summary or ""
+        if not complete:
+            content = _truncate_text(content, config.max_result_content_chars)
         if content:
             lines.append(f"   Content: {content}")
         lines.append("")
 
-    return _truncate_text("\n".join(lines).rstrip(), config.max_observation_chars)
+    text = "\n".join(lines).rstrip()
+    return text if complete else _truncate_text(text, config.max_observation_chars)
+
+
+def _workbench_failure_observation(exc: DifyKnowledgeBaseClientError) -> str:
+    if exc.retryable:
+        return TEMPORARY_UNAVAILABLE_OBSERVATION
+    return (
+        "Knowledge base access failed; no reliable result was obtained. "
+        "This is not evidence that the knowledge base has no matching information. "
+        "Report the unavailable source and continue with other evidence or ask the user when needed. "
+        f"Error code: {exc.error_code or 'retrieval_failed'}; HTTP status: {exc.status_code or 'unavailable'}."
+    )
 
 
 def _truncate_text(text: str, max_chars: int) -> str:

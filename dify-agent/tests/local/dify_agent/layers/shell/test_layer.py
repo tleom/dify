@@ -313,12 +313,23 @@ def test_shell_layer_tools_have_non_empty_descriptions() -> None:
 
 
 def test_shell_prefix_prompt_describes_workspace_as_temp_space() -> None:
-    prompt = shell_layer_module._SHELL_LAYER_PREFIX_PROMPT
+    prompt = shell_layer_module._LOCAL_SANDBOX_ENVIRONMENT_PROMPT
 
     assert "`cwd`) is the active Workspace and temporary working space" in prompt
     assert "`TMPDIR`, `TMP`, and `TEMP`) resolve directly to `cwd`" in prompt
     assert "`$HOME` is the system space for reusable tools and state" in prompt
     assert "<cwd>/.tmp" not in prompt
+
+
+def test_workbench_prefix_excludes_local_installation_and_path_assumptions() -> None:
+    layer, _ = _layer(commands=FakeCommands())
+    _bind_execution_context(layer)
+    native = layer._build_prefix_prompt()
+    assert shell_layer_module._LOCAL_SANDBOX_ENVIRONMENT_PROMPT in native
+    layer.deps.execution_context.config.workbench_run_id = "run-1"
+    workbench = layer._build_prefix_prompt()
+    assert workbench == shell_layer_module._SHELL_LAYER_PREFIX_PROMPT
+    assert shell_layer_module._LOCAL_SANDBOX_ENVIRONMENT_PROMPT not in workbench
 
 
 def test_shell_layer_create_bootstraps_inside_sandbox_workspace() -> None:

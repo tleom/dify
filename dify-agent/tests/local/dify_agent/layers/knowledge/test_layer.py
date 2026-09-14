@@ -187,14 +187,21 @@ def test_workbench_generated_searches_can_repeat_with_independent_records(monkey
     monkeypatch.setattr(DifyKnowledgeBaseClient, "retrieve", retrieve)
 
     async def scenario():
-        compositor = Compositor([
-            LayerNode("execution_context", _execution_context_provider()),
-            LayerNode("knowledge", _knowledge_provider(), deps={"execution_context": "execution_context"}),
-        ])
-        async with httpx.AsyncClient() as client, compositor.enter(configs={
-            "execution_context": _execution_context_config(),
-            "knowledge": _knowledge_config(workbench_run_id="run-1"),
-        }) as run:
+        compositor = Compositor(
+            [
+                LayerNode("execution_context", _execution_context_provider()),
+                LayerNode("knowledge", _knowledge_provider(), deps={"execution_context": "execution_context"}),
+            ]
+        )
+        async with (
+            httpx.AsyncClient() as client,
+            compositor.enter(
+                configs={
+                    "execution_context": _execution_context_config(),
+                    "knowledge": _knowledge_config(workbench_run_id="run-1"),
+                }
+            ) as run,
+        ):
             layer = run.get_layer("knowledge", DifyKnowledgeBaseLayer)
             assert not requests
             assert layer.missing_searches == ["Support KB"]
@@ -210,6 +217,158 @@ def test_workbench_generated_searches_can_repeat_with_independent_records(monkey
         assert [r["query"] for r in requests] == ["使用人数", "累计使用次数"]
         assert all(r["workbench_run_id"] == "run-1" for r in requests)
         assert len({r["workbench_search_id"] for r in requests}) == 2
+
+    asyncio.run(scenario())
+
+
+def test_workbench_search_pages_all_returned_content_without_retrieving_again(monkeypatch):
+    content = "长片段" * 6000 + "最后一条证据"
+    calls = []
+
+    async def retrieve(self, **kwargs):
+        calls.append(kwargs)
+        return DifyKnowledgeRetrieveResponse.model_validate(
+            {
+                "results": [
+                    {"metadata": {"dataset_id": "dataset-1", "document_id": "doc-1"}, "content": content},
+                    {"metadata": {"document_id": "doc-2"}, "content": "第二篇文档尾部"},
+                ],
+            }
+        )
+
+    monkeypatch.setattr(DifyKnowledgeBaseClient, "retrieve", retrieve)
+
+    async def scenario():
+        compositor = Compositor(
+            [
+                LayerNode("execution_context", _execution_context_provider()),
+                LayerNode("knowledge", _knowledge_provider(), deps={"execution_context": "execution_context"}),
+            ]
+        )
+        async with (
+            httpx.AsyncClient() as client,
+            compositor.enter(
+                configs={
+                    "execution_context": _execution_context_config(),
+                    "knowledge": _knowledge_config(workbench_run_id="run-1"),
+                }
+            ) as run,
+        ):
+            layer = run.get_layer("knowledge", DifyKnowledgeBaseLayer)
+            tools = {tool.name: tool for tool in await layer.get_tools(http_client=client)}
+            first = json.loads(
+                await tools["knowledge_base_search"].function_schema.call(
+                    {"set_name": "Support KB", "query": "证据"},
+                    None,
+                )
+            )
+            assert not first["complete"]
+            joined = first["content"]
+            page = first
+            while page["next_offset"] is not None:
+                page = json.loads(
+                    await tools["knowledge_base_read_results"].function_schema.call(
+                        {"search_id": first["search_id"], "offset": page["next_offset"]},
+                        None,
+                    )
+                )
+                joined += page["content"]
+            assert content in joined and "第二篇文档尾部" in joined and "doc-1" in joined
+            assert len(joined) == page["total_chars"] and len(calls) == 1
+            assert "Invalid offset" in layer._read_search_results(first["search_id"], -1)
+            await layer.on_context_resume()
+            assert json.loads(layer._read_search_results(first["search_id"])) == first
+            layer.config.workbench_run_id = "run-2"
+            await layer.on_context_resume()
+            assert "expired" in layer._read_search_results(first["search_id"])
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("status,retryable", [(400, False), (403, False), (500, False), (502, True)])
+def test_workbench_errors_release_required_search_without_claiming_empty(monkeypatch, status, retryable):
+    async def retrieve(self, **kwargs):
+        raise DifyKnowledgeBaseClientError(
+            "private provider credential", status_code=status, error_code="provider_failed", retryable=retryable
+        )
+
+    monkeypatch.setattr(DifyKnowledgeBaseClient, "retrieve", retrieve)
+
+    async def scenario():
+        compositor = Compositor(
+            [
+                LayerNode("execution_context", _execution_context_provider()),
+                LayerNode("knowledge", _knowledge_provider(), deps={"execution_context": "execution_context"}),
+            ]
+        )
+        async with (
+            httpx.AsyncClient() as client,
+            compositor.enter(
+                configs={
+                    "execution_context": _execution_context_config(),
+                    "knowledge": _knowledge_config(workbench_run_id="run-1"),
+                }
+            ) as run,
+        ):
+            layer = run.get_layer("knowledge", DifyKnowledgeBaseLayer)
+            tool = (await layer.get_tools(http_client=client))[0]
+            result = await tool.function_schema.call({"set_name": "Support KB", "query": "资料"}, None)
+            assert "failure" in result or "failed" in result
+            assert NO_RESULTS_OBSERVATION not in result and "private provider credential" not in result
+            assert layer.missing_searches == [] and layer.runtime_state.searched_set_ids == []
+
+    asyncio.run(scenario())
+
+
+def test_workbench_document_tools_bind_dataset_and_identity_to_selected_set():
+    requests = []
+
+    def handler(request):
+        assert request.url.path == "/inner/api/knowledge/documents"
+        assert request.headers["X-Inner-Api-Key"] == "inner-secret"
+        payload = json.loads(request.content)
+        requests.append(payload)
+        return httpx.Response(
+            200,
+            json={
+                "operation": payload["operation"],
+                "dataset_id": payload["dataset_id"],
+                "total": 0,
+                "complete": True,
+                "scope": "indexed content",
+            },
+        )
+
+    async def scenario():
+        compositor = Compositor(
+            [
+                LayerNode("execution_context", _execution_context_provider()),
+                LayerNode("knowledge", _knowledge_provider(), deps={"execution_context": "execution_context"}),
+            ]
+        )
+        async with (
+            httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client,
+            compositor.enter(
+                configs={
+                    "execution_context": _execution_context_config(),
+                    "knowledge": _knowledge_config(workbench_run_id="run-1"),
+                }
+            ) as run,
+        ):
+            layer = run.get_layer("knowledge", DifyKnowledgeBaseLayer)
+            tools = {tool.name: tool for tool in await layer.get_tools(http_client=client)}
+            await tools["knowledge_base_list_documents"].function_schema.call({"set_name": "Support KB"}, None)
+            await tools["knowledge_base_read_document"].function_schema.call(
+                {"set_name": "Support KB", "document_id": "doc-1", "cursor": "next-page"},
+                None,
+            )
+            result = await tools["knowledge_base_list_documents"].function_schema.call({"set_name": "unknown"}, None)
+            assert "unknown" in result and len(requests) == 2
+            assert layer.missing_searches == []
+        assert requests[1]["cursor"] == "next-page" and requests[1]["document_id"] == "doc-1"
+        assert all(item["dataset_id"] == "dataset-1" and item["workbench_run_id"] == "run-1" for item in requests)
+        assert requests[0]["caller"]["user_id"] == "user-1"
+        assert requests[0]["caller"]["tenant_id"] == "tenant-1"
 
     asyncio.run(scenario())
 

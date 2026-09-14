@@ -156,5 +156,6 @@ class InnerKnowledgeRetrievalService:
             ),
             weights=request.retrieval.weights,
             reranking_enable=request.retrieval.reranking_enable,
+            skip_failed_datasets=request.workbench_run_id is None,
             attachment_ids=request.attachment_ids or None,
         )
