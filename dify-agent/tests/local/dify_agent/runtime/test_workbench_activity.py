@@ -5,7 +5,8 @@ import json
 
 import httpx
 import pytest
-from pydantic_ai import Tool
+from pydantic_ai import ModelRetry, Tool
+from pydantic_ai.messages import RetryPromptPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from dify_agent.layers.dify_plugin.configs import DifyPluginToolConfig, DifyPluginToolsLayerConfig
@@ -441,6 +442,44 @@ def test_invalid_report_does_not_abort_or_repeat_business_tools(monkeypatch):
     assert calls == 1 and requests == 2
     assert _progress(events, "activity") == []
     assert len([item for item in _progress(events, "tool") if item.stage == "started"]) == 1
+
+
+@pytest.mark.parametrize("failure_phase", ["validation", "execution"])
+def test_retries_only_record_tools_that_reached_execution(monkeypatch, failure_phase):
+    requests = 0
+    executed = []
+
+    async def work(attempt: int):
+        executed.append(attempt)
+        if attempt == 1:
+            raise ModelRetry("Retry after the failed execution")
+        return "done"
+
+    async def stream(messages, info):
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            args = {"attempt": "invalid" if failure_phase == "validation" else 1}
+            yield {0: _call("work", args, "work")}
+        elif requests == 2:
+            assert any(isinstance(part, RetryPromptPart) for message in messages for part in message.parts)
+            yield {0: _call("work", {"attempt": 2}, "work")}
+        else:
+            yield "done"
+
+    _, _, execute = _setup(monkeypatch, stream, [Tool(work)])
+    events = asyncio.run(execute())
+    expected_attempts = [2] if failure_phase == "validation" else [1, 2]
+    expected_stages = (
+        ["started", "returned"] if failure_phase == "validation" else ["started", "error", "started", "returned"]
+    )
+    assert executed == expected_attempts
+    tools = _progress(events, "tool")
+    assert [item.stage for item in tools] == expected_stages
+    assert [item.input for item in tools if item.stage == "started"] == [
+        {"attempt": attempt} for attempt in expected_attempts
+    ]
+    assert len(_state(events).calls) == len(expected_attempts)
 
 
 def test_reporting_only_loop_is_bounded_and_does_not_create_tool_rows(monkeypatch):

@@ -288,6 +288,10 @@ class WorkbenchActivityLayer(PydanticAILayer[NoLayerDeps, object, WorkbenchActiv
             ]
             if len(candidates) == 1:
                 binding = candidates[0]
+            elif failed:
+                # Validation retries never reached an execution hook. Actual
+                # execution errors and deferred results already have a binding.
+                return
             else:
                 part = self._call_parts.get(raw_id, ToolCallPart(tool_name, {}, tool_call_id=raw_id))
                 try:

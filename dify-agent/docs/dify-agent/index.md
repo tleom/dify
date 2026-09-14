@@ -74,9 +74,11 @@ composition supplies the trusted logical `workbench_run_id`. Its sequential
 update the stage, and close an activity after results return. The runtime assigns
 activity IDs and revisions, binds each business call at execution start, and
 restores the same identity when human input or environment installation resumes
-in a different native run. Parallel business calls remain parallel. Reports do
-not appear as business tool rows; malformed or repeated reports become no-ops
-without using the task's retry budget. Four reports without business work hide
+in a different native run. Parallel business calls remain parallel. Tool retries
+become error records only when an execution binding exists; argument-validation
+failures do not start tool work, while actual execution failures remain visible.
+Reports do not appear as business tool rows; malformed or repeated reports become
+no-ops without using the task's retry budget. Four reports without business work hide
 the report tool until work resumes. Reporting still uses the normal model token
 and request budget; no separate summarization model is invoked.
 
