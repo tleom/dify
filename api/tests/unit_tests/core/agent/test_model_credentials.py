@@ -3,6 +3,7 @@
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from core.agent.model_credentials import validate_model_credential_selection
@@ -11,10 +12,12 @@ from models.account import Account
 from models.agent import (
     Agent,
     AgentConfigDraftType,
+    AgentConfigRevision,
     AgentConfigRevisionOperation,
     AgentConfigSnapshot,
     AgentScope,
     AgentSource,
+    WorkflowAgentNodeBinding,
 )
 from models.agent_config_entities import AgentSoulConfig, AgentSoulModelConfig, AgentSoulModelCredentialRef
 from models.credential_permission import CredentialPermission, CredentialType
@@ -250,6 +253,60 @@ def test_snapshot_trust_requires_the_target_agent_owner_chain(
                 home_snapshot_id=None,
                 previous_snapshot_id=previous.id,
             )
+
+
+@pytest.mark.parametrize("change_model", [False, True])
+def test_workflow_new_version_preserves_only_the_current_snapshots_credential(
+    selection: tuple[Session, str, str, AgentSoulModelConfig], change_model: bool
+) -> None:
+    session, tenant_id, account_id, model = selection
+    agent = Agent(
+        tenant_id=tenant_id,
+        name="workflow agent",
+        created_by=account_id,
+        updated_by=account_id,
+        scope=AgentScope.WORKFLOW_ONLY,
+        source=AgentSource.WORKFLOW,
+    )
+    session.add(agent)
+    session.flush()
+    soul = AgentSoulConfig(model=model)
+    previous = AgentConfigSnapshot(
+        tenant_id=tenant_id, agent_id=agent.id, version=1, config_snapshot=soul, created_by=account_id
+    )
+    session.add(previous)
+    session.flush()
+    agent.active_config_snapshot_id = previous.id
+    binding = WorkflowAgentNodeBinding(agent_id=agent.id, current_snapshot_id=previous.id)
+    updated = soul.model_copy(deep=True)
+    assert updated.model is not None
+    updated.model.model_settings.temperature = 0.2
+    if change_model:
+        updated.model.model = "another-model"
+    payload = ComposerSavePayload(
+        variant=ComposerVariant.WORKFLOW,
+        save_strategy=ComposerSaveStrategy.SAVE_AS_NEW_VERSION,
+        agent_soul=updated,
+    )
+    if change_model:
+        with pytest.raises(InvalidComposerConfigError, match="not authorized"):
+            AgentComposerService._save_as_new_version(
+                session=session, tenant_id=tenant_id, account_id=account_id, binding=binding, payload=payload
+            )
+        return
+    AgentComposerService._save_as_new_version(
+        session=session, tenant_id=tenant_id, account_id=account_id, binding=binding, payload=payload
+    )
+    saved = session.get(AgentConfigSnapshot, binding.current_snapshot_id)
+    assert saved is not None
+    assert saved.id != previous.id
+    assert saved.config_snapshot.model is not None
+    assert saved.config_snapshot.model.credential_ref == model.credential_ref
+    assert saved.config_snapshot.model.model_settings.temperature == 0.2
+    assert agent.active_config_snapshot_id == saved.id
+    revision = session.scalar(select(AgentConfigRevision).where(AgentConfigRevision.current_snapshot_id == saved.id))
+    assert revision is not None
+    assert revision.previous_snapshot_id == previous.id
 
 
 @pytest.mark.parametrize(

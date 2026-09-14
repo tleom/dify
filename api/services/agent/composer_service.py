@@ -1543,6 +1543,7 @@ class AgentComposerService:
             agent_soul=payload.agent_soul,
             operation=AgentConfigRevisionOperation.SAVE_NEW_VERSION,
             version_note=payload.version_note,
+            previous_snapshot_id=current_snapshot.id,
             home_snapshot_id=current_snapshot.home_snapshot_id,
         )
         agent = cls._require_agent(session=session, tenant_id=tenant_id, agent_id=binding.agent_id)
