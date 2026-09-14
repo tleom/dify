@@ -287,7 +287,10 @@ def test_workbench_search_pages_all_returned_content_without_retrieving_again(mo
 
 @pytest.mark.parametrize("status,retryable", [(400, False), (403, False), (500, False), (502, True)])
 def test_workbench_errors_release_required_search_without_claiming_empty(monkeypatch, status, retryable):
+    search_ids = []
+
     async def retrieve(self, **kwargs):
+        search_ids.append(kwargs["workbench_search_id"])
         raise DifyKnowledgeBaseClientError(
             "private provider credential", status_code=status, error_code="provider_failed", retryable=retryable
         )
@@ -314,6 +317,8 @@ def test_workbench_errors_release_required_search_without_claiming_empty(monkeyp
             tool = (await layer.get_tools(http_client=client))[0]
             result = await tool.function_schema.call({"set_name": "Support KB", "query": "资料"}, None)
             assert "failure" in result or "failed" in result
+            failed_search = json.loads(result)
+            assert failed_search["status"] == "error" and failed_search["search_id"] == search_ids[0]
             assert NO_RESULTS_OBSERVATION not in result and "private provider credential" not in result
             assert layer.missing_searches == [] and layer.runtime_state.searched_set_ids == []
 

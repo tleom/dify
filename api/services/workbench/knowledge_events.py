@@ -56,13 +56,19 @@ def retrieval_event(request, status: str, *, results=None):
         }
         if status == "error":
             event["message"] = "知识库检索失败，请检查知识库的检索配置后重试。"
-        events = payload.get("knowledge_events", [])
-        payload["knowledge_events"] = [e for e in events if e["id"] != event["id"]] + [event]
-        run.payload = json.dumps(payload)
         journal = uses_journal(run, payload)
         if journal:
             event["source_event_id"] = event["id"] + ":" + status
             event["backend_run_id"] = run.backend_run_id
+        events = payload.get("knowledge_events", [])
+        payload["knowledge_events"] = [e for e in events if e["id"] != event["id"]] + [event]
+        run.payload = json.dumps(payload)
+        if journal:
+            if request.workbench_search_id:
+                # The matching tool return is consumed after its tool start.
+                # Keep its full result here until that ordered consumer journals
+                # it, even when this inner API outruns the Agent event reader.
+                return
             event = append_locked(session, run, event)
     if journal:
         notify(request.workbench_run_id, event)

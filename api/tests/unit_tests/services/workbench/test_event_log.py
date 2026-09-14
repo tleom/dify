@@ -1,7 +1,7 @@
 """SQLite exercises persisted event order/ownership, with Redis failure isolated at the wake-up boundary."""
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from uuid import UUID, uuid4
 
 import pytest
@@ -184,6 +184,73 @@ def test_history_dto_excludes_previous_attempt_endings(journal: Journal, pause_s
         )
     if status == "completed":
         assert list(event_log.stream_events(tenant, account, run_id))[:-1] == dto["events"]
+
+
+@pytest.mark.parametrize("retrieval_status", ["returned", "error"])
+@pytest.mark.parametrize("consumer_event", ["tool", "end"])
+def test_knowledge_callback_cannot_overtake_queued_tool_start(
+    journal: Journal, config_overrides: Callable[..., None], retrieval_status: str, consumer_event: str
+) -> None:
+    from services.entities.knowledge_retrieval_inner import InnerKnowledgeRetrieveRequest
+    from services.workbench.knowledge_events import retrieval_event
+
+    config_overrides(WORKBENCH_ENABLED=True)
+    factory, tenant, account, run_id, chat_id = journal
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        chat = session.get(WorkbenchChat, chat_id)
+        assert run is not None
+        assert chat is not None
+        ticket, app_id = run.backend_run_id, chat.app_id
+        payload = json.loads(run.payload)
+        payload["effective_soul"] = {"knowledge": {"sets": [{
+            "id": "kb", "name": "知识库", "datasets": [{"id": "dataset"}],
+            "query": {"mode": "generated_query"},
+        }]}}
+        run.payload = json.dumps(payload)
+    request = InnerKnowledgeRetrieveRequest.model_validate({
+        "workbench_run_id": run_id, "workbench_search_id": "search",
+        "caller": {"tenant_id": tenant, "user_id": account, "app_id": app_id,
+                   "user_from": "account", "invoke_from": "explore"},
+        "dataset_ids": ["dataset"], "query": "同一个问题", "retrieval": {"mode": "multiple", "top_k": 1},
+    })
+    hits: list[dict[str, str]] = [{"content": "完整片段" * 1000}] if retrieval_status == "returned" else []
+    # The HTTP callback finishes before the worker consumes the Agent's start.
+    retrieval_event(request, "running")
+    retrieval_event(request, retrieval_status, results=hits)
+    assert event_log.read_page(tenant, account, run_id)[0] == []
+    for stage in ("started", "returned"):
+        if stage == "returned" and consumer_event == "end":
+            # A native failure can omit the return; the ordered consumer still
+            # preserves the completed retrieval before closing this attempt.
+            event_log.append_event(run_id, {"event": "workbench_end", "status": "failed"})
+            break
+        item = {
+            "event": "workbench_activity", "backend_run_id": ticket, "source_event_id": stage,
+            "data": {"kind": "tool", "tool_name": "knowledge_base_search", "stage": stage,
+                     "output": json.dumps({"search_id": "search", "status": retrieval_status})},
+        }
+        event_log.append_event(run_id, item, expected_backend_run_id=ticket)
+        if stage == "returned":
+            event_log.append_event(run_id, item, expected_backend_run_id=ticket)
+    saved = event_log.read_page(tenant, account, run_id)[0]
+    assert [item["event"] for item in saved] == [
+        "workbench_activity", "workbench_knowledge",
+        "workbench_activity" if consumer_event == "tool" else "workbench_end",
+    ]
+    assert saved[0]["data"]["stage"] == "started"
+    assert saved[1]["results"] == hits
+    assert saved[1]["status"] == retrieval_status
+    if consumer_event == "tool":
+        assert saved[2]["data"]["stage"] == "returned"
+    assert [item["_sequence"] for item in saved] == [1, 2, 3]
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        run.status = "completed"
+        history = saved if consumer_event == "tool" else saved[:-1]
+        assert event_log.history_events(run) == history
+    assert list(event_log.stream_events(tenant, account, run_id))[:-1] == history
 
 
 def test_notification_failure_does_not_lose_committed_event(journal: Journal, monkeypatch: pytest.MonkeyPatch) -> None:

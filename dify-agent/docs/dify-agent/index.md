@@ -25,7 +25,9 @@ Access failures are explicit observations; they neither count as successful
 searches nor force repeated calls. Retrieval failures within a dataset propagate
 to this boundary instead of silently becoming empty or partial search results.
 
-Workbench search observations are paginated JSON. `knowledge_base_read_results`
+Workbench search observations are paginated JSON. Search failures return JSON
+with `status=error`, the attempted `search_id`, and a public `message`, so the API
+can order the retrieval record with its tool return. `knowledge_base_read_results`
 continues the same result using `search_id` and `next_offset`; the current run
 retains its latest five results across suspension. `knowledge_base_list_documents`
 and `knowledge_base_read_document` use the authenticated inner document API to

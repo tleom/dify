@@ -89,6 +89,35 @@ def notify(run_id, item):
         logger.warning("Workbench event notification delayed for run %s", run_id, exc_info=True)
 
 
+def _append_tool_knowledge(session, run, item):
+    terminal = item.get("event") == "workbench_end"
+    data = item.get("data")
+    if not terminal and (
+        item.get("event") != "workbench_activity"
+        or not isinstance(data, dict)
+        or data.get("tool_name") != "knowledge_base_search"
+        or data.get("stage") not in ("returned", "error")
+    ):
+        return
+    output = data.get("output") if isinstance(data, dict) else None
+    if isinstance(output, str):
+        try:
+            output = json.loads(output)
+        except ValueError:
+            return
+    if not terminal and (not isinstance(output, dict) or not output.get("search_id")):
+        return
+    search_id = output.get("search_id") if isinstance(output, dict) else None
+    backend_run_id = run.backend_run_id if terminal else item.get("backend_run_id")
+    for knowledge in json.loads(run.payload).get("knowledge_events", []):
+        if (
+            (terminal or knowledge.get("search_id") == search_id)
+            and knowledge.get("status") in ("returned", "error")
+            and knowledge.get("backend_run_id") == backend_run_id
+        ):
+            append_locked(session, run, knowledge)
+
+
 def append_event(run_id, item, *, expected_backend_run_id=None):
     with session_factory.get_session_maker().begin() as session:
         run = session.scalar(select(WorkbenchRun).where(WorkbenchRun.id == run_id).with_for_update())
@@ -105,6 +134,7 @@ def append_event(run_id, item, *, expected_backend_run_id=None):
                 "workbench_context",
             ):
                 return None
+            _append_tool_knowledge(session, run, item)
             item = append_locked(session, run, item)
     if journal:
         notify(run_id, item)
