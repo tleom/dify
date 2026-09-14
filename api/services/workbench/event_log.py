@@ -123,13 +123,16 @@ def history_events(run):
 
 
 def _history(session, run_id):
+    # Attempt endings belong to stream control. The DTO's current run status
+    # describes history, including a task that has resumed after a pause.
     return [
-        json.loads(value)
+        item
         for value in session.scalars(
             select(WorkbenchRunEvent.payload)
             .where(WorkbenchRunEvent.run_id == run_id)
             .order_by(WorkbenchRunEvent.sequence)
         )
+        if (item := json.loads(value)).get("event") != "workbench_end"
     ]
 
 

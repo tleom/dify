@@ -26,6 +26,7 @@ from dify_agent.layers.user_prompt import (
     DifyUserPromptFileType,
     DifyUserPromptImageConfig,
 )
+from dify_agent.layers.workbench_mentions import RequiredToolGroup
 from dify_agent.protocol import CreateRunRequest, DeferredToolResultsPayload
 
 from clients.agent_backend import (
@@ -156,7 +157,7 @@ class AgentAppRuntimeRequestBuilder:
             runtime_config_skills=runtime_config_skills,
         )
         config_layer_config.reset_materialized_assets = bool(workbench_run_id)
-        mention_groups = []
+        mention_groups: list[RequiredToolGroup] = []
         if workbench_run_id:
             if context.workbench_runtime is None:
                 raise AgentAppRuntimeRequestBuildError(

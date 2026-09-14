@@ -82,8 +82,10 @@ def resolve_referenced_agent_model(
 
 
 def _resolve_credentials(configuration, tenant_id, user_id, model, reference) -> dict[str, Any]:
-    record_type = ProviderCredential if reference.type == "provider" else ProviderModelCredential
-    statement = select(record_type).where(
+    record_type: type[ProviderCredential] | type[ProviderModelCredential] = (
+        ProviderCredential if reference.type == "provider" else ProviderModelCredential
+    )
+    statement = select(record_type.encrypted_config).where(
         record_type.id == reference.id,
         record_type.tenant_id == tenant_id,
         record_type.provider_name.in_(configuration._get_provider_names()),
@@ -109,10 +111,9 @@ def _resolve_credentials(configuration, tenant_id, user_id, model, reference) ->
                     credential_type=CredentialType.PROVIDER_CREDENTIAL,
                     user=account,
                 )
-        record = session.scalar(statement)
-        if record is None or not record.encrypted_config:
+        encrypted = session.scalar(statement)
+        if not encrypted:
             raise ValueError("Referenced model credential is unavailable or not authorized")
-        encrypted = record.encrypted_config
     runtime_check_credential_policy_compliance(
         credential_id=reference.id,
         provider=configuration.provider.provider,

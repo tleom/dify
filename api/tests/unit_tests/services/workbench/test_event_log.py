@@ -161,6 +161,31 @@ def test_terminal_stream_drains_all_pages_and_ignores_old_attempt_end(journal: J
     assert terminal["status"] == "completed"
 
 
+@pytest.mark.parametrize("pause_status", ["waiting_input", "environment_update"])
+@pytest.mark.parametrize("status", ["queued", "running", "completed"])
+def test_history_dto_excludes_previous_attempt_endings(journal: Journal, pause_status: str, status: str) -> None:
+    from services.workbench.service import run_dto
+
+    factory, tenant, account, run_id, _ = journal
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        event_log.append_locked(session, run, {"event": "agent_message", "answer": "暂停前"})
+        event_log.append_locked(session, run, {"event": "workbench_end", "status": pause_status})
+        if status != "queued":
+            event_log.append_locked(session, run, {"event": "agent_message", "answer": "继续执行"})
+        if status == "completed":
+            event_log.append_locked(session, run, {"event": "workbench_end", "status": status})
+        run.status = status
+        dto = run_dto(run)
+        assert dto["status"] == status
+        assert [item["answer"] for item in dto["events"]] == (
+            ["暂停前"] if status == "queued" else ["暂停前", "继续执行"]
+        )
+    if status == "completed":
+        assert list(event_log.stream_events(tenant, account, run_id))[:-1] == dto["events"]
+
+
 def test_notification_failure_does_not_lose_committed_event(journal: Journal, monkeypatch: pytest.MonkeyPatch) -> None:
     _, tenant, account, run_id, _ = journal
     from unittest.mock import Mock

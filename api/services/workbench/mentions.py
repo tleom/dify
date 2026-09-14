@@ -93,7 +93,7 @@ def required_tool_groups(soul, mentions: ResourceMentions, tool_layers):
     resources = template_resources(soul)
     if not set(mentions.tools) <= resources["tools"].keys() or not set(mentions.skills) <= resources["skills"].keys():
         raise ValueError("本轮点名资源已失效")
-    groups = {}
+    groups: dict[tuple[str, str], RequiredToolGroup] = {}
     exposed = set(tool_layers.exposed_tool_names())
     for key in mentions.tools:
         item = resources["tools"][key]
