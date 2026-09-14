@@ -16,6 +16,7 @@ from typing import ClassVar, cast
 import httpx
 from pydantic import JsonValue
 from pydantic_ai import RunContext, Tool
+from pydantic_ai.messages import ToolReturn
 from pydantic_ai.tools import ToolDefinition
 from typing_extensions import Self, override
 
@@ -105,7 +106,7 @@ class DifyCoreToolsLayer(PlainLayer[DifyCoreToolsDeps, DifyCoreToolsLayerConfig]
         tool_description = tool_config.description or tool_name
         tool_schema = deepcopy(tool_config.parameters_json_schema)
 
-        async def invoke_tool(_ctx: RunContext[object], **tool_arguments: object) -> str:
+        async def invoke_tool(_ctx: RunContext[object], **tool_arguments: object) -> str | ToolReturn:
             try:
                 response = await client.invoke(
                     execution_context=execution_context,
@@ -114,9 +115,14 @@ class DifyCoreToolsLayer(PlainLayer[DifyCoreToolsDeps, DifyCoreToolsLayerConfig]
                 )
                 return response.observation
             except DifyCoreToolsClientConfigurationError:
-                return "Tool is unavailable because required execution context is missing."
+                return ToolReturn(
+                    return_value="Tool is unavailable because required execution context is missing.",
+                    metadata={"is_error": True},
+                )
             except DifyCoreToolsClientError as exc:
-                return _tool_error_text(tool_name=tool_name, error=exc)
+                return ToolReturn(
+                    return_value=_tool_error_text(tool_name=tool_name, error=exc), metadata={"is_error": True}
+                )
 
         async def prepare_tool_definition(_ctx: RunContext[object], tool_def: ToolDefinition) -> ToolDefinition:
             return ToolDefinition(

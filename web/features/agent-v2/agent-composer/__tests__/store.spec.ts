@@ -619,6 +619,36 @@ describe('agent composer store conversions', () => {
     })
   })
 
+  it.each([
+    { provider: 'langgenius/openai/openai', model: 'gpt-4.1', keepCredential: true },
+    { provider: 'langgenius/openai/openai', model: 'gpt-4.1-mini', keepCredential: false },
+    { provider: 'other/openai/openai', model: 'gpt-4.1', keepCredential: false },
+    { provider: 'langgenius/anthropic/anthropic', model: 'claude-sonnet-4', keepCredential: false },
+  ])(
+    'keeps a saved model credential only for the unchanged model: $provider/$model',
+    ({ provider, model, keepCredential }) => {
+      const baseConfig = {
+        model: {
+          model: 'gpt-4.1',
+          model_provider: 'langgenius/openai/openai',
+          plugin_id: 'langgenius/openai',
+          credential_ref: { type: 'provider', id: 'saved-credential' },
+        },
+      } satisfies AgentSoulConfig
+      const saved = formStateToAgentSoulConfig({
+        baseConfig,
+        formState: agentSoulConfigToFormState(baseConfig),
+        currentModel: { provider, model, model_settings: { temperature: 0.2 } },
+      })
+      expect(saved.model?.model_provider).toBe(provider)
+      expect(saved.model?.model).toBe(model)
+      expect(saved.model?.credential_ref).toEqual(
+        keepCredential ? baseConfig.model.credential_ref : undefined,
+      )
+      expect(saved.model?.model_settings).toEqual({ temperature: 0.2 })
+    },
+  )
+
   it('should not hydrate a knowledge retrieval row when the config has no sets', () => {
     const formState = agentSoulConfigToFormState({
       knowledge: {

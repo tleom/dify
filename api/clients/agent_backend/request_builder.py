@@ -28,6 +28,7 @@ from dify_agent.layers.dify_plugin import (
     DifyPluginLLMLayerConfig,
     DifyPluginToolsLayerConfig,
 )
+from dify_agent.layers.dify_plugin.configs import DifyModelCredentialRef
 from dify_agent.layers.execution_context import (
     DIFY_EXECUTION_CONTEXT_LAYER_TYPE_ID,
     DifyExecutionContextLayerConfig,
@@ -138,6 +139,7 @@ class AgentBackendModelConfig(BaseModel):
     plugin_id: str
     model_provider: str
     model: str
+    credential_ref: DifyModelCredentialRef | None = None
     model_settings: dict[str, JsonValue] = Field(default_factory=dict)
     context_window_tokens: int | None = Field(default=None, gt=0)
 
@@ -382,6 +384,7 @@ class AgentBackendRunRequestBuilder:
                     model_provider=run_input.model.model_provider,
                     model=run_input.model.model,
                     model_settings=_agent_model_settings(run_input.model.model_settings),
+                    credential_ref=run_input.model.credential_ref,
                     context_window_tokens=run_input.model.context_window_tokens,
                 ),
             )
@@ -559,6 +562,7 @@ class AgentBackendRunRequestBuilder:
                         model_provider=run_input.model.model_provider,
                         model=run_input.model.model,
                         model_settings=_agent_model_settings(run_input.model.model_settings),
+                        credential_ref=run_input.model.credential_ref,
                         context_window_tokens=run_input.model.context_window_tokens,
                     ),
                 ),

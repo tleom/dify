@@ -58,7 +58,51 @@ def resolve_mentions(soul, value, *, provider_names=None, skill_names=None) -> R
             tokens.append({"kind": kind, "resource": token})
     prompt = ""
     if tokens:
-        prompt = "\n本轮明确指定使用以下资源，请调用这些资源处理请求；缺少必要参数时先询问：\n" + json.dumps(
+        prompt = ("\n本轮明确指定使用以下资源；每个点名工具组至少调用一个适用工具，"
+                  "点名 Skills 须读取并遵循；缺少必要参数时先询问：\n") + json.dumps(
             tokens, ensure_ascii=False
         )
     return {"resource_mentions": refs, "mentioned_resources": badges, "mention_prompt": prompt}
+
+
+def load_run_mentions(run_id: str, tenant_id: str, account_id: str | None) -> ResourceMentions:
+    """Read this turn's frozen, owner-scoped mentions, including continuations."""
+    from sqlalchemy import select
+    from werkzeug.exceptions import Forbidden
+
+    from core.db.session_factory import session_factory
+    from models.workbench import WorkbenchRun
+
+    with session_factory.create_session() as session:
+        run = session.scalar(select(WorkbenchRun).where(
+            WorkbenchRun.id == run_id, WorkbenchRun.tenant_id == tenant_id,
+            WorkbenchRun.account_id == account_id, WorkbenchRun.status == "running",
+        ))
+        if run is None:
+            raise Forbidden()
+        return ResourceMentions.model_validate(json.loads(run.payload).get("resource_mentions") or {})
+
+
+def required_tool_groups(soul, mentions: ResourceMentions, tool_layers):
+    """Resolve each selected plugin/group to its actual exposed runtime tools."""
+    from dify_agent.layers.workbench_mentions import RequiredToolGroup
+
+    from core.workflow.nodes.agent_v2.dify_tools_builder import WorkflowAgentDifyToolsBuilder
+    from models.agent_config_entities import AgentSoulDifyToolConfig
+
+    resources = template_resources(soul)
+    if not set(mentions.tools) <= resources["tools"].keys() or not set(mentions.skills) <= resources["skills"].keys():
+        raise ValueError("本轮点名资源已失效")
+    groups: dict[tuple[str, str], RequiredToolGroup] = {}
+    exposed = set(tool_layers.exposed_tool_names())
+    for key in mentions.tools:
+        item = resources["tools"][key]
+        tool = AgentSoulDifyToolConfig.model_validate(item)
+        provider_key = WorkflowAgentDifyToolsBuilder._provider_key(tool)
+        group_key = (tool.provider_type, tool.plugin_id or provider_key[1])
+        names = ([tool.tool_name] if tool.tool_name else tool_layers.provider_tool_names.get(provider_key, []))
+        if not names or not set(names) <= exposed:
+            raise ValueError("点名工具未成功载入本轮运行")
+        group = groups.setdefault(group_key, RequiredToolGroup(name=tool.provider or provider_key[1], tool_names=[]))
+        group.tool_names = list(dict.fromkeys([*group.tool_names, *names]))
+    return list(groups.values())

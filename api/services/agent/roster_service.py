@@ -341,6 +341,9 @@ class AgentRosterService:
         source: AgentSource,
     ) -> Agent:
         ComposerConfigValidator.validate_agent_soul(payload.agent_soul)
+        ComposerConfigValidator.validate_model_credential(
+            session=self._session, tenant_id=tenant_id, account_id=account_id, agent_soul=payload.agent_soul
+        )
 
         agent = Agent(
             tenant_id=tenant_id,
@@ -414,6 +417,9 @@ class AgentRosterService:
         retaining the same one-App-to-one-Agent transaction boundary.
         """
         soul = initial_soul or AgentSoulConfig()
+        ComposerConfigValidator.validate_model_credential(
+            session=self._session, tenant_id=tenant_id, account_id=account_id, agent_soul=soul
+        )
         agent = Agent(
             tenant_id=tenant_id,
             name=name,
@@ -1200,7 +1206,11 @@ class AgentRosterService:
             version_id=target_agent.active_config_snapshot_id,
         )
 
-        target_version.config_snapshot = AgentSoulConfig.model_validate(source_version.config_snapshot_dict)
+        soul = AgentSoulConfig.model_validate(source_version.config_snapshot_dict)
+        ComposerConfigValidator.validate_model_credential(
+            session=self._session, tenant_id=tenant_id, account_id=account_id, agent_soul=soul
+        )
+        target_version.config_snapshot = soul
         target_version.summary = source_version.summary
         target_version.version_note = source_version.version_note
         target_version.created_by = account_id

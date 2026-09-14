@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 from pydantic_ai import RunContext, Tool
+from pydantic_ai.messages import ToolReturn
 from pydantic_ai.tools import ToolDefinition
 from typing_extensions import Self, override
 
@@ -259,7 +260,7 @@ def _build_pydantic_ai_tool(
     tool_description = tool_config.description or tool_name
     tool_schema = deepcopy(tool_config.parameters_json_schema)
 
-    async def invoke_tool(_ctx: RunContext[object], **tool_arguments: object) -> str:
+    async def invoke_tool(_ctx: RunContext[object], **tool_arguments: object) -> str | ToolReturn:
         try:
             merged_arguments = await _prepare_tool_arguments(
                 effective_parameters,
@@ -276,9 +277,14 @@ def _build_pydantic_ai_tool(
             )
             return _convert_tool_response_to_text(messages)
         except DifyPluginToolClientError as exc:
-            return _tool_error_text(tool_name=tool_name, error=exc)
+            return ToolReturn(
+                return_value=_tool_error_text(tool_name=tool_name, error=exc), metadata={"is_error": True}
+            )
         except ValueError as exc:
-            return f"tool parameters validation error: {exc}, please check your tool parameters"
+            return ToolReturn(
+                return_value=f"tool parameters validation error: {exc}, please check your tool parameters",
+                metadata={"is_error": True},
+            )
 
     async def prepare_tool_definition(_ctx: RunContext[object], tool_def: ToolDefinition) -> ToolDefinition:
         return ToolDefinition(

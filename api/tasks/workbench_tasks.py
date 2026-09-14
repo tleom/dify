@@ -25,15 +25,14 @@ from models.workbench import WorkbenchChat, WorkbenchRun
 from services.app_task_service import AppTaskService
 from services.workbench import maintenance, scheduler
 from services.workbench import runtime as workbench_runtime
+from services.workbench.event_log import append_event, append_locked, notify, uses_journal
 from services.workbench.service import authorize
 
 logger = logging.getLogger(__name__)
 
 
 def event(run_id, payload):
-    identifier = redis_client.xadd(scheduler.event_key(run_id), {"data": json.dumps(payload)})
-    redis_client.expire(scheduler.event_key(run_id), 7 * 86400)
-    return identifier
+    return append_event(run_id, payload, expected_backend_run_id=payload.get("backend_run_id"))
 
 
 def stop_native(run_id, account_id):
@@ -123,8 +122,9 @@ def reconcile():
             else []
         )
     for run_id in dict.fromkeys([*expired, *terminal]):
+        end_event = None
         with session_factory.get_session_maker().begin() as session:
-            run = session.get(WorkbenchRun, run_id)
+            run = session.scalar(select(WorkbenchRun).where(WorkbenchRun.id == run_id).with_for_update())
             if run is None:
                 continue
             owner = f"{run.tenant_id}:{run.account_id}"
@@ -132,7 +132,13 @@ def reconcile():
             if run.status in ("running", "queued"):
                 run.status = "interrupted"
                 run.error = "执行进程失联，任务不会自动重做。请核对外部操作结果。"
+                if uses_journal(run):
+                    end_event = append_locked(
+                        session, run, {"event": "workbench_end", "status": run.status, "error": run.error}
+                    )
             account_id = run.account_id
+        if end_event is not None:
+            notify(run_id, end_event)
         stop_native(run_id, account_id)
         try:
             if fence_remote(ticket):
@@ -178,6 +184,7 @@ def execute(owner, run_id):
     claimed = False
     completed_stream = False
     events = []
+    journal = False
     status, error = "completed", None
     app = cast(LocalProxy[Flask], current_app)._get_current_object()
     try:
@@ -207,6 +214,7 @@ def execute(owner, run_id):
                 raise ValueError("Workbench conversation is unavailable")
             payload, conversation_id, app_id = json.loads(run.payload), chat.conversation_id, chat.app_id
             events = json.loads(run.event_log)
+            journal = uses_journal(run, payload)
         authorize(tenant_id, account_id)
         if not scheduler.heartbeat(owner, run_id):
             raise RuntimeError("Admission lease expired before execution")
@@ -270,10 +278,15 @@ def execute(owner, run_id):
                             if data and data != "[DONE]":
                                 frames.append(json.loads(data))
                     for item in frames:
+                        if item.get("event") == "workbench_context" and isinstance(item.get("data"), dict):
+                            context_data = item.pop("data")
+                            item.update(context_data)
                         item["workbench_run_id"] = run_id
-                        events.append(item)
+                        if not journal:
+                            events.append(item)
                         cursor = event(run_id, item)
-                        item["_id"] = cursor.decode() if isinstance(cursor, bytes) else str(cursor)
+                        if cursor is not None:
+                            item["_id"] = cursor.decode() if isinstance(cursor, bytes) else str(cursor)
                         if item.get("event") == "error":
                             status, error = "failed", item.get("message", "Agent 执行失败")
                 completed_stream = True
@@ -283,8 +296,10 @@ def execute(owner, run_id):
     finally:
         done.set()
         if claimed:
+            pause_event = None
+            end_event = None
             with session_factory.get_session_maker().begin() as session:
-                run = session.get(WorkbenchRun, run_id)
+                run = session.scalar(select(WorkbenchRun).where(WorkbenchRun.id == run_id).with_for_update())
                 if run is None:
                     raise ValueError("Claimed Workbench run is unavailable during cleanup")
                 ticket = run.backend_run_id
@@ -294,10 +309,29 @@ def execute(owner, run_id):
                 elif run.status in ("environment_update", "waiting_input"):
                     status = run.status
                 elif run.status == "running":
-                    run.status, run.error = status, error
+                    pause_event = workbench_runtime.complete_pause(
+                        session,
+                        run,
+                        completed_stream=completed_stream and status == "completed",
+                    )
+                    if pause_event is not None:
+                        status = run.status
+                    else:
+                        run.status, run.error = status, error
                 else:
                     status, error = run.status, run.error
-                run.event_log = json.dumps(events)
+                if not journal:
+                    run.event_log = json.dumps(events)
+                else:
+                    end_event = append_locked(
+                        session,
+                        run,
+                        {"event": "workbench_end", "status": status, "error": error},
+                    )
+            if pause_event is not None:
+                notify(run_id, pause_event)
+            if end_event is not None:
+                notify(run_id, end_event)
             safe_to_release = completed_stream and status in ("completed", "environment_update", "waiting_input")
             if not safe_to_release:
                 try:
@@ -306,7 +340,8 @@ def execute(owner, run_id):
                     logger.warning("Could not confirm remote cleanup for %s", run_id, exc_info=True)
             if safe_to_release:
                 scheduler.release(owner, run_id)
-            event(run_id, {"event": "workbench_end", "status": status, "error": error})
+            if not journal:
+                event(run_id, {"event": "workbench_end", "status": status, "error": error})
             if status == "environment_update":
                 update_environment.delay(tenant_id, account_id)
             dispatch.delay()
@@ -375,18 +410,31 @@ def update_environment(tenant_id, account_id):
             logger.exception("Workbench environment update failed")
             # A lost response is not evidence that the installer stopped. Reconcile by request ID.
             return
+        end_event = None
         with session_factory.get_session_maker().begin() as session:
-            run = session.get(WorkbenchRun, run_id)
+            run = session.scalar(select(WorkbenchRun).where(WorkbenchRun.id == run_id).with_for_update())
             if run is None:
                 raise ValueError("Workbench run is unavailable after environment update")
+            current_payload = json.loads(run.payload)
+            if current_payload.get("attempt", 0) != payload.get("attempt", 0) or current_payload.get("pending", {}).get(
+                "tool_call_id"
+            ) != payload.get("pending", {}).get("tool_call_id"):
+                return
+            payload = current_payload
             if run.status == "environment_installing":
                 if redis_client.get(scheduler.PREFIX + "stop:" + run_id):
                     run.status = "cancelled"
+                    if uses_journal(run):
+                        end_event = append_locked(
+                            session, run, {"event": "workbench_end", "status": "cancelled", "error": None}
+                        )
                 else:
                     payload["continuation"] = {"calls": {payload["pending"]["tool_call_id"]: result}}
                     payload.pop("pending", None)
                     payload["attempt"] = payload.get("attempt", 0) + 1
                     run.payload, run.status, run.backend_run_id = json.dumps(payload), "queued", None
+        if end_event is not None:
+            notify(run_id, end_event)
         # A second deferred request keeps the same user's queue closed until it is processed.
         with session_factory.create_session() as session:
             remaining = session.scalar(

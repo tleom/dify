@@ -51,6 +51,7 @@ from core.app.entities.queue_entities import (
     QueueAgentThoughtEvent,
     QueueLLMChunkEvent,
     QueueMessageEndEvent,
+    QueueWorkbenchActivityEvent,
 )
 from core.repositories.human_input_repository import HumanInputFormRepository, HumanInputFormRepositoryImpl
 from core.workflow.nodes.agent_v2.ask_human_hitl import AskHumanFormBuildError, create_ask_human_form
@@ -854,6 +855,12 @@ class AgentAppRunner:
             )
         return self._request_builder.build(
             AgentAppRuntimeBuildContext(
+                workbench_runtime=self._workbench,
+                workbench_activity_protocol=(
+                    self._workbench.activity_protocol(dify_context.tenant_id, conversation_id, dify_context.user_id)
+                    if self._workbench is not None
+                    else 0
+                ),
                 workbench_run_id=(
                     self._workbench.execution_run_id(dify_context.tenant_id, conversation_id, dify_context.user_id)
                     if self._workbench is not None
@@ -1028,15 +1035,42 @@ class AgentAppRunner:
                         message_id=message_id,
                     )
                     raise GenerateTaskStoppedError()
+                if public_event.type == "workbench_activity":
+                    flush_pending_agent_message_text()
+                    if self._workbench is not None and self._workbench.accept_activity(
+                        dify_context.tenant_id,
+                        session_scope.conversation_id,
+                        dify_context.user_id,
+                        public_event,
+                    ):
+                        queue_manager.publish(
+                            QueueWorkbenchActivityEvent(
+                                backend_run_id=public_event.run_id,
+                                source_event_id=public_event.id or "",
+                                data=public_event.data.model_dump(mode="json"),
+                            ),
+                            PublishFrom.APPLICATION_MANAGER,
+                        )
+                    continue
                 if public_event.type == "context_status":
                     flush_pending_agent_message_text()
                     if self._workbench is not None:
-                        self._workbench.record_context_status(
+                        context_item = self._workbench.record_context_status(
                             dify_context.tenant_id,
                             session_scope.conversation_id,
                             dify_context.user_id,
                             public_event,
                         )
+                        if context_item:
+                            queue_manager.publish(
+                                QueueWorkbenchActivityEvent(
+                                    stream_event="workbench_context",
+                                    backend_run_id=public_event.run_id,
+                                    source_event_id=public_event.id or "",
+                                    data=context_item,
+                                ),
+                                PublishFrom.APPLICATION_MANAGER,
+                            )
                     continue
                 for internal_event in self._event_adapter.adapt(public_event):
                     if queue_manager.is_stopped():

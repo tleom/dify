@@ -32,6 +32,7 @@ from core.app.apps.agent_app.runtime_request_builder import (
 )
 from core.app.entities.app_invoke_entities import InvokeFrom, UserFrom
 from core.workflow.file_reference import build_file_reference
+from core.workflow.nodes.agent_v2.dify_tools_builder import WorkflowAgentToolLayers
 from graphon.file import File, FileTransferMethod, FileType
 from graphon.model_runtime.entities.message_entities import ImagePromptMessageContent
 from models.agent_config_entities import AgentSoulConfig
@@ -107,6 +108,20 @@ def test_workbench_retrieves_same_question_again_on_new_turn():
     assert soul.knowledge.sets[0].id == "dataset-1"
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_activity_protocol_is_frozen_per_turn_and_rollback_preserves_its_reader(monkeypatch, enabled):
+    apply_config_overrides(monkeypatch, WORKBENCH_ACTIVITY_ENABLED=enabled)
+    builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_NoToolsBuilder())
+    context = replace(_ctx(_soul_with_model()), workbench_run_id="run-1", workbench_activity_protocol=1)
+    request = builder.build(context).request
+    activity = next(layer for layer in request.composition.layers if layer.name == "workbench_activity")
+    assert activity.config.workbench_run_id == "run-1"
+    assert activity.config.enabled is enabled
+    # Old tasks never acquire an extra layer while restoring a native snapshot.
+    old = builder.build(replace(context, workbench_activity_protocol=0)).request
+    assert all(layer.name != "workbench_activity" for layer in old.composition.layers)
+
+
 @pytest.mark.parametrize(("previous_prompt", "current_prompt"), [("", "New soul"), ("Old soul", "")])
 def test_workbench_rebuild_accepts_previous_composition(previous_prompt: str, current_prompt: str):
     builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_NoToolsBuilder())  # type: ignore[arg-type]
@@ -173,8 +188,8 @@ class _NoToolsBuilder:
 
 
 class _PluginLayerBuilder:
-    def build_layers(self, **kwargs):
-        return SimpleNamespace(
+    def build_layers(self, **kwargs: object) -> WorkflowAgentToolLayers:
+        return WorkflowAgentToolLayers(
             plugin_tools=DifyPluginToolsLayerConfig(
                 tools=[
                     DifyPluginToolConfig(
@@ -192,7 +207,6 @@ class _PluginLayerBuilder:
                 ]
             ),
             core_tools=None,
-            exposed_tool_names=lambda: ["current_time"],
         )
 
 
@@ -236,6 +250,7 @@ def _ctx(
         invoke_from=InvokeFrom.WEB_APP,
     )
     return AgentAppRuntimeBuildContext(
+        workbench_runtime=SimpleNamespace(resolve_run_requirements=lambda *_args: ([], [])),
         dify_context=dify_context,  # type: ignore[arg-type]
         agent_id="agent-1",
         agent_config_snapshot_id="snap-1",

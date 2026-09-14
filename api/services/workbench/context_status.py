@@ -20,9 +20,16 @@ def record_context_status(tenant_id, conversation_id, account_id, public_event):
             return
         payload = json.loads(run.payload)
         model = payload.get("effective_soul", {}).get("model", {})
-        item = {"event": "workbench_context", "workbench_run_id": run.id,
-                "model": f"{model.get('model_provider', '')}::{model.get('model', '')}",
-                **public_event.data.model_dump(mode="json")}
+        item = {
+            "event": "workbench_context",
+            "workbench_run_id": run.id,
+            "model": f"{model.get('model_provider', '')}::{model.get('model', '')}",
+            **public_event.data.model_dump(mode="json"),
+        }
+        if payload.get("activity_protocol") == 1:
+            # The Agent App queues this with tools/text. Persistence happens at
+            # the single ordered consumer, never ahead of its queued neighbors.
+            return item
         cursor = redis_client.xadd(event_key(run.id), {"data": json.dumps(item)})
         redis_client.expire(event_key(run.id), 7 * 86400)
         item["_id"] = cursor.decode() if isinstance(cursor, bytes) else str(cursor)

@@ -30,12 +30,15 @@ from dify_agent.protocol.schemas import (
     RunStatus,
     RunSucceededEvent,
     RunSucceededEventData,
+    WorkbenchActivityRunEvent,
     utc_now,
 )
 
 _UNSET = object()
 type TerminalRunEvent = RunSucceededEvent | RunFailedEvent
-type NonTerminalRunEvent = RunStartedEvent | PydanticAIStreamRunEvent | ContextStatusRunEvent
+type NonTerminalRunEvent = (
+    RunStartedEvent | PydanticAIStreamRunEvent | ContextStatusRunEvent | WorkbenchActivityRunEvent
+)
 
 
 @dataclass(frozen=True, slots=True)

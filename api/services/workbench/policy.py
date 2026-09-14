@@ -68,6 +68,8 @@ def compile_selection(
         # A workbench selection overrides individual settings of the published
         # model. Provider-specific settings must not leak into a different model.
         settings.update(copy.deepcopy(template_model.get("model_settings") or {}))
+        if template_model.get("credential_ref") is not None:
+            result["model"]["credential_ref"] = copy.deepcopy(template_model["credential_ref"])
     for key, value in selection.model_parameters.items():
         rule = (parameter_rules or {}).get(key)
         if rule is None:

@@ -59,6 +59,10 @@ def _app() -> Flask:
 
 def test_post_streams_plugin_compatible_envelope() -> None:
     payload = _payload()
+    reference = {"type": "provider", "id": str(uuid4())}
+    target = payload["target"]
+    assert isinstance(target, dict)
+    target["credential_ref"] = reference
     request = AgentLLMInvokeRequest.model_validate(payload)
     prepared = PreparedAgentLLMInvocation(request=request, model_instance=MagicMock())
     chunk = LLMResultChunk(
@@ -90,6 +94,7 @@ def test_post_streams_plugin_compatible_envelope() -> None:
         assert envelope["code"] == 0
         assert envelope["data"]["delta"]["message"]["content"] == "done"
         prepare.assert_called_once()
+        assert prepare.call_args.args[0].target.credential_ref.model_dump(exclude_none=True) == reference
 
 
 def test_post_preserves_prompt_messages_without_transport_validation() -> None:

@@ -133,6 +133,7 @@ def resolve_model_context_window(
     run_context: DifyRunContext,
     provider_name: str,
     model_name: str,
+    credential_ref: dict[str, Any] | None = None,
 ) -> int | None:
     """Return the selected model's credential-bound context-window capability.
 
@@ -142,7 +143,7 @@ def resolve_model_context_window(
     Model lookup and schema errors propagate. This function does not infer a
     window from the model name or fall back to a model registry or cache.
     """
-    model_instance = DifyModelFactory(run_context=run_context).init_model_instance(provider_name, model_name)
+    model_instance = _resolve_capability_model(run_context, provider_name, model_name, credential_ref)
     context_window = model_instance.get_model_schema().model_properties.get(ModelPropertyKey.CONTEXT_SIZE)
     if isinstance(context_window, bool) or not isinstance(context_window, int) or context_window <= 0:
         return None
@@ -154,11 +155,26 @@ def resolve_model_supports_vision(
     run_context: DifyRunContext,
     provider_name: str,
     model_name: str,
+    credential_ref: dict[str, Any] | None = None,
 ) -> bool:
     """Return whether the credential-bound model advertises vision support."""
 
-    model_instance = DifyModelFactory(run_context=run_context).init_model_instance(provider_name, model_name)
+    model_instance = _resolve_capability_model(run_context, provider_name, model_name, credential_ref)
     return ModelFeature.VISION in (model_instance.get_model_schema().features or [])
+
+
+def _resolve_capability_model(run_context, provider_name, model_name, credential_ref):
+    if credential_ref is None:
+        return DifyModelFactory(run_context=run_context).init_model_instance(provider_name, model_name)
+    from dify_agent.layers.dify_plugin.configs import DifyModelCredentialRef
+
+    from core.app.llm.agent_model import resolve_referenced_agent_model
+
+    return resolve_referenced_agent_model(
+        provider_manager=create_plugin_provider_manager(tenant_id=run_context.tenant_id, user_id=run_context.user_id),
+        tenant_id=run_context.tenant_id, user_id=run_context.user_id, provider=provider_name, model=model_name,
+        credential_ref=DifyModelCredentialRef.model_validate(credential_ref),
+    )
 
 
 def _normalize_completion_params(completion_params: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:

@@ -56,6 +56,11 @@ from .schemas import (
     RunStatusResponse,
     RunSucceededEvent,
     RunSucceededEventData,
+    WorkbenchActivityData,
+    WorkbenchActivityRunEvent,
+    WorkbenchNarrativeData,
+    WorkbenchProgressData,
+    WorkbenchToolData,
     normalize_composition,
     utc_now,
 )
@@ -106,6 +111,11 @@ __all__ = [
     "RunStatusResponse",
     "RunSucceededEvent",
     "RunSucceededEventData",
+    "WorkbenchActivityData",
+    "WorkbenchActivityRunEvent",
+    "WorkbenchNarrativeData",
+    "WorkbenchProgressData",
+    "WorkbenchToolData",
     "normalize_composition",
     "utc_now",
 ]

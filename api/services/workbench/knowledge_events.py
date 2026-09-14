@@ -9,6 +9,7 @@ from configs import dify_config
 from core.db.session_factory import session_factory
 from extensions.ext_redis import redis_client
 from models.workbench import WorkbenchChat, WorkbenchRun
+from services.workbench.event_log import append_locked, notify, uses_journal
 from services.workbench.scheduler import event_key
 
 
@@ -17,33 +18,61 @@ def retrieval_event(request, status: str, *, results=None):
     if not dify_config.WORKBENCH_ENABLED:
         raise Forbidden()
     with session_factory.get_session_maker().begin() as session:
-        run = session.scalar(select(WorkbenchRun).join(WorkbenchChat, WorkbenchChat.id == WorkbenchRun.chat_id).where(
-            WorkbenchRun.id == request.workbench_run_id, WorkbenchRun.tenant_id == caller.tenant_id,
-            WorkbenchRun.account_id == caller.user_id, WorkbenchChat.app_id == caller.app_id,
-            WorkbenchChat.tenant_id == caller.tenant_id, WorkbenchChat.account_id == caller.user_id,
-            WorkbenchChat.deleted == 0,
-        ).with_for_update())
+        run = session.scalar(
+            select(WorkbenchRun)
+            .join(WorkbenchChat, WorkbenchChat.id == WorkbenchRun.chat_id)
+            .where(
+                WorkbenchRun.id == request.workbench_run_id,
+                WorkbenchRun.tenant_id == caller.tenant_id,
+                WorkbenchRun.account_id == caller.user_id,
+                WorkbenchChat.app_id == caller.app_id,
+                WorkbenchChat.tenant_id == caller.tenant_id,
+                WorkbenchChat.account_id == caller.user_id,
+                WorkbenchChat.deleted == 0,
+            )
+            .with_for_update()
+        )
         if run is None or run.status != "running":
             raise Forbidden("知识库检索任务已结束")
         payload = json.loads(run.payload)
-        matching = [item for item in payload["effective_soul"].get("knowledge", {}).get("sets", [])
-                    if {d["id"] for d in item["datasets"]} == set(request.dataset_ids)
-                    and (item["query"]["mode"] == "generated_query"
-                         or item["query"].get("value") == request.query)]
+        matching = [
+            item
+            for item in payload["effective_soul"].get("knowledge", {}).get("sets", [])
+            if {d["id"] for d in item["datasets"]} == set(request.dataset_ids)
+            and (item["query"]["mode"] == "generated_query" or item["query"].get("value") == request.query)
+        ]
         if len(matching) != 1:
             raise Forbidden("知识库检索请求与任务配置不一致")
         item = matching[0]
         event = {
             "event": "workbench_knowledge",
             "id": f"knowledge:{run.id}:{request.workbench_search_id or item['id']}",
-            "workbench_run_id": run.id, "name": item["name"], "query": request.query,
-            "status": status, "results": results or [],
+            "workbench_run_id": run.id,
+            "name": item["name"],
+            "query": request.query,
+            "search_id": request.workbench_search_id,
+            "status": status,
+            "results": results or [],
         }
         if status == "error":
             event["message"] = "知识库检索失败，请检查知识库的检索配置后重试。"
+        journal = uses_journal(run, payload)
+        if journal:
+            event["source_event_id"] = event["id"] + ":" + status
+            event["backend_run_id"] = run.backend_run_id
         events = payload.get("knowledge_events", [])
         payload["knowledge_events"] = [e for e in events if e["id"] != event["id"]] + [event]
         run.payload = json.dumps(payload)
+        if journal:
+            if request.workbench_search_id:
+                # The matching tool return is consumed after its tool start.
+                # Keep its full result here until that ordered consumer journals
+                # it, even when this inner API outruns the Agent event reader.
+                return
+            event = append_locked(session, run, event)
+    if journal:
+        notify(request.workbench_run_id, event)
+        return
     redis_client.xadd(event_key(request.workbench_run_id), {"data": json.dumps(event)})
     redis_client.expire(event_key(request.workbench_run_id), 7 * 86400)
 
@@ -59,11 +88,16 @@ def run_knowledge_events(run, payload):
     from models.model import Conversation
 
     with session_factory.create_session() as session:
-        snapshot = session.scalar(select(AgentWorkspaceBinding.session_snapshot)
+        snapshot = session.scalar(
+            select(AgentWorkspaceBinding.session_snapshot)
             .join(Conversation, Conversation.agent_workspace_binding_id == AgentWorkspaceBinding.id)
             .join(WorkbenchChat, WorkbenchChat.conversation_id == Conversation.id)
-            .where(WorkbenchChat.id == run.chat_id, WorkbenchChat.tenant_id == run.tenant_id,
-                   WorkbenchChat.account_id == run.account_id))
+            .where(
+                WorkbenchChat.id == run.chat_id,
+                WorkbenchChat.tenant_id == run.tenant_id,
+                WorkbenchChat.account_id == run.account_id,
+            )
+        )
     if not snapshot:
         return []
     events = []
@@ -71,10 +105,16 @@ def run_knowledge_events(run, payload):
         for item in (layer.get("runtime_state") or {}).get("eager_results", []):
             if not item.get("set_id", "").endswith(":" + run.id):
                 continue
-            events.append({
-                "event": "workbench_knowledge", "id": "knowledge:" + item["set_id"],
-                "workbench_run_id": run.id, "name": item["set_name"], "query": item["query"],
-                "status": "returned" if item["status"] in ("success", "empty") else "error",
-                "observation": item["observation"], "results": [],
-            })
+            events.append(
+                {
+                    "event": "workbench_knowledge",
+                    "id": "knowledge:" + item["set_id"],
+                    "workbench_run_id": run.id,
+                    "name": item["set_name"],
+                    "query": item["query"],
+                    "status": "returned" if item["status"] in ("success", "empty") else "error",
+                    "observation": item["observation"],
+                    "results": [],
+                }
+            )
     return events

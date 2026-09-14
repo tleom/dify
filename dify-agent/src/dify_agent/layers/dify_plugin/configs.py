@@ -106,12 +106,23 @@ class DifyPluginToolParameter(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="ignore", from_attributes=True)
 
 
+class DifyModelCredentialRef(BaseModel):
+    """Non-secret reference; only the tenant's API model gateway resolves it."""
+
+    type: Literal["provider", "model"]
+    id: str = Field(min_length=1, max_length=255)
+    provider: str | None = Field(default=None, max_length=255)
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+
 class DifyPluginLLMLayerConfig(LayerConfig):
     """Public config for selecting a plugin-backed business provider/model."""
 
     plugin_id: str
     model_provider: str
     model: str
+    credential_ref: DifyModelCredentialRef | None = None
     model_settings: ModelSettings | None = None
     context_window_tokens: int | None = Field(default=None, gt=0)
 
@@ -156,6 +167,13 @@ class DifyPluginToolConfig(LayerConfig):
     runtime_parameters: dict[str, DifyPluginToolValue] = Field(default_factory=dict)
     parameters: list[DifyPluginToolParameter] = Field(default_factory=list)
     parameters_json_schema: dict[str, JsonValue] = Field(default_factory=_default_parameters_json_schema)
+
+    @field_validator("tool_name", "name")
+    @classmethod
+    def validate_reserved_name(cls, value: str | None) -> str | None:
+        if value == "report_activity":
+            raise ValueError("report_activity is reserved for workbench activity reporting")
+        return value
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 

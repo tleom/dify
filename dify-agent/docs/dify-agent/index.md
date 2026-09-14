@@ -25,7 +25,9 @@ Access failures are explicit observations; they neither count as successful
 searches nor force repeated calls. Retrieval failures within a dataset propagate
 to this boundary instead of silently becoming empty or partial search results.
 
-Workbench search observations are paginated JSON. `knowledge_base_read_results`
+Workbench search observations are paginated JSON. Search failures return JSON
+with `status=error`, the attempted `search_id`, and a public `message`, so the API
+can order the retrieval record with its tool return. `knowledge_base_read_results`
 continues the same result using `search_id` and `next_offset`; the current run
 retains its latest five results across suspension. `knowledge_base_list_documents`
 and `knowledge_base_read_document` use the authenticated inner document API to
@@ -44,3 +46,63 @@ pre-request estimates from provider response usage; an unknown model window stay
 null. Compaction phases share `compaction_id` and include `before_tokens`.
 The existing tiered compactor remains responsible for rewriting history. These
 events are non-terminal; consumers that do not display context can ignore them.
+
+The LLM layer accepts an optional `credential_ref` with `type` (`provider` or
+`model`), `id`, and optional `provider`. The API resolves it for the caller's
+tenant and selected provider/model on every invocation, including runtime
+credential policy checks. Saved configuration references remain executable by
+published apps even when the invoking user cannot see them in credential lists.
+An explicit reference pins the call to
+that credential and uses the custom-provider billing path; load balancing cannot
+replace it. Invalid references fail explicitly. Context-window and vision
+capabilities use the same reference. Secrets remain inside the API runtime.
+New or changed model references are authorized against the editing account before
+drafts, snapshots, or copied Agents persist them. A reference preserved from the
+same Agent's stored model can remain unchanged; another Agent's payload cannot
+supply that trust. Published invocations continue using the saved reference.
+
+Workbench mentions are loaded from the current run's frozen payload. Mentioned
+Skills are eagerly read by the config layer before the model runs. The optional
+`dify.workbench_mentions` layer stores `workbench_run_id` and `tool_groups`
+(`name`, `tool_names`). At least one appropriate tool in each mentioned group
+must return an observation before a final answer. Argument-validation retries
+do not count; explicit tool error observations count as attempts and must be
+reported accurately. Preparation and deferred human/environment requests remain
+available. Rejected answer text is withheld from streaming, and output validation
+has two retries when mentions are present. Completion state survives suspension
+of that run; a new workbench turn starts with fresh mention requirements.
+
+Workbench activity reporting is opt-in through `dify.workbench_activity`. The
+tool name `report_activity` is reserved in composer saves and prepared plugin/core
+tool declarations, including model-facing name overrides and expanded providers.
+The composition supplies the trusted logical `workbench_run_id`. Its sequential
+`report_activity` tool lets the same task model describe an action and purpose,
+update the stage, and close an activity after results return. The runtime assigns
+activity IDs and revisions, binds each business call at execution start, and
+restores the same identity when human input or environment installation resumes
+in a different native run. Parallel business calls remain parallel. Tool retries
+become error records only when an execution binding exists; argument-validation
+failures do not start tool work, while actual execution failures remain visible.
+Plugin and core-tool error observations carry application-only SDK failure metadata;
+their original model-facing text is preserved and the activity records an error.
+Reports do not appear as business tool rows; malformed or repeated reports become
+no-ops without using the task's retry budget. Four reports without business work hide
+the report tool until work resumes. Reporting still uses the normal model token
+and request budget; no separate summarization model is invoked.
+
+`workbench_activity` public events contain a discriminated `data.kind`: `activity`
+for public titles, `tool` for call state, and `text`/`reasoning` for visible model
+output. Tool `call_id` includes its originating native run and remains unchanged
+across a deferred continuation. Shell `done=false` means the background job is
+still pending even when output has arrived. Activity close checks pending calls
+and jobs; it is not independent proof that a user's business goal was achieved.
+
+The API freezes `activity_protocol=1` in new workbench runs only when
+`WORKBENCH_ACTIVITY_ENABLED=true`. Its `workbench_run_events` journal is the shared
+authority for history and live SSE, with an increasing sequence per logical run;
+Redis is a wake-up channel. Install the migration and upgrade all API/Agent
+readers before enabling the producer. To roll back reporting, disable the flag
+while retaining the new readers and journal. Existing protocol-1 continuations
+still emit tool and text records with both the reporting tool and its prompt disabled. Legacy runs
+retain their previous reader and composition contract. Do not drop the journal
+when merely disabling reporting.

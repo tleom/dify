@@ -22,6 +22,7 @@ class QueueEvent(StrEnum):
     LLM_CHUNK = "llm_chunk"
     TEXT_CHUNK = "text_chunk"
     AGENT_MESSAGE = "agent_message"
+    WORKBENCH_ACTIVITY = "workbench_activity"
     MESSAGE_REPLACE = "message_replace"
     MESSAGE_END = "message_end"
     ADVANCED_CHAT_MESSAGE_END = "advanced_chat_message_end"
@@ -71,6 +72,16 @@ class QueueLLMChunkEvent(AppQueueEvent):
 
     event: QueueEvent = QueueEvent.LLM_CHUNK
     chunk: LLMResultChunk
+
+
+class QueueWorkbenchActivityEvent(AppQueueEvent):
+    """Ordered workbench progress, published alongside ordinary assistant text."""
+
+    event: QueueEvent = QueueEvent.WORKBENCH_ACTIVITY
+    backend_run_id: str
+    source_event_id: str
+    data: dict[str, Any]
+    stream_event: str = "workbench_activity"
 
 
 class QueueIterationStartEvent(AppQueueEvent):

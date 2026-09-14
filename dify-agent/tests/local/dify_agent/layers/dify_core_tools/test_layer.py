@@ -4,6 +4,7 @@ import types
 
 import httpx
 import pytest
+from pydantic_ai.messages import ToolReturn
 
 from agenton.compositor import Compositor, LayerNode, LayerProvider
 
@@ -208,7 +209,9 @@ def test_core_tools_layer_maps_specific_inner_api_error_codes_to_observations(
                 layer = run.get_layer("core_tools", DifyCoreToolsLayer)
                 tool = (await layer.get_tools(http_client=http_client))[0]
                 result = await tool.function_schema.call({}, None)  # pyright: ignore[reportArgumentType]
-                assert result == expected
+                assert isinstance(result, ToolReturn)
+                assert result.return_value == expected
+                assert result.metadata == {"is_error": True}
 
     asyncio.run(scenario())
 
@@ -245,7 +248,9 @@ def test_core_tools_layer_reports_missing_execution_context_without_parameter_va
                 layer = run.get_layer("core_tools", DifyCoreToolsLayer)
                 tool = (await layer.get_tools(http_client=http_client))[0]
                 result = await tool.function_schema.call({}, None)  # pyright: ignore[reportArgumentType]
-                assert result == "Tool is unavailable because required execution context is missing."
+                assert isinstance(result, ToolReturn)
+                assert result.return_value == "Tool is unavailable because required execution context is missing."
+                assert result.metadata == {"is_error": True}
 
     asyncio.run(scenario())
 
@@ -285,6 +290,8 @@ def test_core_tools_layer_converts_retryable_failures_to_temporary_unavailable_o
                 layer = run.get_layer("core_tools", DifyCoreToolsLayer)
                 tool = (await layer.get_tools(http_client=http_client))[0]
                 result = await tool.function_schema.call({}, None)  # pyright: ignore[reportArgumentType]
-                assert result == "Tool is temporarily unavailable. Please continue without it if possible."
+                assert isinstance(result, ToolReturn)
+                assert result.return_value == "Tool is temporarily unavailable. Please continue without it if possible."
+                assert result.metadata == {"is_error": True}
 
     asyncio.run(scenario())

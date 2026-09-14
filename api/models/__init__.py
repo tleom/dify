@@ -1,4 +1,3 @@
-from .workbench import WorkbenchChat, WorkbenchRevision, WorkbenchRun
 from .account import (
     Account,
     AccountIntegrate,
@@ -135,6 +134,7 @@ from .trigger import (
     WorkflowSchedulePlan,
 )
 from .web import PinnedConversation, SavedMessage
+from .workbench import WorkbenchChat, WorkbenchRevision, WorkbenchRun, WorkbenchRunEvent
 from .workflow import (
     ConversationVariable,
     Workflow,
@@ -279,6 +279,10 @@ __all__ = [
     "TriggerSubscription",
     "UploadFile",
     "Whitelist",
+    "WorkbenchChat",
+    "WorkbenchRevision",
+    "WorkbenchRun",
+    "WorkbenchRunEvent",
     "Workflow",
     "WorkflowAgentBindingType",
     "WorkflowAgentNodeBinding",

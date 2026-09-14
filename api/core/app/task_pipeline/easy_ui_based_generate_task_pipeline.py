@@ -27,6 +27,7 @@ from core.app.entities.queue_entities import (
     QueuePingEvent,
     QueueRetrieverResourcesEvent,
     QueueStopEvent,
+    QueueWorkbenchActivityEvent,
 )
 from core.app.entities.task_entities import (
     AgentMessageStreamResponse,
@@ -42,6 +43,7 @@ from core.app.entities.task_entities import (
     MessageEndStreamResponse,
     StreamEvent,
     StreamResponse,
+    WorkbenchActivityStreamResponse,
 )
 from core.app.task_pipeline.based_generate_task_pipeline import BasedGenerateTaskPipeline
 from core.app.task_pipeline.message_cycle_manager import MessageCycleManager
@@ -348,6 +350,14 @@ class EasyUIBasedGenerateTaskPipeline(BasedGenerateTaskPipeline[EasyUIAppGenerat
                     agent_thought_response = self._agent_thought_to_stream_response(event)
                     if agent_thought_response is not None:
                         yield agent_thought_response
+                case QueueWorkbenchActivityEvent():
+                    yield WorkbenchActivityStreamResponse(
+                        event=StreamEvent(event.stream_event),
+                        task_id=self._application_generate_entity.task_id,
+                        backend_run_id=event.backend_run_id,
+                        source_event_id=event.source_event_id,
+                        data=event.data,
+                    )
                 case QueueMessageFileEvent():
                     response = self._message_cycle_manager.message_file_to_stream_response(event)
                     if response:

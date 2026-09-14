@@ -1,10 +1,10 @@
 """Workbench-owned records. Public Agent snapshots are never edited by chat users."""
 
-from sqlalchemy import Boolean, Index, Integer, String, Text, UniqueConstraint, false
+from sqlalchemy import BigInteger, Boolean, Index, Integer, String, Text, UniqueConstraint, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base, DefaultFieldsMixin
-from .types import StringUUID
+from .types import LongText, StringUUID
 
 
 class WorkbenchChat(DefaultFieldsMixin, Base):
@@ -51,3 +51,17 @@ class WorkbenchRun(DefaultFieldsMixin, Base):
     backend_run_id: Mapped[str | None] = mapped_column(StringUUID, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     event_log: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class WorkbenchRunEvent(DefaultFieldsMixin, Base):
+    """Append-only progress for new runs; sequence is allocated under the owning run's row lock."""
+
+    __tablename__ = "workbench_run_events"
+    __table_args__ = (
+        UniqueConstraint("run_id", "sequence", name="wb_event_sequence"),
+        UniqueConstraint("run_id", "event_key", name="wb_event_identity"),
+    )
+    run_id: Mapped[str] = mapped_column(StringUUID)
+    sequence: Mapped[int] = mapped_column(BigInteger)
+    event_key: Mapped[str] = mapped_column(String(128))
+    payload: Mapped[str] = mapped_column(LongText)

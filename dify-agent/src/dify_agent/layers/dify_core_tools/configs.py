@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import ClassVar, Final, Literal
 
-from pydantic import ConfigDict, Field, JsonValue
+from pydantic import ConfigDict, Field, JsonValue, field_validator
 
 from agenton.layers import LayerConfig
 from dify_agent.layers.dify_plugin.configs import DifyPluginToolParameter
@@ -37,6 +37,13 @@ class DifyCoreToolConfig(LayerConfig):
     runtime_parameters: dict[str, JsonValue] = Field(default_factory=dict)
     parameters: list[DifyPluginToolParameter] = Field(default_factory=list)
     parameters_json_schema: dict[str, JsonValue] = Field(default_factory=_default_parameters_json_schema)
+
+    @field_validator("tool_name", "name")
+    @classmethod
+    def validate_reserved_name(cls, value: str | None) -> str | None:
+        if value == "report_activity":
+            raise ValueError("report_activity is reserved for workbench activity reporting")
+        return value
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 

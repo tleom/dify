@@ -446,7 +446,13 @@ class DifyKnowledgeBaseLayer(
                     },
                     exc_info=True,
                 )
-                return _workbench_failure_observation(exc)
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "search_id": search_id,
+                        "message": _workbench_failure_observation(exc),
+                    }
+                )
             if exc.retryable and retryable_observation:
                 logger.warning(
                     "knowledge base search temporarily unavailable",

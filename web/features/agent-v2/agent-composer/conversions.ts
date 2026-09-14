@@ -592,6 +592,11 @@ export const formStateToAgentSoulConfig = ({
           ...baseConfig?.model,
           model_provider: currentModel.provider,
           model: currentModel.model,
+          credential_ref:
+            currentModel.provider === baseConfig?.model?.model_provider &&
+            currentModel.model === baseConfig.model.model
+              ? baseConfig.model.credential_ref
+              : undefined,
           plugin_id: getModelProviderPluginId(currentModel, baseConfig?.model),
           model_settings: currentModel.model_settings,
         }

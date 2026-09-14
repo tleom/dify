@@ -9,7 +9,6 @@ from urllib.parse import quote
 from flask import Response, request, stream_with_context
 from flask_restx import Resource
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
-from sqlalchemy import select
 from werkzeug.exceptions import Conflict, NotFound
 
 from controllers.common.schema import query_params_from_model, register_response_schema_models, register_schema_models
@@ -23,9 +22,9 @@ from fields.base import ResponseModel
 from libs.helper import dump_response
 from libs.login import current_account_with_tenant
 from models.model import AppMode
-from models.workbench import WorkbenchRun
 from services.app_task_service import AppTaskService
 from services.workbench import scheduler, service
+from services.workbench.event_log import append_locked, notify, owned_statement, read_state, stream_events, uses_journal
 from services.workbench.mentions import ResourceMentions
 from services.workbench.policy import Selection
 
@@ -74,6 +73,7 @@ class WorkbenchSandboxFilePayload(BaseModel):
 
 class WorkbenchRunPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    activity_protocol: Literal[0, 1] = 0
     version: int = Field(ge=1)
     request_key: str = Field(min_length=1, max_length=128)
     query: str = Field(max_length=100000)
@@ -110,6 +110,7 @@ class WorkbenchFeedbackPayload(BaseModel):
 
 class WorkbenchRegeneratePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    activity_protocol: Literal[0, 1] = 0
     version: int = Field(ge=1)
     request_key: str = Field(min_length=1, max_length=128)
     query: str | None = Field(default=None, max_length=100000)
@@ -134,6 +135,7 @@ class WorkbenchModelResponse(ResponseModel):
 
 
 class WorkbenchCatalogResponse(ResponseModel):
+    activity_protocol: Literal[1] = 1
     default_selection: Selection
     models: list[WorkbenchModelResponse]
     tools: list[WorkbenchResourceResponse]
@@ -151,6 +153,7 @@ class WorkbenchAttachmentResponse(ResponseModel):
 
 
 class WorkbenchRunResponse(ResponseModel):
+    activity_protocol: int = 0
     id: str
     chat_id: str
     revision_id: str
@@ -195,6 +198,14 @@ class WorkbenchChatSummaryResponse(ResponseModel):
     title: str
     version: int
     pinned: bool
+    is_running: bool | None = Field(
+        default=None, description="Whether this conversation has a queued or executing run; excludes waiting for input"
+    )
+    needs_input: bool | None = Field(default=None, description="Whether this conversation is waiting for user input")
+    has_active_run: bool | None = Field(
+        default=None,
+        description="Whether run status still needs refreshing, including environment updates and input waits",
+    )
 
 
 class WorkbenchChatSummaryEnvelopeResponse(ResponseModel):
@@ -509,11 +520,7 @@ def owned_run(tenant_id, account_id, run_id):
     from services.workbench.message_actions import with_feedback
 
     with session_factory.create_session() as session:
-        run = session.scalar(
-            select(WorkbenchRun).where(
-                WorkbenchRun.id == run_id, WorkbenchRun.tenant_id == tenant_id, WorkbenchRun.account_id == account_id
-            )
-        )
+        run = session.scalar(owned_statement(tenant_id, account_id, run_id))
         if run is None:
             raise NotFound()
         return with_feedback(session, [run], [service.run_dto(run)])[0], run.task_id
@@ -549,7 +556,12 @@ class Regenerate(WorkbenchResource):
             WorkbenchRunEnvelopeResponse,
             {
                 "data": regenerate(
-                    *self.owner(), str(run_id), payload.version, payload.request_key, query=payload.query
+                    *self.owner(),
+                    str(run_id),
+                    payload.version,
+                    payload.request_key,
+                    query=payload.query,
+                    activity_protocol=payload.activity_protocol,
                 ),
             },
         ), 202
@@ -586,14 +598,21 @@ class Stop(WorkbenchResource):
     )
     def post(self, run_id):
         tenant_id, account_id = self.owner()
-        dto, task_id = owned_run(tenant_id, account_id, str(run_id))
+        task_id = read_state(tenant_id, account_id, str(run_id))["task_id"]
         redis_client.setex(scheduler.PREFIX + "stop:" + str(run_id), 86400, "1")
+        end_event = None
         with session_factory.get_session_maker().begin() as session:
-            run = session.get(WorkbenchRun, str(run_id))
+            run = session.scalar(owned_statement(tenant_id, account_id, str(run_id)).with_for_update())
             if run is None:
                 raise NotFound()
             if run.status in ("queued", "running", "waiting_input", "environment_update", "environment_installing"):
                 run.status = "cancelled"
+                if uses_journal(run):
+                    end_event = append_locked(
+                        session, run, {"event": "workbench_end", "status": "cancelled", "error": None}
+                    )
+        if end_event is not None:
+            notify(str(run_id), end_event)
         if task_id:
             AppTaskService.stop_task(task_id, InvokeFrom.EXPLORE, account_id, AppMode.AGENT)
         from tasks.workbench_tasks import force_stop
@@ -608,7 +627,7 @@ class Events(WorkbenchResource):
     @console_ns.response(200, "Resumable server-sent events; Last-Event-ID overrides cursor")
     def get(self, run_id):
         owner = self.owner()
-        dto, _ = owned_run(*owner, str(run_id))
+        state = read_state(*owner, str(run_id))
         query = WorkbenchEventsQuery.model_validate(
             {"cursor": request.headers.get("Last-Event-ID") or request.args.get("cursor") or "0-0"}
         )
@@ -616,6 +635,14 @@ class Events(WorkbenchResource):
 
         def generate() -> Iterator[str]:
             nonlocal cursor
+            if state["activity_protocol"] == 1:
+                for item in stream_events(*owner, str(run_id), after=int(cursor.split("-")[0])):
+                    if item is None:
+                        yield ": keepalive\n\n"
+                    else:
+                        identifier = f"id: {item['_id']}\n" if item.get("_id") else ""
+                        yield identifier + "data: " + json.dumps(item, ensure_ascii=False) + "\n\n"
+                return
             while True:
                 items = redis_client.xread({scheduler.event_key(str(run_id)): cursor}, count=100, block=1000)
                 for event_id, fields in scheduler.stream_entries(items):
@@ -623,8 +650,8 @@ class Events(WorkbenchResource):
                     data = fields.get(b"data", fields.get("data"))
                     text = data.decode() if isinstance(data, bytes) else data
                     if json.loads(text).get("event") == "workbench_end":
-                        state, _ = owned_run(*owner, str(run_id))
-                        if state["status"] == "stopping":
+                        terminal_state = read_state(*owner, str(run_id))
+                        if terminal_state["status"] == "stopping":
                             yield (
                                 f"id: {cursor}\ndata: "
                                 + json.dumps({"event": "workbench_status", "status": "stopping"})
@@ -634,8 +661,8 @@ class Events(WorkbenchResource):
                     yield f"id: {cursor}\ndata: {text}\n\n"
                     if json.loads(text).get("event") == "workbench_end":
                         return
-                state, _ = owned_run(*owner, str(run_id))
-                if state["status"] not in (
+                terminal_state = read_state(*owner, str(run_id))
+                if terminal_state["status"] not in (
                     "queued",
                     "running",
                     "environment_update",
@@ -643,11 +670,18 @@ class Events(WorkbenchResource):
                     "stopping",
                 ):
                     if cursor == "0-0":
-                        for event in state["events"]:
+                        legacy_dto, _ = owned_run(*owner, str(run_id))
+                        for event in legacy_dto["events"]:
                             yield "data: " + json.dumps(event) + "\n\n"
                     yield (
                         "data: "
-                        + json.dumps({"event": "workbench_end", "status": state["status"], "error": state["error"]})
+                        + json.dumps(
+                            {
+                                "event": "workbench_end",
+                                "status": terminal_state["status"],
+                                "error": terminal_state["error"],
+                            }
+                        )
                         + "\n\n"
                     )
                     return

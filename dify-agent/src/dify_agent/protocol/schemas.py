@@ -53,6 +53,7 @@ DIFY_AGENT_OUTPUT_LAYER_ID: Final[str] = "output"
 RunStatus = Literal["running", "succeeded", "failed", "cancelled"]
 RunEventType = Literal[
     "context_status",
+    "workbench_activity",
     "run_started",
     "pydantic_ai_event",
     "run_succeeded",
@@ -398,6 +399,57 @@ class ContextStatusRunEvent(BaseRunEvent):
     data: ContextStatusData
 
 
+class WorkbenchActivityData(BaseModel):
+    """A model-authored public progress summary, never a task success assertion."""
+
+    kind: Literal["activity"] = "activity"
+    workbench_run_id: str
+    activity_id: str
+    revision: int = Field(ge=1)
+    action: Literal["begin", "update", "close"]
+    title: str = Field(min_length=1, max_length=120)
+    goal: str = Field(default="", max_length=240)
+    evidence_call_ids: list[str] = Field(default_factory=list, max_length=20)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+
+class WorkbenchToolData(BaseModel):
+    """One execution identity, retained when a deferred call resumes in a new native run."""
+
+    kind: Literal["tool"] = "tool"
+    workbench_run_id: str
+    call_id: str
+    tool_call_id: str
+    tool_name: str
+    activity_id: str | None = None
+    stage: Literal["started", "returned", "error"]
+    input: JsonValue = None
+    output: JsonValue = None
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+
+class WorkbenchNarrativeData(BaseModel):
+    """Visible text in the same ordered stream as workbench tool execution."""
+
+    kind: Literal["text", "reasoning"]
+    workbench_run_id: str
+    segment_id: str
+    text: str
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+
+type WorkbenchProgressData = Annotated[
+    WorkbenchActivityData | WorkbenchToolData | WorkbenchNarrativeData, Field(discriminator="kind")
+]
+
+
+class WorkbenchActivityRunEvent(BaseRunEvent):
+    """Opt-in workbench progress; readers must support this variant before producers enable it."""
+
+    type: Literal["workbench_activity"] = "workbench_activity"
+    data: WorkbenchProgressData
+
+
 class RunSucceededEvent(BaseRunEvent):
     """Terminal success event carrying the complete successful run result."""
 
@@ -423,6 +475,7 @@ type RunEvent = Annotated[
     RunStartedEvent
     | PydanticAIStreamRunEvent
     | ContextStatusRunEvent
+    | WorkbenchActivityRunEvent
     | RunSucceededEvent
     | RunFailedEvent
     | RunCancelledEvent,
@@ -452,6 +505,11 @@ __all__ = [
     "CancelRunResponse",
     "ContextStatusData",
     "ContextStatusRunEvent",
+    "WorkbenchActivityData",
+    "WorkbenchActivityRunEvent",
+    "WorkbenchNarrativeData",
+    "WorkbenchProgressData",
+    "WorkbenchToolData",
     "CreateRunRequest",
     "CreateRunResponse",
     "DeferredToolCallPayload",

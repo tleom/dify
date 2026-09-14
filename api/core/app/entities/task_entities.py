@@ -74,6 +74,8 @@ class StreamEvent(StrEnum):
     MESSAGE_REPLACE = "message_replace"
     AGENT_THOUGHT = "agent_thought"
     AGENT_MESSAGE = "agent_message"
+    WORKBENCH_ACTIVITY = "workbench_activity"
+    WORKBENCH_CONTEXT = "workbench_context"
     WORKFLOW_STARTED = "workflow_started"
     WORKFLOW_PAUSED = "workflow_paused"
     WORKFLOW_FINISHED = "workflow_finished"
@@ -112,6 +114,13 @@ class ErrorStreamResponse(StreamResponse):
     event: StreamEvent = StreamEvent.ERROR
     err: Exception
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+class WorkbenchActivityStreamResponse(StreamResponse):
+    event: StreamEvent = StreamEvent.WORKBENCH_ACTIVITY
+    backend_run_id: str
+    source_event_id: str
+    data: dict[str, Any]
 
 
 class MessageStreamResponse(StreamResponse):

@@ -64,6 +64,7 @@ class DifyPluginLLMLayer(PlainLayer[DifyPluginLLMDeps, DifyPluginLLMLayerConfig]
             inner_api_key=self.inner_api_key,
             execution_context=self.deps.execution_context.config,
             agent_run_id=agent_run_id,
+            credential_ref=self.config.credential_ref,
             http_client=http_client,
         )
         return DifyLLMAdapterModel(

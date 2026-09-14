@@ -87,6 +87,21 @@ class AgentLLMInnerService:
         target = request.target
         app = self._validate_app_tenant(app_id=caller.app_id, tenant_id=caller.tenant_id)
         provider_manager = create_plugin_provider_manager(tenant_id=caller.tenant_id, user_id=caller.user_id)
+        if target.credential_ref is not None:
+            from core.app.llm.agent_model import resolve_referenced_agent_model
+
+            try:
+                model_instance = resolve_referenced_agent_model(
+                    provider_manager=provider_manager, tenant_id=caller.tenant_id, user_id=caller.user_id,
+                    provider=target.provider, model=target.model, credential_ref=target.credential_ref,
+                )
+            except ValueError as exc:
+                raise AgentLLMInnerServiceError(
+                    "agent_model_credential_invalid", str(exc), status_code=400,
+                ) from exc
+            return PreparedAgentLLMInvocation(
+                request=request, model_instance=model_instance, app_type=get_credit_usage_app_type(app.mode),
+            )
         model_manager = ModelManager(provider_manager=provider_manager)
         model_instance = model_manager.get_model_instance(
             tenant_id=caller.tenant_id,

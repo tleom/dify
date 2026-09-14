@@ -13,7 +13,7 @@ optional JSON Schema output layer share the same ``Agent`` construction path.
 from collections.abc import Sequence
 from typing import Any, cast
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, AgentRetries
 from pydantic_ai.messages import UserContent
 from pydantic_ai.models import Model
 from pydantic_ai.output import OutputSpec
@@ -26,6 +26,7 @@ def create_agent(
     *,
     tools: Sequence[PydanticAITool[object]],
     output_type: OutputSpec[object] = str,
+    output_retries: int | None = None,
 ) -> Agent[None, object]:
     """Create the pydantic-ai agent for one run.
 
@@ -35,7 +36,16 @@ def create_agent(
     carries the Pydantic hooks needed for schema exposure and runtime validation,
     so agent construction does not need to register a separate validator.
     """
-    return cast(Agent[None, object], Agent(model, output_type=output_type, tools=tools))
+    retries: AgentRetries | None = {"output": output_retries} if output_retries is not None else None
+    return cast(
+        Agent[None, object],
+        Agent(
+            model,
+            output_type=output_type,
+            tools=tools,
+            retries=retries,
+        ),
+    )
 
 
 def normalize_user_input(user_prompts: Sequence[UserContent]) -> str | Sequence[UserContent]:
