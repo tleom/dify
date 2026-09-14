@@ -56,6 +56,10 @@ An explicit reference pins the call to
 that credential and uses the custom-provider billing path; load balancing cannot
 replace it. Invalid references fail explicitly. Context-window and vision
 capabilities use the same reference. Secrets remain inside the API runtime.
+New or changed model references are authorized against the editing account before
+drafts, snapshots, or copied Agents persist them. A reference preserved from the
+same Agent's stored model can remain unchanged; another Agent's payload cannot
+supply that trust. Published invocations continue using the saved reference.
 
 Workbench mentions are loaded from the current run's frozen payload. Mentioned
 Skills are eagerly read by the config layer before the model runs. The optional
@@ -69,7 +73,9 @@ has two retries when mentions are present. Completion state survives suspension
 of that run; a new workbench turn starts with fresh mention requirements.
 
 Workbench activity reporting is opt-in through `dify.workbench_activity`. The
-composition supplies the trusted logical `workbench_run_id`. Its sequential
+tool name `report_activity` is reserved in composer saves and prepared plugin/core
+tool declarations, including model-facing name overrides and expanded providers.
+The composition supplies the trusted logical `workbench_run_id`. Its sequential
 `report_activity` tool lets the same task model describe an action and purpose,
 update the stage, and close an activity after results return. The runtime assigns
 activity IDs and revisions, binds each business call at execution start, and

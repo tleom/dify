@@ -5,11 +5,13 @@ import json
 
 import httpx
 import pytest
+from pydantic import ValidationError
 from pydantic_ai import ModelRetry, Tool
 from pydantic_ai.messages import RetryPromptPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from dify_agent.layers.dify_plugin.configs import DifyPluginToolConfig, DifyPluginToolsLayerConfig
+from dify_agent.layers.dify_core_tools.configs import DifyCoreToolConfig
 from dify_agent.layers.dify_plugin.llm_layer import DifyPluginLLMLayer
 from dify_agent.layers.dify_plugin.tools_layer import DifyPluginToolsLayer
 from dify_agent.layers.workbench_activity import WorkbenchActivityConfig, WorkbenchActivityState
@@ -544,3 +546,21 @@ def test_soft_knowledge_error_remains_visible_without_aborting_run(monkeypatch):
     events = asyncio.run(execute())
     assert [item.stage for item in _progress(events, "tool")] == ["started", "error"]
     assert _state(events).calls["native-1:search"].state == "error"
+
+
+@pytest.mark.parametrize("source", ["plugin", "core"])
+@pytest.mark.parametrize("field", ["tool_name", "name"])
+def test_configured_tools_cannot_claim_the_activity_name(source, field):
+    config = {"tool_name": "business_tool", field: "report_activity"}
+    with pytest.raises(ValidationError, match="reserved"):
+        if source == "plugin":
+            DifyPluginToolConfig.model_validate(
+                {
+                    **config,
+                    "plugin_id": "test/tools",
+                    "provider": "test",
+                    "credential_type": "unauthorized",
+                }
+            )
+        else:
+            DifyCoreToolConfig.model_validate({**config, "provider_type": "api", "provider_id": "test"})

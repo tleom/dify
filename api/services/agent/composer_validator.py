@@ -2,7 +2,9 @@ import re
 from typing import Any
 
 from pydantic import ValidationError
+from sqlalchemy.orm import Session
 
+from core.agent.model_credentials import validate_model_credential_selection
 from models.agent_config_entities import AgentKnowledgeQueryMode
 from services.agent.errors import AgentSoulLockedError, InvalidComposerConfigError, PlaintextSecretNotAllowedError
 from services.agent.prompt_mentions import (
@@ -50,8 +52,30 @@ _DANGEROUS_ACK_KEYS = (
 
 
 class ComposerConfigValidator:
+    @staticmethod
+    def validate_model_credential(
+        *,
+        session: Session,
+        tenant_id: str,
+        account_id: str,
+        agent_soul: AgentSoulConfig,
+        previous_soul: AgentSoulConfig | None = None,
+    ) -> None:
+        try:
+            validate_model_credential_selection(
+                session=session,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                model=agent_soul.model,
+                previous_model=previous_soul.model if previous_soul else None,
+            )
+        except ValueError as exc:
+            raise InvalidComposerConfigError(str(exc)) from exc
+
     @classmethod
     def validate_draft_save_payload(cls, payload: ComposerSavePayload) -> None:
+        if payload.agent_soul is not None:
+            cls._validate_reserved_tool_names(payload.agent_soul)
         if (
             payload.variant == ComposerVariant.WORKFLOW
             and payload.soul_lock.locked
@@ -228,11 +252,20 @@ class ComposerConfigValidator:
 
     @classmethod
     def validate_agent_soul(cls, agent_soul: AgentSoulConfig) -> None:
+        cls._validate_reserved_tool_names(agent_soul)
         dumped = agent_soul.model_dump(mode="json")
         cls._reject_missing_config_assets(agent_soul)
         cls._validate_knowledge_runtime_config(agent_soul)
         cls._reject_plaintext_secrets(dumped, path="agent_soul")
         cls._validate_shell_config(dumped)
+
+    @staticmethod
+    def _validate_reserved_tool_names(agent_soul: AgentSoulConfig) -> None:
+        if any(
+            tool.tool_name == "report_activity" or tool.name == "report_activity"
+            for tool in agent_soul.tools.dify_tools
+        ):
+            raise InvalidComposerConfigError("report_activity is reserved for workbench activity reporting")
 
     @staticmethod
     def _reject_missing_config_assets(agent_soul: AgentSoulConfig) -> None:

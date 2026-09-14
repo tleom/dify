@@ -1812,6 +1812,21 @@ class AgentComposerService:
         home_snapshot_id: str | None,
         previous_snapshot_id: str | None = None,
     ) -> AgentConfigSnapshot:
+        if agent_soul.model is not None and agent_soul.model.credential_ref is not None:
+            previous = (
+                cls._get_version_if_present(
+                    session=session, tenant_id=tenant_id, agent_id=agent_id, version_id=previous_snapshot_id
+                )
+                if previous_snapshot_id
+                else None
+            )
+            ComposerConfigValidator.validate_model_credential(
+                session=session,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                agent_soul=agent_soul,
+                previous_soul=AgentSoulConfig.model_validate(previous.config_snapshot_dict) if previous else None,
+            )
         next_version = (
             session.scalar(
                 select(func.max(AgentConfigSnapshot.version)).where(
@@ -2059,6 +2074,14 @@ class AgentComposerService:
             account_id=account_id,
             created_by=account_id_for_audit,
         )
+        if agent_soul.model is not None and agent_soul.model.credential_ref is not None:
+            ComposerConfigValidator.validate_model_credential(
+                session=session,
+                tenant_id=tenant_id,
+                account_id=account_id_for_audit,
+                agent_soul=agent_soul,
+                previous_soul=AgentSoulConfig.model_validate(draft.config_snapshot_dict),
+            )
         draft.config_snapshot = agent_soul
         if base_snapshot_id is not None:
             draft.base_snapshot_id = base_snapshot_id
