@@ -78,3 +78,15 @@ Agent 使用的 Redis、任务记录、数据库和用户持久卷属于执行�
 `sandbox-office` 镜像构建 `private_ipc.so`，仅在 UNO 工作进程及其 LibreOffice 子进程中加载。它使 LibreOffice 的 `OSL_SOCKET_PATH` 回退生效，管道与 Profile 都位于本次转换的私有临时目录。工作进程直接启动 Debian 的 `soffice.bin`，处理首次 Profile 初始化的一次正常重启；转换结束后清理目录。Shell 的 Landlock 规则和共享临时目录权限保持不变。
 
 此修复需要重建 `workbench/sandbox-office/Dockerfile` 对应的用户沙箱镜像。验证须通过 shellctl 的作业入口，覆盖并发转换、预览、公式重算、修订接受，以及共享临时目录和其他会话目录的访问拒绝。服务更新和用户容器镜像迁移应在活动任务结束后执行。
+
+### 文件空间固定链接
+
+对外页面、API 和文件服务统一使用 `https://agent.xcmggx.com`，反向代理上游为 Dify HTTP 入口。各应用容器的 `CONSOLE_API_URL`、`CONSOLE_WEB_URL`、`SERVICE_API_URL`、`APP_API_URL`、`APP_WEB_URL`、`FILES_URL` 保持一致；`INTERNAL_FILES_URL` 继续使用容器网络内部地址。反向代理启用 HTTP/1.1，关闭响应缓冲，并为 SSE 保留足够的读取超时。
+
+文件列表、单文件查询与 Agent `workbench_files` 工具返回相同的 `preview_url`、`download_url`。链接按会话和路径保持稳定；Dify 在每次访问时验证签名、会话归属及活动文件空间。删除文件、会话或退役文件空间后失效；更改签名密钥也会使旧链接失效。HTML 预览保留不透明来源的 CSP sandbox。
+
+下载资格由 Manager 按实际读取能力判断：单文件不超过 20 MiB，目录内受支持文件总量不超过 50 MiB，且不能包含符号链接或特殊文件。无法下载的条目保留元数据并返回 `downloadable=false`，不签发链接。任务暂停时将待交付文件记录保存在快照中；同一任务恢复后重新查询验证链接，新一轮任务清空待交付记录。
+
+正文在发送给页面前核对文件链接：图片必须使用查询得到的预览地址，下载必须使用对应下载地址，猜测地址会退回模型修正。文件变化后重新查询确认，查询失败时如实说明交付受阻。执行层会记录会话目录实际新增、修改的文件，因此脚本生成的 Word、图片等文件也会显示独立过程；上下文压缩继续留在当前执行分组中。
+
+单文件查询使用 Manager 的 `stat` 操作直接读取指定路径，不受目录列表的 2,000 项上限影响。先发布支持 `stat` 的 Sandbox Manager，再发布 Agent、API、gxzs 后端和前端；回滚时按相反顺序恢复服务。文件功能无需数据库迁移；旧的认证下载接口保留。已等待用户输入的旧任务按原快照恢复，在下一次正常对话轮次获得文件查询工具。

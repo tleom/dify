@@ -35,6 +35,8 @@ from typing import Any
 from pydantic_ai.messages import UserContent
 
 from agenton.compositor import Compositor, CompositorConfig, LayerProvider, LayerProviderInput
+from agenton.layers import LayerConfig
+from dify_agent.layers.workbench_files import WorkbenchFilesLayer
 from agenton.layers.types import AllPromptTypes, AllToolTypes, AllUserPromptTypes, PydanticAIPrompt, PydanticAITool
 from agenton_collections.layers.pydantic_ai import PydanticAIHistoryLayer
 from agenton_collections.layers.plain.basic import PromptLayer
@@ -86,6 +88,14 @@ def create_default_layer_providers(
         LayerProvider.from_layer_type(WorkbenchEnvironmentLayer),
         LayerProvider.from_layer_type(WorkbenchMentionsLayer),
         LayerProvider.from_layer_type(WorkbenchActivityLayer),
+        LayerProvider.from_factory(
+            layer_type=WorkbenchFilesLayer,
+            create=lambda config: WorkbenchFilesLayer(
+                config=LayerConfig.model_validate(config),
+                inner_api_url=inner_api_url,
+                inner_api_key=inner_api_key,
+            ),
+        ),
         LayerProvider.from_layer_type(DifyConfigLayer),
         LayerProvider.from_factory(
             layer_type=DifyExecutionContextLayer,

@@ -33,6 +33,7 @@ from dify_agent.agent_stub.shell_env import ShellAgentStubTokenFactory, build_sh
 from dify_agent.layers.execution_context import DifyExecutionContextLayerConfig
 from dify_agent.layers.runtime.layer import DifyRuntimeLayer
 from dify_agent.layers.shell.configs import DIFY_SHELL_LAYER_TYPE_ID, DifyShellLayerConfig
+from dify_agent.layers.shell.file_operations import file_script
 from dify_agent.layers.shell.output_text import normalized_output_text, utf8_prefix, utf8_suffix
 from dify_agent.runtime.command_runner import execute_complete_with_commands
 from dify_agent.runtime_backend import RuntimeLease
@@ -256,12 +257,21 @@ class DifyShellLayer(PydanticAILayer[DifyShellLayerDeps, object, DifyShellLayerC
     @property
     @override
     def tools(self) -> Sequence[PydanticAITool[object]]:
-        return [
+        tools = [
             Tool(self._tool_run, name="shell_run"),
             Tool(self._tool_wait, name="shell_wait"),
             Tool(self._tool_input, name="shell_input"),
             Tool(self._tool_interrupt, name="shell_interrupt"),
         ]
+        execution_context = self.deps.execution_context if hasattr(self, "deps") else None
+        if execution_context is not None and execution_context.config.workbench_run_id:
+            tools.extend(
+                [
+                    Tool(self._tool_file_create, name="file_create", sequential=True),
+                    Tool(self._tool_file_edit, name="file_edit", sequential=True),
+                ]
+            )
+        return tools
 
     def _build_prefix_prompt(self) -> str:
         execution_context = self.deps.execution_context
@@ -269,7 +279,13 @@ class DifyShellLayer(PydanticAILayer[DifyShellLayerDeps, object, DifyShellLayerC
             # The workbench has a shared, read-only dependency environment and
             # different writable paths. Its layer owns those invariants; usage
             # guidance comes from the administrator's published instructions.
-            return _SHELL_LAYER_PREFIX_PROMPT
+            return _SHELL_LAYER_PREFIX_PROMPT + (
+                "\nUse file_create to create UTF-8 text files and file_edit to change existing text files. "
+                "Use these explicit tools for file changes instead of shell heredocs or escaped replacement scripts. "
+                "For long scripts, save short sections with these file tools, then execute a short shell_run command. "
+                "Pass the declared fields directly as JSON, without an extra arguments wrapper. "
+                "Use paths in the conversation directory and read existing text before editing."
+            )
         is_build_draft = (
             execution_context is not None and execution_context.config.agent_config_version_kind == "build_draft"
         )
@@ -308,6 +324,26 @@ class DifyShellLayer(PydanticAILayer[DifyShellLayerDeps, object, DifyShellLayerC
     async def on_context_delete(self) -> None:
         await self._delete_tracked_jobs_best_effort(self.runtime_state.job_ids)
         self._clear_tracked_jobs()
+
+    async def _tool_file_create(self, path: str, content: str) -> dict[str, object]:
+        """Create a new UTF-8 text file. Parent directory must exist; existing files are never overwritten."""
+        return await self._file_operation("create", path=path, content=content)
+
+    async def _tool_file_edit(self, path: str, old_text: str, new_text: str) -> dict[str, object]:
+        """Edit a UTF-8 text file by replacing exactly one occurrence of old_text with new_text."""
+        return await self._file_operation("edit", path=path, old_text=old_text, new_text=new_text)
+
+    async def _file_operation(self, operation: str, **arguments: str) -> dict[str, object]:
+        try:
+            result = await self.run_remote_script_complete(
+                file_script(self._require_workspace_cwd(), operation, **arguments)
+            )
+            output = json.loads(result.output)
+            if not isinstance(output, dict):
+                raise ValueError("Invalid file operation result")
+            return output
+        except Exception as exc:
+            return {"error": str(exc)}
 
     async def _tool_run(self, script: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> ShellRunToolResult:
         """Start a shell job in the current workspace and return its output and status."""

@@ -106,13 +106,12 @@ class WorkbenchActivityLayer(PydanticAILayer[NoLayerDeps, object, WorkbenchActiv
     def _prompt() -> str:
         return (
             "Use report_activity to briefly tell the user what you are doing and why, in the user's language. "
-            "Group tool work by its specific purpose, not by the entire user request or by tool names. "
+            "Keep consecutive thinking and tool work in the same activity until you send a normal assistant text reply. "
             "Before related commands, begin an activity with a concise purpose title (normally 6-16 Chinese characters). "
-            "Keep commands that pursue the same concrete result in that activity. When the purpose changes, begin a new "
-            "activity: diagnosing a read failure, installing its missing dependency, and verifying the original read "
-            "are distinct purposes even within one user task. Never use one broad activity to cover all of them. "
+            "When the immediate purpose changes during continuous execution, update that activity's title to the current purpose. "
+            "After a normal assistant reply, begin a new activity for subsequent work. "
             "Use goal for explanatory detail, and keep title a short purpose phrase without commands, counts or status labels. "
-            "Update the same activity only to clarify its purpose; close it after its result is checked, preserving the "
+            "Update the same activity as work advances; close it after its result is checked, preserving the "
             "concise title. On environment resume, finish the installation activity and begin the verification purpose "
             "before retrying. Report meaningful purpose changes, not every call or log line. "
             "Normal explanations and final answers remain normal assistant text. Do not reveal hidden reasoning, credentials, "

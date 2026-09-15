@@ -13,7 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-from agenton.compositor import CompositorSessionSnapshot
+from agenton.compositor import CompositorSessionSnapshot, LayerSessionSnapshot
+from agenton.layers import LifecycleState
 from dify_agent.layers.ask_human import DifyAskHumanLayerConfig
 from dify_agent.layers.execution_context import (
     DifyExecutionContextInvokeFrom,
@@ -145,9 +146,13 @@ class AgentAppRuntimeRequestBuilder:
                 "cli_tool_count": len(agent_soul.tools.cli_tools),
             }
 
-        runtime_config_skills = [] if workbench_run_id else load_runtime_agent_skill_configs(
-            tenant_id=context.dify_context.tenant_id,
-            agent_id=context.agent_id,
+        runtime_config_skills = (
+            []
+            if workbench_run_id
+            else load_runtime_agent_skill_configs(
+                tenant_id=context.dify_context.tenant_id,
+                agent_id=context.agent_id,
+            )
         )
         config_layer_config, config_warnings = build_config_layer_config(
             agent_soul,
@@ -166,9 +171,14 @@ class AgentAppRuntimeRequestBuilder:
             mentioned_skills, mention_groups = context.workbench_runtime.resolve_run_requirements(
                 workbench_run_id, context.dify_context.tenant_id, context.dify_context.user_id, agent_soul, tool_layers
             )
-            config_layer_config.mentioned_skill_names = list(dict.fromkeys([
-                *config_layer_config.mentioned_skill_names, *mentioned_skills,
-            ]))
+            config_layer_config.mentioned_skill_names = list(
+                dict.fromkeys(
+                    [
+                        *config_layer_config.mentioned_skill_names,
+                        *mentioned_skills,
+                    ]
+                )
+            )
         append_runtime_warnings(metadata, config_warnings)
         soul_prompt_resolver = build_config_aware_soul_mention_resolver(
             agent_soul,
@@ -185,8 +195,11 @@ class AgentAppRuntimeRequestBuilder:
             run_context=context.dify_context,
             provider_name=agent_soul.model.model_provider,
             model_name=agent_soul.model.model,
-            **({"credential_ref": agent_soul.model.credential_ref.model_dump()}
-               if agent_soul.model.credential_ref else {}),
+            **(
+                {"credential_ref": agent_soul.model.credential_ref.model_dump()}
+                if agent_soul.model.credential_ref
+                else {}
+            ),
         )
         model_plugin_id, model_provider = normalize_plugin_daemon_provider_identity(
             ModelProviderID(agent_soul.model.model_provider),
@@ -207,8 +220,9 @@ class AgentAppRuntimeRequestBuilder:
                     plugin_id=model_plugin_id,
                     model_provider=model_provider,
                     model=agent_soul.model.model,
-                    credential_ref=(agent_soul.model.credential_ref.model_dump()
-                                    if agent_soul.model.credential_ref else None),
+                    credential_ref=(
+                        agent_soul.model.credential_ref.model_dump() if agent_soul.model.credential_ref else None
+                    ),
                     model_settings=agent_soul.model.model_settings.model_dump(mode="json", exclude_none=True),
                     context_window_tokens=context_window_tokens,
                 ),
@@ -232,19 +246,31 @@ class AgentAppRuntimeRequestBuilder:
                 agent_soul_prompt=expand_prompt_mentions(agent_soul.prompt.system_prompt, soul_prompt_resolver).strip()
                 or None,
                 agent_config_version_kind=context.agent_config_version_kind,
-                user_prompt=(expand_prompt_mentions(context.user_query, soul_prompt_resolver)
-                             if workbench_run_id else context.user_query),
+                user_prompt=(
+                    expand_prompt_mentions(context.user_query, soul_prompt_resolver)
+                    if workbench_run_id
+                    else context.user_query
+                ),
                 user_files=user_files,
                 tools=tool_layers.plugin_tools,
                 core_tools=tool_layers.core_tools,
                 knowledge=knowledge_config,
                 config_layer_config=config_layer_config,
-                ask_human_config=(DifyAskHumanLayerConfig(
-                    max_fields=3, allowed_field_types=["paragraph", "select"],
-                    tool_description=("Ask the current user for missing information needed to continue. "
-                        "Use 1-3 concise fields, prefer select choices when useful, and use paragraph for free text. "
-                        "Only ask when the answer materially affects the task. The run pauses until the user submits."),
-                ) if workbench_run_id else build_ask_human_layer_config(agent_soul)),
+                ask_human_config=(
+                    DifyAskHumanLayerConfig(
+                        max_fields=3,
+                        allowed_field_types=["paragraph", "select"],
+                        tool_description=(
+                            "Ask the current user for missing information needed to continue. "
+                            "Use 1-3 concise fields, prefer select choices when useful, "
+                            "and use paragraph for free text. "
+                            "Only ask when the answer materially affects the task. "
+                            "The run pauses until the user submits."
+                        ),
+                    )
+                    if workbench_run_id
+                    else build_ask_human_layer_config(agent_soul)
+                ),
                 include_shell=dify_config.AGENT_SHELL_ENABLED,
                 shell_config=build_shell_layer_config(agent_soul),
                 session_snapshot=context.session_snapshot,
@@ -260,21 +286,37 @@ class AgentAppRuntimeRequestBuilder:
             request.composition.layers.append(
                 RunLayerSpec(name="workbench_environment", type="dify.workbench_environment", config={})
             )
+            request.composition.layers.append(
+                RunLayerSpec(
+                    name="workbench_files",
+                    type="dify.workbench_files",
+                    deps={"execution_context": "execution_context"},
+                    config={},
+                )
+            )
             if mention_groups:
-                request.composition.layers.append(RunLayerSpec(
-                    name="workbench_mentions", type="dify.workbench_mentions",
-                    config=WorkbenchMentionsConfig(workbench_run_id=workbench_run_id, tool_groups=mention_groups),
-                ))
+                request.composition.layers.append(
+                    RunLayerSpec(
+                        name="workbench_mentions",
+                        type="dify.workbench_mentions",
+                        config=WorkbenchMentionsConfig(workbench_run_id=workbench_run_id, tool_groups=mention_groups),
+                    )
+                )
             if context.workbench_activity_protocol == 1:
                 from dify_agent.layers.workbench_activity import WorkbenchActivityConfig
 
-                request.composition.layers.append(RunLayerSpec(
-                    name="workbench_activity", type="dify.workbench_activity",
-                    config=WorkbenchActivityConfig(
-                        workbench_run_id=workbench_run_id, enabled=dify_config.WORKBENCH_ACTIVITY_ENABLED,
-                    ),
-                ))
+                request.composition.layers.append(
+                    RunLayerSpec(
+                        name="workbench_activity",
+                        type="dify.workbench_activity",
+                        config=WorkbenchActivityConfig(
+                            workbench_run_id=workbench_run_id,
+                            enabled=dify_config.WORKBENCH_ACTIVITY_ENABLED,
+                        ),
+                    )
+                )
             request.rebuild_layers = context.deferred_tool_results is None
+            self._upgrade_workbench_file_snapshot(request)
         self._validate_session_snapshot_layers(request)
         redacted = cast(dict[str, Any], redact_for_agent_backend_log(request))
         return AgentAppRuntimeRequest(
@@ -306,6 +348,27 @@ class AgentAppRuntimeRequestBuilder:
             else _build_user_download(file)
             for file in files
         ]
+
+    @staticmethod
+    def _upgrade_workbench_file_snapshot(request: CreateRunRequest) -> None:
+        """Add only the new stateless file reader to an otherwise identical deferred snapshot."""
+        snapshot = request.session_snapshot
+        if (
+            snapshot is None
+            or request.rebuild_layers
+            or any(layer.name == "workbench_files" for layer in snapshot.layers)
+        ):
+            return
+        previous = [layer.name for layer in snapshot.layers]
+        current = [layer.name for layer in request.composition.layers]
+        if previous != [name for name in current if name != "workbench_files"]:
+            return  # All other composition changes remain incompatible.
+        layers = list(snapshot.layers)
+        layers.insert(
+            current.index("workbench_files"),
+            LayerSessionSnapshot(name="workbench_files", lifecycle_state=LifecycleState.NEW, runtime_state={}),
+        )
+        request.session_snapshot = snapshot.model_copy(update={"layers": layers})
 
     @staticmethod
     def _validate_session_snapshot_layers(request: CreateRunRequest) -> None:

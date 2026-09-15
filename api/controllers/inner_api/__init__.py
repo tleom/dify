@@ -20,6 +20,7 @@ from . import runtime_credentials as _runtime_credentials
 from .agent import files as _agent_files
 from .agent import llm as _agent_llm
 from .agent import tools as _agent_tools
+from .agent import workbench_files as _agent_workbench_files
 from .app import dsl as _app_dsl
 from .app import file_grants as _app_file_grants
 from .knowledge import documents as _knowledge_documents
@@ -36,6 +37,7 @@ __all__ = [
     "_agent_files",
     "_agent_llm",
     "_agent_tools",
+    "_agent_workbench_files",
     "_app_dsl",
     "_app_file_grants",
     "_knowledge_documents",

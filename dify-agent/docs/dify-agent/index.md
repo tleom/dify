@@ -106,3 +106,39 @@ while retaining the new readers and journal. Existing protocol-1 continuations
 still emit tool and text records with both the reporting tool and its prompt disabled. Legacy runs
 retain their previous reader and composition contract. Do not drop the journal
 when merely disabling reporting.
+
+### Workbench file delivery
+
+Workbench compositions include `dify.workbench_files`, which binds the trusted execution context and exposes `workbench_files(path=".")`. Results confirm current-chat files and include the exact `preview_url` and `download_url` returned by the file-space UI. URLs remain stable for the owned path, use signed capabilities, and are invalid after the chat/workspace or file is removed. HTML previews run with an opaque sandbox origin. The model must query files before delivering those URLs.
+
+Pending generated paths persist in the session snapshot across deferred continuations of the same workbench run. URL verification resets on resume, and a new logical run clears the pending paths. Entries with `downloadable=false` remain visible but receive no URLs; the model must split unsupported artifacts or explain that delivery is blocked. File downloads are limited to 20 MiB, and directory archives to 50 MiB of supported file contents.
+
+Final delivery requires a download URL for at least one changed path or a directory archive containing it. Each query refreshes verification for its requested path; file changes invalidate previous query results and failures. Unrelated files do not establish delivery or explain a failure to deliver the current artifacts.
+
+Workbench shell sessions also expose `file_create(path, content)` and `file_edit(path, old_text, new_text)` for bounded UTF-8 file operations inside the current workspace. Creation refuses overwrite; editing requires exactly one match and preserves unchanged content. Shell argument envelopes are only unwrapped when complete JSON parses, independently of activity reporting; repeated malformed calls produce bounded, explicit observations.
+
+The runtime inventories regular files inside the conversation directory before execution,
+after tool results, and before publishing a model response. New and changed paths emit
+ordered `file_create` / `file_edit` tool records with `output.source=workspace_change`,
+including binary files produced by shell scripts or other tools. Explicit file tools
+retain their original row without a duplicate observation. Inventories do not follow
+symlinks or include internal config/cache/edit temporary files; they are limited to
+10,000 regular files and a 15-second scan. A scan failure is reported rather than
+claiming that file changes were checked. Changes are identified by filesystem size,
+modification/change timestamps and inode; file contents are not copied into the journal.
+
+Workbench answer text is held until the complete model response passes file-delivery
+validation. Markdown image targets must match verified preview URLs, and file/download
+links must match URLs obtained by the current file-space tool. Reference-style links
+are checked too, while fenced examples remain examples. Invalid responses request a
+bounded model correction before either native text events or workbench narrative
+events are published. The verified set is cleared when files change or a native run
+resumes; a failed lookup may be reported as a blocked delivery without inventing a link.
+Tool and reasoning events remain live while answer text is being validated.
+
+An older deferred workbench snapshot may gain only the new, empty file-reader layer
+when every other ordered layer name still matches. Existing suspended state and
+deferred calls are preserved; other composition changes remain incompatible.
+
+The frontend keeps context compaction in the current execution group. A normal
+assistant text reply still separates successive groups.

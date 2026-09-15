@@ -137,6 +137,32 @@ def test_reused_provider_ids_keep_distinct_commands_and_model_goal_updates(monke
     assert activities[-1].goal == "重新读取成功，已验证依赖恢复"
 
 
+def test_malformed_shell_calls_do_not_execute_and_recover_from_complete_argument_wrapper(monkeypatch):
+    requests = 0
+    executed = []
+
+    async def shell_run(script: str):
+        executed.append(script)
+        return {"done": True, "exit_code": 0}
+
+    async def stream(messages, info):
+        nonlocal requests
+        requests += 1
+        if requests <= 2:
+            yield {0: _call("shell_run", {"arguments": '{"script":"incomplete'}, "shell_run")}
+        elif requests == 3:
+            yield {0: _call("shell_run", {"arguments": json.dumps({"script": "safe command"})}, "shell_run")}
+        else:
+            yield "已完成。"
+
+    _, _, execute = _setup(monkeypatch, stream, [Tool(shell_run)])
+    events = asyncio.run(execute())
+    assert executed == ["safe command"]
+    returned = [item for item in _progress(events, "tool") if item.stage != "started"]
+    assert [item.stage for item in returned] == ["error", "error", "returned"]
+    assert len({item.call_id for item in returned}) == 3
+
+
 @pytest.mark.parametrize("coalesce", [True, False])
 def test_purpose_binding_preserves_parallelism_and_two_barriers(monkeypatch, coalesce):
     requests = 0
@@ -591,3 +617,76 @@ def test_configured_tools_cannot_claim_the_activity_name(source, field):
             )
         else:
             DifyCoreToolConfig.model_validate({**config, "provider_type": "api", "provider_id": "test"})
+
+
+def test_workbench_files_tool_is_bound_to_server_identity_and_delivers_exact_urls(monkeypatch):
+    requests = 0
+    preview = "https://files.example.test/files/workbench/signed/chart.png?mode=preview"
+    download = "https://files.example.test/files/workbench/signed/chart.png?mode=download"
+
+    async def stream(messages, info):
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            tool = next(tool for tool in info.function_tools if tool.name == "workbench_files")
+            assert set(tool.parameters_json_schema["properties"]) == {"path"}
+            yield {0: _call("workbench_files", {"path": "chart.png"}, "files-1")}
+        else:
+            result = next(
+                part
+                for message in reversed(messages)
+                for part in message.parts
+                if isinstance(part, ToolReturnPart) and part.tool_name == "workbench_files"
+            )
+            item = json.loads(result.content)["entries"][0]
+            assert item["preview_url"] == preview and item["download_url"] == download
+            yield f"文件已在文件空间可见，可打开查看。[下载]({item['download_url']})\n![图表]({item['preview_url']})"
+
+    request, sink, _ = _setup(monkeypatch, stream)
+    context = next(layer.config for layer in request.composition.layers if layer.name == "execution_context")
+    context.workbench_run_id = "turn-1"
+    context.user_id = "owner-1"
+    context.app_id = "app-1"
+    request.composition.layers.append(
+        RunLayerSpec(
+            name="workbench_files",
+            type="dify.workbench_files",
+            deps={"execution_context": "execution_context"},
+            config={},
+        )
+    )
+
+    def transport(request):
+        assert request.url.path == "/inner/api/agent/workbench/files"
+        assert json.loads(request.content) == {
+            "tenant_id": "tenant-1",
+            "account_id": "owner-1",
+            "app_id": "app-1",
+            "workbench_run_id": "turn-1",
+            "path": "chart.png",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "directory": "conversations/chat-1",
+                "complete": True,
+                "entries": [{"name": "chart.png", "preview_url": preview, "download_url": download}],
+            },
+        )
+
+    async def execute():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            await AgentRunRunner(
+                run_id="files-run",
+                request=request,
+                sink=sink,
+                plugin_daemon_http_client=client,
+                dify_api_http_client=client,
+            ).run()
+
+    asyncio.run(execute())
+    events = sink.events["files-run"]
+    assert isinstance(events[-1], RunSucceededEvent), events[-1]
+    assert requests == 2
+    texts = "".join(item.text for item in _progress(events, "text"))
+    assert preview in texts and download in texts

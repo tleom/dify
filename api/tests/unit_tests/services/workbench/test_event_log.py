@@ -73,7 +73,7 @@ def journal(monkeypatch: pytest.MonkeyPatch) -> Iterator[Journal]:
 def test_history_live_and_reconnect_share_one_durable_order(journal: Journal) -> None:
     factory, tenant, account, run_id, _ = journal
     events = [
-        {"event": "agent_message", "message_id": "message", "answer": "开始"},
+        {"event": "message", "message_id": "message", "answer": "开始"},
         {"event": "workbench_activity", "data": {"kind": "activity", "title": "安装依赖以读取文档"}},
         {"event": "workbench_knowledge", "search_id": "search", "status": "returned"},
         {"event": "workbench_context", "phase": "compacted", "used_tokens": 30},
@@ -98,6 +98,99 @@ def test_history_live_and_reconnect_share_one_durable_order(journal: Journal) ->
     assert terminal is not None
     assert terminal["status"] == "completed"
     assert list(event_log.stream_events(tenant, account, run_id, after=2))[:-1] == saved[2:]
+
+
+def test_old_duplicate_history_is_compacted_with_a_consistent_cursor(journal: Journal) -> None:
+    factory, tenant, account, run_id, _ = journal
+    with factory.begin() as session:
+        for index in range(1, 2001):
+            item = {
+                "event": "workbench_activity",
+                "_id": f"{index}-0",
+                "_sequence": index,
+                "data": {"kind": "reasoning", "segment_id": "thinking", "text": "一"},
+            }
+            if index % 2 == 0:
+                item = {"event": "agent_thought", "_id": f"{index}-0", "_sequence": index, "thought": "一" * index}
+            session.add(
+                WorkbenchRunEvent(run_id=run_id, sequence=index, event_key=str(index), payload=json.dumps(item))
+            )
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        run.status = "completed"
+        session.flush()
+        history, cursor = event_log.history_snapshot(run)
+    assert cursor == "2000-0"
+    assert len(history) == 1
+    assert history[0]["_id"] == "1-0"
+    assert history[0]["data"]["text"] == "一" * 1000
+    assert len(json.dumps(history)) < 10000
+    assert list(event_log.stream_events(tenant, account, run_id, after=2000)) == [
+        {"event": "workbench_end", "status": "completed", "error": None}
+    ]
+
+
+def test_new_protocol_suppresses_native_duplicates_but_keeps_message_identity(journal: Journal) -> None:
+    factory, _, _, run_id, _ = journal
+    assert event_log.append_event(run_id, {"event": "agent_thought", "thought": "duplicate"}) is None
+    assert (
+        event_log.append_event(run_id, {"event": "agent_message", "message_id": "message-id", "answer": "duplicate"})
+        is None
+    )
+    with factory() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        assert json.loads(run.payload)["message_ids"] == ["message-id"]
+        assert event_log.history_snapshot(run) == ([], "0-0")
+
+
+def test_delete_waiting_chat_cancels_it_and_blocks_late_resume(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from extensions.ext_redis import redis_client
+    from services.workbench import service
+    from tasks.workbench_tasks import force_stop
+
+    factory, tenant, account, run_id, chat_id = journal
+    monkeypatch.setattr(service, "authorize", lambda *_: None)
+    monkeypatch.setattr(redis_client, "zscore", lambda *_: 1)
+    monkeypatch.setattr(redis_client, "setex", MagicMock())
+    stopping = MagicMock()
+    monkeypatch.setattr(force_stop, "delay", stopping)
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        run.status = "waiting_input"
+    service.delete_chat(tenant, account, chat_id)
+    with factory() as session:
+        run = session.get(WorkbenchRun, run_id)
+        chat = session.get(WorkbenchChat, chat_id)
+        assert run is not None
+        assert run.status == "cancelled"
+        assert "pending" not in json.loads(run.payload)
+        assert chat is not None
+        assert chat.deleted == 1
+    stopping.assert_called_once_with(run_id, account)
+    with pytest.raises(NotFound):
+        service.resume(tenant, account, run_id, {}, None)
+
+
+@pytest.mark.parametrize("status", ["running", "queued", "stopping", "environment_installing"])
+def test_deleting_executing_chat_still_requires_stop(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    from werkzeug.exceptions import Conflict
+
+    from services.workbench import service
+
+    factory, tenant, account, run_id, chat_id = journal
+    monkeypatch.setattr(service, "authorize", lambda *_: None)
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        run.status = status
+    with pytest.raises(Conflict):
+        service.delete_chat(tenant, account, chat_id)
 
 
 def test_idempotent_source_and_native_attempt_validation(journal: Journal) -> None:
@@ -126,7 +219,7 @@ def test_idempotent_source_and_native_attempt_validation(journal: Journal) -> No
 @pytest.mark.parametrize("boundary", ["tenant", "account", "chat_tenant", "chat_account", "deleted"])
 def test_every_page_rechecks_full_ownership(journal: Journal, boundary: str) -> None:
     factory, tenant, account, run_id, chat_id = journal
-    event_log.append_event(run_id, {"event": "agent_message", "answer": "private"})
+    event_log.append_event(run_id, {"event": "message", "answer": "private"})
     if boundary in {"tenant", "account"}:
         if boundary == "tenant":
             tenant = str(uuid4())
@@ -158,7 +251,7 @@ def test_events_endpoint_reconnects_without_materializing_the_full_journal(
         run = session.get(WorkbenchRun, run_id)
         assert run is not None
         for index in range(3):
-            event_log.append_locked(session, run, {"event": "agent_message", "answer": f"{index}:" + "x" * 100_000})
+            event_log.append_locked(session, run, {"event": "message", "answer": f"{index}:" + "x" * 100_000})
         run.status = "completed"
 
     def unexpected_history(*_args: object, **_kwargs: object) -> None:
@@ -182,9 +275,9 @@ def test_terminal_stream_drains_all_pages_and_ignores_old_attempt_end(journal: J
         run = session.scalar(select(WorkbenchRun).where(WorkbenchRun.id == run_id).with_for_update())
         assert run is not None
         for index in range(105):
-            event_log.append_locked(session, run, {"event": "agent_message", "answer": str(index)})
+            event_log.append_locked(session, run, {"event": "message", "answer": str(index)})
         event_log.append_locked(session, run, {"event": "workbench_end", "status": "environment_update"})
-        event_log.append_locked(session, run, {"event": "agent_message", "answer": "安装后验证"})
+        event_log.append_locked(session, run, {"event": "message", "answer": "安装后验证"})
         run.status = "completed"
     stream = list(event_log.stream_events(tenant, account, run_id))
     assert len(stream) == 107
@@ -204,10 +297,10 @@ def test_history_dto_excludes_previous_attempt_endings(journal: Journal, pause_s
     with factory.begin() as session:
         run = session.get(WorkbenchRun, run_id)
         assert run is not None
-        event_log.append_locked(session, run, {"event": "agent_message", "answer": "暂停前"})
+        event_log.append_locked(session, run, {"event": "message", "answer": "暂停前"})
         event_log.append_locked(session, run, {"event": "workbench_end", "status": pause_status})
         if status != "queued":
-            event_log.append_locked(session, run, {"event": "agent_message", "answer": "继续执行"})
+            event_log.append_locked(session, run, {"event": "message", "answer": "继续执行"})
         if status == "completed":
             event_log.append_locked(session, run, {"event": "workbench_end", "status": status})
         run.status = status
@@ -459,7 +552,7 @@ def test_notification_failure_does_not_lose_committed_event(journal: Journal, mo
     # Exercise the actual notification failure handler, not a successful fake.
     monkeypatch.setattr(event_log, "redis_client", redis)
     monkeypatch.setattr(event_log, "notify", _REAL_NOTIFY)
-    assert event_log.append_event(run_id, {"event": "agent_message", "answer": "durable"}) == "1-0"
+    assert event_log.append_event(run_id, {"event": "message", "answer": "durable"}) == "1-0"
     assert event_log.read_page(tenant, account, run_id)[0][0]["answer"] == "durable"
 
 
@@ -477,7 +570,7 @@ def test_stop_closes_the_journal_before_late_frames_and_cleanup(
         run = session.get(WorkbenchRun, run_id)
         assert run is not None
         for index in range(message_count):
-            event_log.append_locked(session, run, {"event": "agent_message", "answer": str(index)})
+            event_log.append_locked(session, run, {"event": "message", "answer": str(index)})
         payload = json.loads(run.payload)
         payload["knowledge_events"] = [
             {
@@ -507,7 +600,7 @@ def test_stop_closes_the_journal_before_late_frames_and_cleanup(
     assert live[-1] is not None
     assert live[-1]["status"] == "cancelled"
     for name in (
-        "agent_message",
+        "message",
         "message_end",
         "error",
         "workbench_status",
@@ -536,7 +629,7 @@ def test_terminal_boundary_rejects_every_later_record(journal: Journal, status: 
         assert run is not None
         run.status = status
         event_log.append_locked(session, run, {"event": "workbench_end", "status": status})
-        assert event_log.append_locked(session, run, {"event": "agent_message", "answer": "late"}) is None
+        assert event_log.append_locked(session, run, {"event": "message", "answer": "late"}) is None
         assert event_log.append_locked(session, run, {"event": "workbench_end", "status": status}) is None
 
 
