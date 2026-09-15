@@ -1,12 +1,16 @@
 """Persisted FIFO and steering races against real SQLAlchemy transactions."""
 
 import json
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from itertools import starmap
+from pathlib import Path
+from typing import Literal, TypedDict, cast
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import Engine, create_engine
+from sqlalchemy.orm import Session, sessionmaker
 from werkzeug.exceptions import Conflict, Forbidden, NotFound
 
 from core.db import session_factory as factory_module
@@ -16,8 +20,85 @@ from models.workbench import WorkbenchChat, WorkbenchRevision, WorkbenchRun
 from services.workbench import followups, scheduler, service
 
 
-@pytest.fixture
-def queue(monkeypatch, config_overrides, tmp_path):
+class RunData(TypedDict):
+    id: str
+    chat_id: str
+    query: str
+    status: str
+    queue_order: int
+    parent_run_id: str | None
+    is_continuation: bool
+    attachments: list[dict[str, str]]
+
+
+class FollowupBatch(TypedDict):
+    messages: list[dict[str, str]]
+    sealed: bool
+
+
+@dataclass
+class Queue:
+    owner: tuple[str, str]
+    chat_id: str
+    app_id: str
+    factory: sessionmaker[Session]
+    published: list[str]
+    admin: Engine | None = None
+    application_name: str = ""
+
+    def send(self, query: str, **changes: object) -> RunData:
+        key = changes.pop("request_key", query)
+        assert isinstance(key, str)
+        return cast(
+            RunData,
+            service.enqueue(*self.owner, self.chat_id, 1, key, {"query": query, "queue_when_busy": True, **changes}),
+        )
+
+    def get(self, run_id: str) -> WorkbenchRun:
+        with self.factory() as session:
+            run = session.get(WorkbenchRun, run_id)
+            assert run is not None
+            return run
+
+    def finish(self, run_id: str, status: str = "completed") -> None:
+        with self.factory.begin() as session:
+            run = session.get(WorkbenchRun, run_id)
+            assert run is not None
+            run.status = status
+
+    def running(self, run_id: str) -> None:
+        with self.factory.begin() as session:
+            run = session.get(WorkbenchRun, run_id)
+            assert run is not None
+            run.status, run.backend_run_id = "running", str(uuid4())
+
+    def advance(self) -> str | None:
+        return followups.advance(*self.owner, self.chat_id)
+
+    def poll(
+        self, run_id: str, *, action: Literal["poll", "seal"] = "poll", seen_ids: list[str] | None = None
+    ) -> FollowupBatch:
+        ticket = self.get(run_id).backend_run_id
+        assert ticket is not None
+        return cast(
+            FollowupBatch,
+            followups.poll(
+                followups.AgentFollowupsPayload(
+                    tenant_id=self.owner[0],
+                    account_id=self.owner[1],
+                    app_id=self.app_id,
+                    workbench_run_id=run_id,
+                    backend_run_id=ticket,
+                    action=action,
+                    seen_ids=seen_ids or [],
+                )
+            ),
+        )
+
+
+def queue_fixture(
+    monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., None], tmp_path: Path
+) -> Iterator[Queue]:
     config_overrides(WORKBENCH_ENABLED=True, WORKBENCH_ACTIVITY_ENABLED=False)
     # DTO enrichment opens a separate read session. A file database gives it a
     # separate connection, so closing it cannot roll back the writer's transaction.
@@ -25,14 +106,14 @@ def queue(monkeypatch, config_overrides, tmp_path):
     WorkbenchChat.metadata.create_all(
         engine,
         tables=[
-            model.__table__
+            WorkbenchChat.metadata.tables[model.__tablename__]
             for model in (WorkbenchChat, WorkbenchRevision, WorkbenchRun, AgentWorkspaceBinding, Conversation)
         ],
     )
     factory = sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(factory_module, "_session_maker", factory)
     tenant, account, agent, app, snapshot, chat_id, revision = [str(uuid4()) for _ in range(7)]
-    selection = {"model": "test-model", "skills": [], "tools": [], "knowledge": []}
+    selection: dict[str, str | list[str]] = {"model": "test-model", "skills": [], "tools": [], "knowledge": []}
     with factory.begin() as session:
         session.add(
             WorkbenchChat(
@@ -57,54 +138,20 @@ def queue(monkeypatch, config_overrides, tmp_path):
     )
     monkeypatch.setattr(service, "read_chat", lambda *_: {"version": 1, "selection": selection})
     monkeypatch.setattr(service, "compile_config", lambda *_: {"model": "frozen-model"})
-    published = []
+    published: list[str] = []
     monkeypatch.setattr(scheduler, "publish", lambda *args: published.append(args[-1]))
 
-    class Queue:
-        owner = (tenant, account)
-
-        def send(self, query, **changes):
-            key = changes.pop("request_key", query)
-            return service.enqueue(
-                tenant, account, chat_id, 1, key, {"query": query, "queue_when_busy": True, **changes}
-            )
-
-        def get(self, run_id):
-            with factory() as session:
-                return session.get(WorkbenchRun, run_id)
-
-        def finish(self, run_id, status="completed"):
-            with factory.begin() as session:
-                session.get(WorkbenchRun, run_id).status = status
-
-        def running(self, run_id):
-            with factory.begin() as session:
-                run = session.get(WorkbenchRun, run_id)
-                run.status, run.backend_run_id = "running", str(uuid4())
-
-        def advance(self):
-            return followups.advance(tenant, account, chat_id)
-
-        def poll(self, run_id, **changes):
-            return followups.poll(
-                followups.AgentFollowupsPayload(
-                    tenant_id=tenant,
-                    account_id=account,
-                    app_id=app,
-                    workbench_run_id=run_id,
-                    backend_run_id=self.get(run_id).backend_run_id,
-                    **changes,
-                )
-            )
-
-    value = Queue()
-    value.published, value.factory = published, factory
-    yield value
+    yield Queue((tenant, account), chat_id, app, factory, published)
     engine.dispose()
 
 
+@pytest.fixture
+def queue(monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., None], tmp_path: Path) -> Iterator[Queue]:
+    yield from queue_fixture(monkeypatch, config_overrides, tmp_path)
+
+
 @pytest.mark.parametrize("ending", ["completed", "failed", "cancelled", "interrupted"])
-def test_three_waiting_messages_follow_fifo_and_publish_only_after_predecessor(queue, ending):
+def test_three_waiting_messages_follow_fifo_and_publish_only_after_predecessor(queue: Queue, ending: str) -> None:
     first = queue.send("原任务")
     waiting = [queue.send(f"补充 {index}") for index in range(3)]
     assert [item["status"] for item in waiting] == ["waiting_turn"] * 3
@@ -124,7 +171,7 @@ def test_three_waiting_messages_follow_fifo_and_publish_only_after_predecessor(q
     assert queue.published == [item["id"] for item in [first, *waiting]]
 
 
-def test_edit_removes_middle_rewires_children_and_resend_goes_to_tail(queue):
+def test_edit_removes_middle_rewires_children_and_resend_goes_to_tail(queue: Queue) -> None:
     first = queue.send("原任务")
     a, b, c = [queue.send(name) for name in ("A", "B", "C")]
     removed = followups.remove(*queue.owner, b["id"])
@@ -139,15 +186,16 @@ def test_edit_removes_middle_rewires_children_and_resend_goes_to_tail(queue):
 
 
 @pytest.mark.parametrize("query", ["", "把原报告改为横版"])
-def test_paused_queue_waits_and_manual_continuation_precedes_all_three_messages(queue, query):
+def test_paused_queue_waits_and_manual_continuation_precedes_all_three_messages(queue: Queue, query: str) -> None:
     from services.workbench.branches import output_history
 
     original = queue.send("生成原报告")
     queue.running(original["id"])
     waiting = [queue.send(name) for name in ("A", "B", "C")]
-    saved_history = {"messages": []}
+    saved_history: dict[str, list[object]] = {"messages": []}
     with queue.factory.begin() as session:
         source = session.get(WorkbenchRun, original["id"])
+        assert source is not None
         data = json.loads(source.payload)
         data.update(user_paused=True, output_history=saved_history)
         source.payload, source.status = json.dumps(data), "cancelled"
@@ -174,7 +222,7 @@ def test_paused_queue_waits_and_manual_continuation_precedes_all_three_messages(
     assert queue.published == [original["id"], resumed["id"], *[item["id"] for item in waiting]]
 
 
-def test_continuation_rejects_a_changed_or_foreign_target_and_preserves_queue(queue):
+def test_continuation_rejects_a_changed_or_foreign_target_and_preserves_queue(queue: Queue) -> None:
     original = queue.send("原报告")
     waiting = queue.send("A")
     with pytest.raises(NotFound):
@@ -189,7 +237,7 @@ def test_continuation_rejects_a_changed_or_foreign_target_and_preserves_queue(qu
     assert queue.published == [original["id"], resumed["id"]]
 
 
-def test_continuation_retains_original_query_when_paused_before_first_model_call(queue):
+def test_continuation_retains_original_query_when_paused_before_first_model_call(queue: Queue) -> None:
     from agenton_collections.layers.pydantic_ai import PydanticAIHistoryRuntimeState
     from pydantic_ai.messages import UserPromptPart
 
@@ -211,7 +259,7 @@ def test_continuation_retains_original_query_when_paused_before_first_model_call
     assert followups.carry_unseen_history(history, [json.loads(queue.get(original["id"]).payload)]) == history
 
 
-def test_continuation_cannot_move_another_branches_waiting_messages(queue):
+def test_continuation_cannot_move_another_branches_waiting_messages(queue: Queue) -> None:
     old = queue.send("旧分支")
     queue.finish(old["id"], "cancelled")
     current = queue.send("当前分支")
@@ -223,7 +271,7 @@ def test_continuation_cannot_move_another_branches_waiting_messages(queue):
     assert queue.published == [old["id"], current["id"]]
 
 
-def test_fenced_context_and_delivery_cursor_are_saved_before_continuation(queue):
+def test_fenced_context_and_delivery_cursor_are_saved_before_continuation(queue: Queue) -> None:
     original = queue.send("原始目标")
     queue.running(original["id"])
     queued = queue.send("已经消费的补充")
@@ -243,7 +291,55 @@ def test_fenced_context_and_delivery_cursor_are_saved_before_continuation(queue)
     assert followups.carry_unseen_history(data["output_history"], [data]) == {"messages": []}
 
 
-def test_steer_any_position_joins_actual_running_task_once_and_seals_atomically(queue):
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("model", "another-model"),
+        ("skills", ["another-skill"]),
+        ("tools", ["another-tool"]),
+        ("knowledge", ["another-dataset"]),
+        ("model_parameters", {"temperature": 0.2}),
+        ("tool_parameters", {"tool": {"mode": "other"}}),
+        ("effective_soul", {"model": "another-frozen-model"}),
+    ],
+)
+def test_steering_retains_queue_when_frozen_configuration_differs(queue: Queue, field: str, value: object) -> None:
+    original = queue.send("原任务")
+    queue.running(original["id"])
+    pending, tail = [queue.send(query) for query in ("补充内容", "随后执行")]
+    with queue.factory.begin() as session:
+        message = session.get(WorkbenchRun, pending["id"])
+        assert message is not None
+        payload = json.loads(message.payload)
+        if field == "effective_soul":
+            payload[field] = value
+        else:
+            payload["queue_selection"][field] = value
+        message.payload = json.dumps(payload)
+    before = queue.get(original["id"]).payload
+    with pytest.raises(Conflict, match="配置"):
+        followups.steer(*queue.owner, pending["id"], original["id"])
+    assert queue.get(pending["id"]).status == "waiting_turn"
+    assert queue.get(original["id"]).payload == before
+    assert json.loads(queue.get(tail["id"]).payload)["branch_parent_run_id"] == pending["id"]
+
+
+def test_stop_cannot_turn_a_waiting_message_into_a_paused_queue_parent(queue: Queue) -> None:
+    from services.workbench.recovery import cancel_chain
+
+    original = queue.send("原任务")
+    pending, tail = [queue.send(query) for query in ("排队第一条", "排队第二条")]
+    with pytest.raises(Conflict, match="队列移除"):
+        cancel_chain(*queue.owner, pending["id"])
+    assert queue.get(pending["id"]).status == "waiting_turn"
+    assert not json.loads(queue.get(pending["id"]).payload).get("user_paused")
+    queue.finish(original["id"])
+    assert queue.advance() == pending["id"]
+    queue.finish(pending["id"])
+    assert queue.advance() == tail["id"]
+
+
+def test_steer_any_position_joins_actual_running_task_once_and_seals_atomically(queue: Queue) -> None:
     first = queue.send("原任务")
     queue.running(first["id"])
     a, b, c = [queue.send(name) for name in ("A", "B", "C")]
@@ -263,7 +359,7 @@ def test_steer_any_position_joins_actual_running_task_once_and_seals_atomically(
     assert queue.get(c["id"]).status == "steered"
 
 
-def test_cross_owner_and_execution_ticket_cannot_consume_or_steer(queue):
+def test_cross_owner_and_execution_ticket_cannot_consume_or_steer(queue: Queue) -> None:
     first = queue.send("原任务")
     queue.running(first["id"])
     pending = queue.send("补充")
@@ -272,6 +368,7 @@ def test_cross_owner_and_execution_ticket_cannot_consume_or_steer(queue):
     with pytest.raises(NotFound):
         followups.remove(str(uuid4()), queue.owner[1], pending["id"])
     current = queue.get(first["id"])
+    assert current.backend_run_id is not None
     with pytest.raises(Forbidden):
         followups.poll(
             followups.AgentFollowupsPayload(
@@ -285,7 +382,7 @@ def test_cross_owner_and_execution_ticket_cannot_consume_or_steer(queue):
     assert queue.get(pending["id"]).status == "waiting_turn"
 
 
-def test_paused_current_task_retains_queue_until_it_finishes(queue):
+def test_paused_current_task_retains_queue_until_it_finishes(queue: Queue) -> None:
     first = queue.send("原任务")
     queued = queue.send("下一条")
     for state in ("waiting_input", "environment_update", "environment_installing", "stopping"):
@@ -294,7 +391,7 @@ def test_paused_current_task_retains_queue_until_it_finishes(queue):
         assert queue.get(queued["id"]).status == "waiting_turn"
 
 
-def test_accepted_input_survives_cancellation_before_delivery_without_replay_after_compaction(queue):
+def test_accepted_input_survives_cancellation_before_delivery_without_replay_after_compaction(queue: Queue) -> None:
     from services.workbench.branches import output_history
 
     first = queue.send("生成报告")
@@ -307,11 +404,11 @@ def test_accepted_input_survives_cancellation_before_delivery_without_replay_aft
     payload = json.loads(queue.get(first["id"]).payload)
     assert followups.carry_unseen_history(history, [payload]) == history
     payload["steering_delivered_ids"] = [queued["id"]]
-    compacted = {"messages": []}
+    compacted: dict[str, list[object]] = {"messages": []}
     assert followups.carry_unseen_history(compacted, [payload]) == compacted
 
 
-def test_delivery_cursor_does_not_limit_total_supplements_to_a_long_running_task():
+def test_delivery_cursor_does_not_limit_total_supplements_to_a_long_running_task() -> None:
     payload = followups.AgentFollowupsPayload(
         tenant_id="tenant",
         account_id="account",
@@ -323,7 +420,7 @@ def test_delivery_cursor_does_not_limit_total_supplements_to_a_long_running_task
     assert len(payload.seen_ids) == 1100
 
 
-def test_a_delayed_steer_click_must_not_silently_target_the_next_task(queue):
+def test_a_delayed_steer_click_must_not_silently_target_the_next_task(queue: Queue) -> None:
     first = queue.send("处理合同 A")
     queue.running(first["id"])
     second = queue.send("独立处理合同 B")
@@ -337,12 +434,13 @@ def test_a_delayed_steer_click_must_not_silently_target_the_next_task(queue):
         followups.steer(*queue.owner, correction["id"], first["id"])
 
 
-def test_reconciliation_must_find_eligible_chat_behind_fifty_paused_chats(queue):
+def test_reconciliation_must_find_eligible_chat_behind_fifty_paused_chats(queue: Queue) -> None:
     seed = queue.send("种子")
     template = queue.get(seed["id"])
     parents = {}
     with queue.factory.begin() as session:
         original = session.get(WorkbenchChat, template.chat_id)
+        assert original is not None
         for index in range(51):
             chat_id, parent_id, waiting_id = (str(uuid4()) for _ in range(3))
             session.add(
@@ -395,7 +493,9 @@ def test_reconciliation_must_find_eligible_chat_behind_fifty_paused_chats(queue)
     assert followups.waiting_chats() == []
 
 
-def test_committed_retry_survives_missing_configuration_and_changed_attachment(queue, monkeypatch):
+def test_committed_retry_survives_missing_configuration_and_changed_attachment(
+    queue: Queue, monkeypatch: pytest.MonkeyPatch
+) -> None:
     original = queue.send("不重复执行", request_key="stable-message")
     monkeypatch.setattr(service, "template", lambda *_: pytest.fail("a committed retry must not rediscover providers"))
     duplicate = queue.send("不重复执行", request_key="stable-message", files=[{"path": "gone", "version": "old"}])
@@ -403,7 +503,9 @@ def test_committed_retry_survives_missing_configuration_and_changed_attachment(q
     assert queue.published == [original["id"]]
 
 
-def test_lightweight_snapshot_excludes_history_and_preserves_tracked_removed_outcomes(queue, monkeypatch):
+def test_lightweight_snapshot_excludes_history_and_preserves_tracked_removed_outcomes(
+    queue: Queue, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from sqlalchemy import event as sql_event
 
     from services.workbench import event_log
@@ -416,6 +518,7 @@ def test_lightweight_snapshot_excludes_history_and_preserves_tracked_removed_out
     followups.remove(*queue.owner, removed["id"])
     with queue.factory.begin() as session:
         run = session.get(WorkbenchRun, current["id"])
+        assert run is not None
         data = json.loads(run.payload)
         data["activity_protocol"] = 1
         run.payload = json.dumps(data)
@@ -424,7 +527,7 @@ def test_lightweight_snapshot_excludes_history_and_preserves_tracked_removed_out
     statements = []
     engine = queue.factory.kw["bind"]
 
-    def capture(_conn, _cursor, statement, *_args):
+    def capture(_conn: object, _cursor: object, statement: str, *_args: object) -> None:
         statements.append(statement)
 
     sql_event.listen(engine, "before_cursor_execute", capture)
@@ -440,7 +543,9 @@ def test_lightweight_snapshot_excludes_history_and_preserves_tracked_removed_out
 
 
 @pytest.mark.parametrize("ordering", ["before", "after"])
-def test_context_updates_preserve_serialized_steering_and_final_seal(queue, monkeypatch, ordering):
+def test_context_updates_preserve_serialized_steering_and_final_seal(
+    queue: Queue, monkeypatch: pytest.MonkeyPatch, ordering: str
+) -> None:
     from types import SimpleNamespace
 
     from sqlalchemy.dialects import postgresql
@@ -455,30 +560,40 @@ def test_context_updates_preserve_serialized_steering_and_final_seal(queue, monk
     conversation_id = str(uuid4())
     with queue.factory.begin() as session:
         run = session.get(WorkbenchRun, first["id"])
-        session.get(WorkbenchChat, run.chat_id).conversation_id = conversation_id
+        assert run is not None
+        stored_row = session.get(WorkbenchChat, run.chat_id)
+        assert stored_row is not None
+        stored_row.conversation_id = conversation_id
         payload = json.loads(run.payload)
         payload["effective_soul"] = {"model": {"model_provider": "test", "model": "test"}}
         run.payload = json.dumps(payload)
+        message = session.get(WorkbenchRun, pending["id"])
+        assert message is not None
+        message_payload = json.loads(message.payload)
+        message_payload["effective_soul"] = payload["effective_soul"]
+        message.payload = json.dumps(message_payload)
     original_current_run = context_status.current_run
 
-    def locked_current(session, *args, **kwargs):
-        assert kwargs.get("for_update") is True
+    def locked_current(
+        session: Session, tenant_id: str, conversation_id: str, account_id: str, *, for_update: bool = False
+    ) -> WorkbenchRun | None:
+        assert for_update is True
         # SQLite does not implement row locking. Inspect the PostgreSQL statement
         # and verify both legal serial orders; live locking belongs to CI integration.
         from unittest.mock import Mock
 
         recorder = Mock()
-        original_current_run(recorder, *args, **kwargs)
+        original_current_run(recorder, tenant_id, conversation_id, account_id, for_update=for_update)
         sql = str(recorder.scalar.call_args.args[0].compile(dialect=postgresql.dialect()))
         assert "FOR UPDATE OF workbench_runs" in sql
-        return original_current_run(session, *args, **kwargs)
+        return original_current_run(session, tenant_id, conversation_id, account_id, for_update=for_update)
 
     monkeypatch.setattr(context_status, "current_run", locked_current)
     monkeypatch.setattr(
         context_status, "redis_client", SimpleNamespace(xadd=lambda *_: b"100-0", expire=lambda *_: None)
     )
 
-    def record():
+    def record() -> None:
         update = event().model_copy(update={"run_id": queue.get(first["id"]).backend_run_id})
         context_status.record_context_status(queue.owner[0], conversation_id, queue.owner[1], update)
 

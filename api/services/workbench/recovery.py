@@ -251,7 +251,8 @@ def continue_failed(run_id):
             return None
         source_payload = json.loads(source.payload)
         recovery = source_payload.get("recovery", {})
-        if not recovery_dto(source_payload) or not recovery_dto(source_payload)["pending"]:
+        state = recovery_dto(source_payload)
+        if not state or not state["pending"]:
             return recovery.get("next_run_id")
         if source.status not in {"failed", "interrupted"} or recovery["due_at"] > time.time():
             return None
@@ -367,10 +368,13 @@ def continue_failed(run_id):
 def cancel_chain(tenant_id, account_id, run_id):
     """Pause also wins if the failed attempt has already queued its successor."""
     from services.workbench.event_log import uses_journal
+    from services.workbench.followups import HIDDEN_STATUSES, WAITING
 
     targets, cursors = [], []
     with session_factory.get_session_maker().begin() as session:
         chat, run = locked_run(session, tenant_id, account_id, run_id)
+        if run.status in (WAITING, *HIDDEN_STATUSES):
+            raise Conflict("这条消息尚未独立执行，请使用队列移除操作")
         for _ in range(MAX_AUTO_CONTINUATIONS + 1):
             payload = json.loads(run.payload)
             state = payload.setdefault("recovery", {"attempt": 0})

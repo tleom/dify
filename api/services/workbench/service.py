@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy.sql.elements import ColumnElement
 from werkzeug.exceptions import Conflict, Forbidden, NotFound
 
 from configs import dify_config
@@ -43,7 +44,7 @@ ACTIVE_STATUSES = (*EXECUTING_STATUSES, "environment_update", "waiting_input")
 
 
 def _chat_has_run(tenant_id, account_id, statuses):
-    status_filter = WorkbenchRun.status.in_(statuses)
+    status_filter: ColumnElement[bool] = WorkbenchRun.status.in_(statuses)
     if statuses == ACTIVE_STATUSES:
         from services.workbench.recovery import pending_condition
 
@@ -483,6 +484,7 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload: dict[
     silent_continue = bool(
         payload.get("continue_run_id") and not payload.get("query", "").strip() and not payload.get("files")
     )
+    prepared = None
     if silent_continue:
         # Continue carries no new configuration or input resources. Keep its
         # authorization check, but do not discover providers for another draft.
@@ -495,7 +497,8 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload: dict[
         }
     else:
         base = template(tenant_id, account_id)
-        payload, current, selected, effective = _prepare_message(tenant_id, account_id, chat_id, base, payload)
+        prepared = _prepare_message(tenant_id, account_id, chat_id, base, payload)
+        payload = prepared[0]
     with session_factory.get_session_maker().begin() as session:
         chat = _chat(session, tenant_id, account_id, chat_id, lock=True)
         existing = session.scalar(
@@ -503,7 +506,7 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload: dict[
         )
         if existing:
             return run_dto(existing)
-        if not silent_continue and (chat.version != version or current["version"] != version):
+        if prepared is not None and (chat.version != version or prepared[1]["version"] != version):
             raise Conflict("配置版本已改变，请刷新后发送")
         if chat.agent_id != base["agent_id"]:
             raise Conflict("管理员已切换通用 Agent，请新建会话")
@@ -557,25 +560,34 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload: dict[
             defer = False
         if defer and not continue_id and not payload.get("queue_when_busy"):
             raise Conflict("此会话已有任务，请等待完成或停止")
+        if silent_continue:
+            if paused_parent is None:
+                raise NotFound()
+            revision_filter = WorkbenchRevision.id == paused_parent.revision_id
+        else:
+            revision_filter = WorkbenchRevision.version == version
         revision = session.scalar(
             select(WorkbenchRevision).where(
                 WorkbenchRevision.chat_id == chat.id,
                 WorkbenchRevision.tenant_id == tenant_id,
                 WorkbenchRevision.account_id == account_id,
-                WorkbenchRevision.id == paused_parent.revision_id
-                if silent_continue
-                else WorkbenchRevision.version == version,
+                revision_filter,
             )
         )
         if revision is None:
             raise Conflict("会话配置已不可用，请新建会话")
-        if silent_continue:
+        previous: dict[str, Any] = {}
+        if prepared is None:
+            if paused_parent is None:
+                raise NotFound()
             previous = json.loads(paused_parent.payload)
             effective = previous.get("effective_soul")
             if effective is None:
                 raise Conflict("原任务的配置已不可用，请重新生成")
             selected = Selection.model_validate(previous.get("queue_selection") or json.loads(revision.selection))
             version = revision.version
+        else:
+            _, _, selected, effective = prepared
         # The task's effective configuration is frozen independently of future template edits.
         from services.workbench.branches import resolve_parent
 
@@ -628,7 +640,7 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload: dict[
         session.add(run)
         chat.updated_at = naive_utc_now()
         session.flush()
-        if continue_id:
+        if paused_parent is not None:
             previous = json.loads(paused_parent.payload)
             previous["user_paused"] = False
             previous["continued_by"] = run.id
@@ -653,7 +665,7 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload: dict[
     return dto
 
 
-def _prepare_message(tenant_id, account_id, chat_id, base, payload):
+def _prepare_message(tenant_id, account_id, chat_id, base, payload: dict[str, Any]):
     """Resolve new-message resources and files before acquiring the chat lock."""
     from services.workbench.mentions import default_capabilities, resolve_mentions
 

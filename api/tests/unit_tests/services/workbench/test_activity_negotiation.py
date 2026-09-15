@@ -35,7 +35,8 @@ def test_enqueue_freezes_only_a_negotiated_and_enabled_protocol(
     monkeypatch.setattr(mentions, "default_capabilities", lambda _soul, selection: selection)
     monkeypatch.setattr(branches, "resolve_parent", lambda *_args: {})
     session = Mock()
-    session.scalars.return_value = []
+    empty_runs: list[object] = []
+    session.scalars.return_value = empty_runs
     session.scalar.side_effect = [None, None, None, SimpleNamespace(id="revision")]
     monkeypatch.setattr(service.session_factory, "create_session", lambda: nullcontext(session))
     monkeypatch.setattr(

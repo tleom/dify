@@ -1,5 +1,7 @@
 """Queue, pause and steering retain one logical task across automatic recovery."""
 
+from __future__ import annotations
+
 import json
 from datetime import datetime, timedelta
 
@@ -10,12 +12,12 @@ from models.workbench import WorkbenchRun
 from services.workbench import branches, followups, recovery, scheduler
 
 from . import test_followups
+from .test_followups import Queue
 
 queue = test_followups.queue
 
 
-@pytest.fixture(autouse=True)
-def local_control(monkeypatch):
+def configure_local_control(monkeypatch: pytest.MonkeyPatch) -> None:
     from tasks import workbench_tasks
 
     monkeypatch.setattr(workbench_tasks, "fence_remote", lambda *_: True)
@@ -23,9 +25,15 @@ def local_control(monkeypatch):
     monkeypatch.setattr(recovery, "notify", lambda *_: None)
 
 
-def fail(queue, run_id, status="failed"):
+@pytest.fixture(autouse=True)
+def local_control(monkeypatch: pytest.MonkeyPatch) -> None:
+    configure_local_control(monkeypatch)
+
+
+def fail(queue: Queue, run_id: str, status: str = "failed") -> bool:
     with queue.factory.begin() as session:
         run = session.get(WorkbenchRun, run_id)
+        assert run is not None
         run.status, run.error = status, "连接中断"
         marked = recovery.mark_failure(run)
         if marked:
@@ -37,7 +45,9 @@ def fail(queue, run_id, status="failed"):
 
 @pytest.mark.parametrize("ending", ["failed", "interrupted"])
 @pytest.mark.parametrize("queue_after_failure", [False, True])
-def test_automatic_continuation_precedes_all_three_waiting_messages(queue, ending, queue_after_failure):
+def test_automatic_continuation_precedes_all_three_waiting_messages(
+    queue: Queue, ending: str, queue_after_failure: bool
+) -> None:
     original = queue.send("完成长报告")
     queue.running(original["id"])
     if queue_after_failure:
@@ -71,7 +81,7 @@ def test_automatic_continuation_precedes_all_three_waiting_messages(queue, endin
 
 
 @pytest.mark.parametrize("create_successor", [False, True])
-def test_pause_cancels_recovery_and_keeps_queue_until_blank_continue(queue, create_successor):
+def test_pause_cancels_recovery_and_keeps_queue_until_blank_continue(queue: Queue, create_successor: bool) -> None:
     original = queue.send("原目标")
     waiting = queue.send("后续任务")
     assert fail(queue, original["id"])
@@ -90,7 +100,7 @@ def test_pause_cancels_recovery_and_keeps_queue_until_blank_continue(queue, crea
     assert queue.advance() == waiting["id"]
 
 
-def test_steering_during_recovery_is_kept_in_the_successors_context(queue):
+def test_steering_during_recovery_is_kept_in_the_successors_context(queue: Queue) -> None:
     original = queue.send("原目标")
     queue.running(original["id"])
     assert fail(queue, original["id"])
@@ -114,7 +124,7 @@ def test_steering_during_recovery_is_kept_in_the_successors_context(queue):
     assert followups.steer(*queue.owner, next_adjustment["id"], child_id)["steer_target_run_id"] == child_id
 
 
-def test_exhausted_recovery_releases_the_queue_after_three_continuations(queue):
+def test_exhausted_recovery_releases_the_queue_after_three_continuations(queue: Queue) -> None:
     original = queue.send("原目标")
     waiting = queue.send("后续任务")
     current = original["id"]
@@ -128,7 +138,7 @@ def test_exhausted_recovery_releases_the_queue_after_three_continuations(queue):
     assert queue.advance() == waiting["id"]
 
 
-def test_removing_the_only_waiting_message_does_not_cancel_recovery(queue):
+def test_removing_the_only_waiting_message_does_not_cancel_recovery(queue: Queue) -> None:
     original = queue.send("原目标")
     waiting = queue.send("待删除消息")
     assert fail(queue, original["id"])
@@ -138,7 +148,9 @@ def test_removing_the_only_waiting_message_does_not_cancel_recovery(queue):
 
 @pytest.mark.parametrize("continuation", ["automatic", "manual"])
 @pytest.mark.parametrize("ending", ["failed", "interrupted"])
-def test_waiting_task_retains_its_own_recovery_after_a_newer_ancestor(queue, continuation, ending):
+def test_waiting_task_retains_its_own_recovery_after_a_newer_ancestor(
+    queue: Queue, continuation: str, ending: str
+) -> None:
     original = queue.send("任务 A")
     waiting, last = [queue.send(query) for query in ("任务 B", "任务 C")]
     if continuation == "automatic":
@@ -152,7 +164,9 @@ def test_waiting_task_retains_its_own_recovery_after_a_newer_ancestor(queue, con
     # their execution must follow it. Fix the clock to exercise that ordering.
     with queue.factory.begin() as session:
         for seconds, run_id in enumerate((original["id"], waiting["id"], last["id"], ancestor_id)):
-            session.get(WorkbenchRun, run_id).created_at = datetime(2026, 9, 16) + timedelta(seconds=seconds)
+            stored_row = session.get(WorkbenchRun, run_id)
+            assert stored_row is not None
+            stored_row.created_at = datetime(2026, 9, 16) + timedelta(seconds=seconds)
     queue.finish(ancestor_id)
     assert queue.advance() == waiting["id"]
     queue.running(waiting["id"])

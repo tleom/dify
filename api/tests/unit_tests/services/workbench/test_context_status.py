@@ -1,7 +1,7 @@
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Literal
+from typing import Literal, cast
 from unittest.mock import ANY, Mock
 
 import pytest
@@ -49,7 +49,7 @@ def event(phase: Literal["usage", "compacting", "compacted", "failed"] = "usage"
 def test_persists_latest_reading_and_merges_compaction_in_stream_order(monkeypatch: pytest.MonkeyPatch) -> None:
     run, redis = setup(monkeypatch)
     context_status.record_context_status("tenant", "conversation", "account", event("compacted"))
-    context_status.current_run.assert_called_once_with(
+    cast(Mock, context_status.current_run).assert_called_once_with(
         ANY,
         "tenant",
         "conversation",

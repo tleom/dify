@@ -92,7 +92,7 @@ def output_history(session, parent):
     seen = set()
     from services.workbench.followups import carry_unseen_history
 
-    parents = []
+    parents: list[dict[str, object]] = []
     while parent.id not in seen:
         seen.add(parent.id)
         data = json.loads(parent.payload)

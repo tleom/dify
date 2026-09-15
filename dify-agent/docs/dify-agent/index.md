@@ -245,7 +245,10 @@ not cancel recovery. A resumed ancestor may have been created after its waiting
 descendants; recovery follows their branch relationship instead of treating that
 ancestor's newer creation time as a replacement task.
 Pausing holds the queue until an explicit continuation;
-blank continuation retains the original configuration and question, while typed
+waiting messages use the queue-removal endpoint and cannot be paused as independent
+executions. Steering requires the same frozen selection and effective configuration
+as the active task; a message with a different model or resources remains queued.
+Blank continuation retains the original configuration and question, while typed
 continuation remains a visible user message. A supplement accepted during the
 recovery delay is included once in the successor's context. The native follow-up
 hook runs before history checkpointing, and a stopped executor's fence response

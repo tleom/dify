@@ -27,7 +27,9 @@ from dify_agent.protocol.schemas import (
     RunCancelledEventData,
     RunEvent,
     RunEventsResponse,
+    RunFailedEvent,
     RunStatus,
+    RunSucceededEvent,
     utc_now,
 )
 from dify_agent.runtime.cancellation import RunCancellationIntent
@@ -221,7 +223,11 @@ class RedisRunStore(RunEventSink):
         entries = await self.redis.xrevrange(run_events_key(self.prefix, run_id), count=1)
         if entries:
             event = self._decode_event(run_id, *entries[0])
-            snapshot = getattr(event.data, "session_snapshot", None)
+            snapshot = (
+                event.data.session_snapshot
+                if isinstance(event, (RunSucceededEvent, RunFailedEvent, RunCancelledEvent))
+                else None
+            )
             if snapshot is not None:
                 for layer in snapshot.layers:
                     if layer.name == "history":
@@ -442,12 +448,14 @@ class RedisRunStore(RunEventSink):
         """Read the final captured context before permitting a continuation."""
         from agenton_collections.layers.pydantic_ai import PydanticAIHistoryRuntimeState
 
+        from dify_agent.layers.workbench_followups import WorkbenchFollowupsState
+
         state: dict[str, Any] = {}
         entries = await self.redis.xrevrange(run_events_key(self.prefix, run_id), count=1)
         event = self._decode_event(run_id, *entries[0]) if entries else None
         snapshot = (
-            getattr(event.data, "session_snapshot", None)
-            if event is not None and event.type in _TERMINAL_RUN_EVENT_TYPES
+            event.data.session_snapshot
+            if isinstance(event, (RunSucceededEvent, RunFailedEvent, RunCancelledEvent))
             else None
         )
         for layer in snapshot.layers if snapshot is not None else []:
@@ -456,7 +464,9 @@ class RedisRunStore(RunEventSink):
                     mode="json"
                 )
             if layer.name == "workbench_followups":
-                state["steering_delivered_ids"] = sorted(layer.runtime_state.get("seen_ids", []))
+                state["steering_delivered_ids"] = sorted(
+                    WorkbenchFollowupsState.model_validate(layer.runtime_state).seen_ids
+                )
         if "history" not in state:
             raw = await self.redis.get(f"{self.prefix}:history:{run_id}")
             if raw:

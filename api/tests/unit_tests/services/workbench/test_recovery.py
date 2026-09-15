@@ -1,12 +1,16 @@
 """Exercise durable recovery intent with real transactions and no remote execution."""
 
+from __future__ import annotations
+
 import json
+from collections.abc import Callable, Iterator
+from typing import TypedDict, cast
 from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 from werkzeug.exceptions import Conflict, NotFound
 
 from core.db import session_factory as factory_module
@@ -14,9 +18,11 @@ from models.base import TypeBase
 from models.workbench import WorkbenchChat, WorkbenchRun, WorkbenchRunEvent
 from services.workbench import recovery, service
 
+type RecoveryDatabase = tuple[sessionmaker[Session], str, str, str, str, Mock, Mock]
+
 
 @pytest.fixture
-def database(monkeypatch):
+def database(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecoveryDatabase]:
     engine = create_engine("sqlite://")
     TypeBase.metadata.create_all(
         engine,
@@ -76,9 +82,10 @@ def database(monkeypatch):
     engine.dispose()
 
 
-def fail(factory, run_id):
+def fail(factory: sessionmaker[Session], run_id: str) -> bool:
     with factory.begin() as session:
         run = session.get(WorkbenchRun, run_id)
+        assert run is not None
         run.status, run.error = "failed", "工具连续调用失败 5 次"
         marked = recovery.mark_failure(run)
         payload = json.loads(run.payload)
@@ -96,7 +103,13 @@ def fail(factory, run_id):
         ([{"event": "error", "message": "provider disconnected"}], "failed", True),
     ],
 )
-def test_executor_requires_terminal_frame(database, monkeypatch, frames, expected_status, should_recover):
+def test_executor_requires_terminal_frame(
+    database: RecoveryDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+    frames: list[dict[str, str]],
+    expected_status: str,
+    should_recover: bool,
+) -> None:
     from flask import Flask
     from sqlalchemy.orm import Session
 
@@ -104,16 +117,18 @@ def test_executor_requires_terminal_frame(database, monkeypatch, frames, expecte
 
     factory, tenant, account, _, run_id, _, fence = database
     with factory.begin() as session:
-        session.get(WorkbenchRun, run_id).status = "queued"
+        stored_row = session.get(WorkbenchRun, run_id)
+        assert stored_row is not None
+        stored_row.status = "queued"
     original_get = Session.get
     user, app_model = Mock(), Mock(tenant_id=tenant)
 
-    def get(session, entity, ident, **kwargs):
+    def get(session: Session, entity: type[object], ident: str) -> object:
         if entity is tasks.Account:
             return user
         if entity is tasks.App:
             return app_model
-        return original_get(session, entity, ident, **kwargs)
+        return original_get(session, entity, ident)
 
     monkeypatch.setattr(Session, "get", get)
     monkeypatch.setattr(tasks, "authorize", Mock())
@@ -131,9 +146,13 @@ def test_executor_requires_terminal_frame(database, monkeypatch, frames, expecte
         tasks.execute(f"{tenant}:{account}", run_id)
     with factory() as session:
         run = session.get(WorkbenchRun, run_id)
+        assert run is not None
         assert run.status == expected_status
-        assert recovery.recovery_dto(json.loads(run.payload))["pending"] is should_recover
+        state = recovery.recovery_dto(json.loads(run.payload))
+        assert state is not None
+        assert state["pending"] is should_recover
         if frames[0]["event"] == "message":
+            assert run.error is not None
             assert "事件流提前结束" in run.error
     assert wake_recovery.called is should_recover
     assert wake_followups.called is (expected_status == "completed")
@@ -141,9 +160,15 @@ def test_executor_requires_terminal_frame(database, monkeypatch, frames, expecte
     dispatch.assert_called_once()
 
 
-def ask(factory, run_id):
+class HumanInputState(TypedDict):
+    request_id: str
+    deadline_at: float
+
+
+def ask(factory: sessionmaker[Session], run_id: str) -> HumanInputState:
     with factory.begin() as session:
         run = session.get(WorkbenchRun, run_id)
+        assert run is not None
         run.status = "waiting_input"
         payload = json.loads(run.payload)
         payload["pending"] = {
@@ -153,10 +178,10 @@ def ask(factory, run_id):
         }
         run.payload = json.dumps(payload)
         recovery.mark_input_wait(run)
-        return json.loads(run.payload)["human_input"]
+        return cast(HumanInputState, json.loads(run.payload)["human_input"])
 
 
-def test_three_automatic_continuations_preserve_goal_and_frozen_configuration(database):
+def test_three_automatic_continuations_preserve_goal_and_frozen_configuration(database: RecoveryDatabase) -> None:
     factory, _, _, _, source_id, publish, _ = database
     root_id = source_id
     for attempt in range(1, 4):
@@ -167,7 +192,9 @@ def test_three_automatic_continuations_preserve_goal_and_frozen_configuration(da
         assert recovery.continue_failed(source_id) == child_id
         with factory() as session:
             source = session.get(WorkbenchRun, source_id)
+            assert source is not None
             child = session.get(WorkbenchRun, child_id)
+            assert child is not None
             payload = json.loads(child.payload)
             assert child.status == "queued"
             assert payload["query"] == "继续"
@@ -178,7 +205,9 @@ def test_three_automatic_continuations_preserve_goal_and_frozen_configuration(da
             assert payload["branch_parent_run_id"] == source_id
             assert child.revision_id == source.revision_id
             assert payload["sandbox_paths"] == ["conversations/current/draft.docx"]
-            assert not recovery.recovery_dto(json.loads(source.payload))["pending"]
+            state = recovery.recovery_dto(json.loads(source.payload))
+            assert state is not None
+            assert not state["pending"]
         source_id = child_id
     assert not fail(factory, source_id)
     assert recovery.continue_failed(source_id) is None
@@ -187,7 +216,7 @@ def test_three_automatic_continuations_preserve_goal_and_frozen_configuration(da
         assert len(list(session.scalars(select(WorkbenchRun)))) == 4
 
 
-def test_uncertain_remote_execution_must_be_fenced_before_continuation(database):
+def test_uncertain_remote_execution_must_be_fenced_before_continuation(database: RecoveryDatabase) -> None:
     factory, _, _, _, run_id, publish, fence = database
     fail(factory, run_id)
     fence.return_value = False
@@ -200,8 +229,8 @@ def test_uncertain_remote_execution_must_be_fenced_before_continuation(database)
 
 @pytest.mark.parametrize("status", ["running", "cancelled"])
 def test_remote_fence_stores_wire_checkpoint_only_after_execution_stops(
-    database, monkeypatch, config_overrides, status
-):
+    database: RecoveryDatabase, monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., None], status: str
+) -> None:
     import httpx
 
     from services.workbench import followups
@@ -210,12 +239,14 @@ def test_remote_fence_stores_wire_checkpoint_only_after_execution_stops(
     factory, _, _, _, run_id, _, fence = database
     fail(factory, run_id)
     with factory() as session:
-        ticket = session.get(WorkbenchRun, run_id).backend_run_id
+        stored_row = session.get(WorkbenchRun, run_id)
+        assert stored_row is not None
+        ticket = stored_row.backend_run_id
     config_overrides(AGENT_BACKEND_BASE_URL="http://agent.test", AGENT_BACKEND_API_TOKEN="test-token")
     actual_client = httpx.Client
     requests = []
 
-    def handle(request):
+    def handle(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         return httpx.Response(200, json={"run_id": ticket, "status": status, "history": {"messages": []}})
 
@@ -231,19 +262,25 @@ def test_remote_fence_stores_wire_checkpoint_only_after_execution_stops(
     assert requests[0].url.path == f"/runs/{ticket}/fence"
     assert requests[0].method == "POST"
     with factory() as session:
-        assert json.loads(session.get(WorkbenchRun, run_id).payload)["output_history"] == {"messages": []}
-        confirmed = json.loads(session.get(WorkbenchRun, run_id).payload).get("cleanup_confirmed_ticket")
+        stored_row = session.get(WorkbenchRun, run_id)
+        assert stored_row is not None
+        assert json.loads(stored_row.payload)["output_history"] == {"messages": []}
+        stored_row = session.get(WorkbenchRun, run_id)
+        assert stored_row is not None
+        confirmed = json.loads(stored_row.payload).get("cleanup_confirmed_ticket")
         assert (confirmed == ticket) is (status != "running")
 
 
-def test_due_scan_rotates_past_fifty_blocked_recoveries(database):
+def test_due_scan_rotates_past_fifty_blocked_recoveries(database: RecoveryDatabase) -> None:
     from datetime import datetime, timedelta
 
     factory, tenant, account, chat_id, run_id, _, _ = database
     fail(factory, run_id)
     last_id = str(uuid4())
     with factory.begin() as session:
-        session.get(WorkbenchRun, run_id).updated_at = datetime(2020, 1, 1)
+        stored_row = session.get(WorkbenchRun, run_id)
+        assert stored_row is not None
+        stored_row.updated_at = datetime(2020, 1, 1)
         for index in range(50):
             session.add(
                 WorkbenchRun(
@@ -268,7 +305,7 @@ def test_due_scan_rotates_past_fifty_blocked_recoveries(database):
     assert second[0] == last_id
 
 
-def test_fenced_checkpoint_is_restored_before_the_successor_reads_history(database):
+def test_fenced_checkpoint_is_restored_before_the_successor_reads_history(database: RecoveryDatabase) -> None:
     from agenton_collections.layers.pydantic_ai import PydanticAIHistoryRuntimeState
     from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
 
@@ -283,24 +320,32 @@ def test_fenced_checkpoint_is_restored_before_the_successor_reads_history(databa
         ]
     ).model_dump(mode="json")
     with factory() as session:
-        ticket = session.get(WorkbenchRun, run_id).backend_run_id
+        stored_row = session.get(WorkbenchRun, run_id)
+        assert stored_row is not None
+        ticket = stored_row.backend_run_id
     recovery.save_fenced_history(ticket, state)
     child_id = recovery.continue_failed(run_id)
     with factory() as session:
         source = session.get(WorkbenchRun, run_id)
+        assert source is not None
         child = session.get(WorkbenchRun, child_id)
+        assert child is not None
         assert json.loads(child.payload)["branch_parent_run_id"] == source.id
         assert output_history(session, source) == state
     # A later execution has a different ticket. Its checkpoint cannot be overwritten.
     with factory.begin() as session:
-        session.get(WorkbenchRun, run_id).backend_run_id = str(uuid4())
+        stored_row = session.get(WorkbenchRun, run_id)
+        assert stored_row is not None
+        stored_row.backend_run_id = str(uuid4())
     recovery.save_fenced_history(ticket, {"messages": []})
     with factory() as session:
         assert output_history(session, session.get(WorkbenchRun, run_id)) == state
 
 
 @pytest.mark.parametrize("already_queued", [False, True])
-def test_pause_stops_pending_or_already_queued_automatic_successor(database, already_queued):
+def test_pause_stops_pending_or_already_queued_automatic_successor(
+    database: RecoveryDatabase, already_queued: bool
+) -> None:
     factory, tenant, account, _, run_id, publish, _ = database
     fail(factory, run_id)
     child_id = recovery.continue_failed(run_id) if already_queued else None
@@ -309,14 +354,17 @@ def test_pause_stops_pending_or_already_queued_automatic_successor(database, alr
     with factory() as session:
         for target in targets:
             run = session.get(WorkbenchRun, target)
+            assert run is not None
             assert run.status == "cancelled"
-            assert not recovery.recovery_dto(json.loads(run.payload))["pending"]
+            state = recovery.recovery_dto(json.loads(run.payload))
+            assert state is not None
+            assert not state["pending"]
     assert not fail(factory, child_id or run_id)
     recovery.continue_failed(child_id or run_id)
     assert publish.call_count == int(already_queued)
 
 
-def test_manual_message_supersedes_pending_automatic_continuation(database):
+def test_manual_message_supersedes_pending_automatic_continuation(database: RecoveryDatabase) -> None:
     factory, tenant, account, chat_id, run_id, publish, _ = database
     fail(factory, run_id)
     with factory.begin() as session:
@@ -335,10 +383,14 @@ def test_manual_message_supersedes_pending_automatic_continuation(database):
     assert recovery.continue_failed(run_id) is None
     publish.assert_not_called()
     with factory() as session:
-        assert json.loads(session.get(WorkbenchRun, run_id).payload)["recovery"]["cancelled"]
+        stored_row = session.get(WorkbenchRun, run_id)
+        assert stored_row is not None
+        assert json.loads(stored_row.payload)["recovery"]["cancelled"]
 
 
-def test_untouched_input_deadline_resumes_once_and_preserves_auto_attempts(database, monkeypatch):
+def test_untouched_input_deadline_resumes_once_and_preserves_auto_attempts(
+    database: RecoveryDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
     factory, tenant, account, _, run_id, publish, _ = database
     monkeypatch.setattr(recovery.time, "time", lambda: 1000)
     state = ask(factory, run_id)
@@ -346,6 +398,7 @@ def test_untouched_input_deadline_resumes_once_and_preserves_auto_attempts(datab
     assert not recovery.expire_input(run_id)
     with factory.begin() as session:
         run = session.get(WorkbenchRun, run_id)
+        assert run is not None
         payload = json.loads(run.payload)
         payload["recovery"]["attempt"] = 2
         run.payload = json.dumps(payload)
@@ -356,6 +409,7 @@ def test_untouched_input_deadline_resumes_once_and_preserves_auto_attempts(datab
     publish.assert_called_once_with(tenant, account, run_id)
     with factory() as session:
         run = session.get(WorkbenchRun, run_id)
+        assert run is not None
         payload = json.loads(run.payload)
         assert run.status == "queued"
         assert run.backend_run_id is None
@@ -370,7 +424,9 @@ def test_untouched_input_deadline_resumes_once_and_preserves_auto_attempts(datab
         recovery.interact(tenant, account, run_id, state["request_id"])
 
 
-def test_any_interaction_cancels_timer_but_explicit_skip_still_works(database, monkeypatch):
+def test_any_interaction_cancels_timer_but_explicit_skip_still_works(
+    database: RecoveryDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
     factory, tenant, account, _, run_id, publish, _ = database
     monkeypatch.setattr(recovery.time, "time", lambda: 1000)
     state = ask(factory, run_id)
@@ -382,17 +438,20 @@ def test_any_interaction_cancels_timer_but_explicit_skip_still_works(database, m
     publish.assert_not_called()
     assert recovery.expire_input(run_id, owner=(tenant, account), request_id=state["request_id"], manual=True)
     with factory() as session:
-        result = json.loads(session.get(WorkbenchRun, run_id).payload)["continuation"]["calls"]["human-call"]
+        stored_row = session.get(WorkbenchRun, run_id)
+        assert stored_row is not None
+        result = json.loads(stored_row.payload)["continuation"]["calls"]["human-call"]
         assert result["status"] == "cancelled"
         assert "跳过" in result["message"]
         assert result["values"] == {}
 
 
-def test_old_questions_have_no_automatic_deadline_and_can_be_skipped_explicitly(database):
+def test_old_questions_have_no_automatic_deadline_and_can_be_skipped_explicitly(database: RecoveryDatabase) -> None:
     factory, tenant, account, _, run_id, _, _ = database
     ask(factory, run_id)
     with factory.begin() as session:
         run = session.get(WorkbenchRun, run_id)
+        assert run is not None
         payload = json.loads(run.payload)
         payload.pop("human_input")
         run.payload = json.dumps(payload)
@@ -400,7 +459,7 @@ def test_old_questions_have_no_automatic_deadline_and_can_be_skipped_explicitly(
     assert recovery.expire_input(run_id, owner=(tenant, account), request_id="human-call", manual=True)
 
 
-def test_input_actions_enforce_owner_and_current_request(database):
+def test_input_actions_enforce_owner_and_current_request(database: RecoveryDatabase) -> None:
     factory, tenant, account, _, run_id, publish, _ = database
     state = ask(factory, run_id)
     with pytest.raises(NotFound):
@@ -413,7 +472,9 @@ def test_input_actions_enforce_owner_and_current_request(database):
     publish.assert_not_called()
 
 
-def test_restart_scan_recovers_only_due_intent_and_reports_active_chat(database, monkeypatch):
+def test_restart_scan_recovers_only_due_intent_and_reports_active_chat(
+    database: RecoveryDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
     factory, tenant, account, chat_id, run_id, _, _ = database
     monkeypatch.setattr(recovery.time, "time", lambda: 1000)
     fail(factory, run_id)
@@ -446,7 +507,7 @@ def test_restart_scan_recovers_only_due_intent_and_reports_active_chat(database,
     assert recovery.due_runs() == ([], [])
 
 
-def test_terminal_stream_and_typed_response_expose_recovery_and_countdown(database):
+def test_terminal_stream_and_typed_response_expose_recovery_and_countdown(database: RecoveryDatabase) -> None:
     from controllers.console.workbench import WorkbenchRunResponse
     from services.workbench.event_log import stream_events
 
@@ -454,16 +515,24 @@ def test_terminal_stream_and_typed_response_expose_recovery_and_countdown(databa
     ask(factory, run_id)
     with factory() as session:
         dto = WorkbenchRunResponse.model_validate(service.run_dto(session.get(WorkbenchRun, run_id)))
+        assert dto.human_input is not None
+        assert dto.human_input.deadline_at is not None
         assert dto.human_input.deadline_at > dto.human_input.server_now
     fail(factory, run_id)
     event = list(stream_events(tenant, account, run_id))[-1]
-    assert event["recovery"]["pending"] is True
+    assert event is not None
+    state = event["recovery"]
+    assert isinstance(state, dict)
+    assert state["pending"] is True
 
 
 @pytest.mark.parametrize("lease_renewed", [False, True])
 def test_reconcile_recovers_lost_redis_lease_but_preserves_a_fresh_lease(
-    database, monkeypatch, config_overrides, lease_renewed
-):
+    database: RecoveryDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+    config_overrides: Callable[..., None],
+    lease_renewed: bool,
+) -> None:
     from tasks import workbench_tasks
 
     factory, _, _, _, run_id, _, fence = database
@@ -480,6 +549,9 @@ def test_reconcile_recovers_lost_redis_lease_but_preserves_a_fresh_lease(
     workbench_tasks.reconcile.run()
     with factory() as session:
         run = session.get(WorkbenchRun, run_id)
+        assert run is not None
         assert run.status == ("running" if lease_renewed else "interrupted")
-        assert recovery.recovery_dto(json.loads(run.payload))["pending"] == (not lease_renewed)
+        state = recovery.recovery_dto(json.loads(run.payload))
+        assert state is not None
+        assert state["pending"] == (not lease_renewed)
     assert fence.call_count == int(not lease_renewed)

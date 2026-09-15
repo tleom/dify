@@ -351,6 +351,10 @@ def _steer_locked(session, chat, message, target):
         raise Conflict("当前任务正在结束，消息将继续按队列发送")
     # Steering retains the active model/tools. A message requiring different
     # resources must remain a separate queued run with its frozen selection.
+    if current.get("queue_selection") != incoming.get("queue_selection") or current.get(
+        "effective_soul"
+    ) != incoming.get("effective_soul"):
+        raise Conflict("这条消息的模型或资源配置与当前任务不同，请保留排队，或编辑配置后调整方向")
     required = incoming.get("resource_mentions", {})
     available = current.get("resource_mentions", {})
     if any(set(required.get(kind, [])) - set(available.get(kind, [])) for kind in ("skills", "tools", "knowledge")):

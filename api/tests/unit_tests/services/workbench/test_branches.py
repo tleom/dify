@@ -44,7 +44,9 @@ def test_stopped_turn_without_native_message_remains_the_parent() -> None:
     stopped = run("stopped", parent="first", input_history={"messages": ["prior"]})
     result = resolve([first, stopped], {"parent_run_id": "stopped", "parent_message_id": None})
     assert result == {"branch_parent_run_id": "stopped", "parent_message_id": None}
-    next_run = run("next", parent=result["branch_parent_run_id"])
+    parent = result["branch_parent_run_id"]
+    assert isinstance(parent, str)
+    next_run = run("next", parent=parent)
     assert branches.parent_links([first, stopped, next_run]) == {"first": None, "stopped": "first", "next": "stopped"}
     assert branches.output_history(None, stopped) == {"messages": ["prior"]}
 

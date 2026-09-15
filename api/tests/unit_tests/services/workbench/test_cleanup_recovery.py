@@ -1,7 +1,11 @@
 """SQL cleanup proof survives loss of the ephemeral scheduler reservation."""
 
+from __future__ import annotations
+
 import json
+from collections.abc import Callable
 from datetime import datetime, timedelta
+from typing import cast
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -14,21 +18,22 @@ from models.workbench import WorkbenchRun
 from services.workbench import followups, recovery
 
 from . import test_recovery
+from .test_recovery import RecoveryDatabase
 
 database = test_recovery.database
 
 
-def stub_executor(monkeypatch, tenant):
+def stub_executor(monkeypatch: pytest.MonkeyPatch, tenant: str) -> Mock:
     from tasks import workbench_tasks as tasks
 
     original_get = Session.get
 
-    def get(session, entity, ident, **kwargs):
+    def get(session: Session, entity: type[object], ident: str) -> object:
         if entity is tasks.Account:
             return Mock()
         if entity is tasks.App:
             return Mock(tenant_id=tenant)
-        return original_get(session, entity, ident, **kwargs)
+        return original_get(session, entity, ident)
 
     monkeypatch.setattr(Session, "get", get)
     monkeypatch.setattr(tasks, "authorize", Mock())
@@ -47,8 +52,8 @@ def stub_executor(monkeypatch, tenant):
 @pytest.mark.parametrize("lease_present", [False, True])
 @pytest.mark.parametrize("ending", ["failed", "cancelled", "interrupted"])
 def test_successor_waits_for_durable_cleanup_even_without_a_redis_reservation(
-    database, monkeypatch, lease_present, ending
-):
+    database: RecoveryDatabase, monkeypatch: pytest.MonkeyPatch, lease_present: bool, ending: str
+) -> None:
     from tasks import workbench_tasks as tasks
 
     factory, tenant, account, chat_id, parent_id, _, fence = database
@@ -56,6 +61,7 @@ def test_successor_waits_for_durable_cleanup_even_without_a_redis_reservation(
     child_id = str(uuid4())
     with factory.begin() as session:
         parent = session.get(WorkbenchRun, parent_id)
+        assert parent is not None
         parent.status, parent.created_at = ending, datetime(2026, 9, 16)
         ticket = parent.backend_run_id
         session.add(
@@ -81,7 +87,7 @@ def test_successor_waits_for_durable_cleanup_even_without_a_redis_reservation(
     with Flask(__name__).app_context():
         tasks.execute.run(f"{tenant}:{account}", child_id)
     generate.assert_not_called()
-    tasks.execute.apply_async.assert_called_once()
+    cast(Mock, tasks.execute.apply_async).assert_called_once()
     # Persist the remote acknowledgement, including a response without history.
     followups.save_fenced_state(ticket, {"history": None, "status": "cancelled"})
     monkeypatch.setattr(tasks.redis_client, "zscore", lambda *_: None)
@@ -90,7 +96,7 @@ def test_successor_waits_for_durable_cleanup_even_without_a_redis_reservation(
     generate.assert_called_once()
 
 
-def stub_reconcile(monkeypatch):
+def stub_reconcile(monkeypatch: pytest.MonkeyPatch) -> None:
     from tasks import workbench_tasks as tasks
 
     monkeypatch.setattr(tasks.redis_client, "zrangebyscore", lambda *_: [])
@@ -102,7 +108,9 @@ def stub_reconcile(monkeypatch):
     monkeypatch.setattr(tasks.recover_run, "delay", Mock())
 
 
-def test_reconcile_rotates_unconfirmed_cancelled_tickets_after_redis_loss(database, monkeypatch, config_overrides):
+def test_reconcile_rotates_unconfirmed_cancelled_tickets_after_redis_loss(
+    database: RecoveryDatabase, monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., None]
+) -> None:
     from tasks import workbench_tasks as tasks
 
     factory, tenant, account, chat_id, run_id, _, fence = database
@@ -110,6 +118,7 @@ def test_reconcile_rotates_unconfirmed_cancelled_tickets_after_redis_loss(databa
     fence.return_value = False
     with factory.begin() as session:
         original = session.get(WorkbenchRun, run_id)
+        assert original is not None
         original.status = "cancelled"
         for _ in range(200):
             session.add(
@@ -133,10 +142,11 @@ def test_reconcile_rotates_unconfirmed_cancelled_tickets_after_redis_loss(databa
     assert len({call.args[0] for call in fence.call_args_list}) == 201
 
 
-def test_cleanup_proof_matches_the_current_attempt_and_keeps_saved_history(database):
+def test_cleanup_proof_matches_the_current_attempt_and_keeps_saved_history(database: RecoveryDatabase) -> None:
     factory, _, _, _, run_id, _, _ = database
     with factory.begin() as session:
         run = session.get(WorkbenchRun, run_id)
+        assert run is not None
         run.status = "cancelled"
         ticket = run.backend_run_id
         payload = json.loads(run.payload)
@@ -145,6 +155,7 @@ def test_cleanup_proof_matches_the_current_attempt_and_keeps_saved_history(datab
     followups.save_fenced_state(ticket, {"history": None})
     with factory.begin() as session:
         run = session.get(WorkbenchRun, run_id)
+        assert run is not None
         saved = json.loads(run.payload)
         assert saved["cleanup_confirmed_ticket"] == ticket
         assert saved["output_history"] == {"messages": []}
@@ -154,11 +165,18 @@ def test_cleanup_proof_matches_the_current_attempt_and_keeps_saved_history(datab
     followups.save_fenced_state(ticket, {"history": {"messages": []}, "steering_delivered_ids": []})
     with factory() as session:
         assert session.scalar(select(WorkbenchRun.id).where(recovery.cleanup_pending_condition())) == run_id
-        assert json.loads(session.get(WorkbenchRun, run_id).payload)["steering_delivered_ids"] == ["consumed"]
+        stored_row = session.get(WorkbenchRun, run_id)
+        assert stored_row is not None
+        assert json.loads(stored_row.payload)["steering_delivered_ids"] == ["consumed"]
 
 
 @pytest.mark.parametrize("reply", [{"run_id": "wrong", "status": "cancelled"}, {"run_id": "same", "status": "unknown"}])
-def test_invalid_remote_cleanup_response_cannot_confirm_a_ticket(database, monkeypatch, config_overrides, reply):
+def test_invalid_remote_cleanup_response_cannot_confirm_a_ticket(
+    database: RecoveryDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+    config_overrides: Callable[..., None],
+    reply: dict[str, str],
+) -> None:
     import httpx
 
     from tasks import workbench_tasks as tasks
@@ -166,6 +184,7 @@ def test_invalid_remote_cleanup_response_cannot_confirm_a_ticket(database, monke
     factory, _, _, _, run_id, _, fence = database
     with factory.begin() as session:
         run = session.get(WorkbenchRun, run_id)
+        assert run is not None
         run.status = "cancelled"
         ticket = run.backend_run_id
     config_overrides(AGENT_BACKEND_BASE_URL="http://agent.test", AGENT_BACKEND_API_TOKEN="test-token")

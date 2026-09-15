@@ -1,27 +1,32 @@
 """Regressions for branch recovery, regeneration and paused-task input contracts."""
 
+from __future__ import annotations
+
 import json
+from typing import NoReturn
 from uuid import uuid4
 
 import pytest
-from werkzeug.exceptions import Conflict, Forbidden
+from werkzeug.exceptions import Conflict, Forbidden, HTTPException
 
 from models.workbench import WorkbenchChat, WorkbenchRevision, WorkbenchRun
 from services.workbench import files, followups, message_actions, service
 
 from . import test_followups
+from .test_followups import Queue, RunData
 
 queue = test_followups.queue
 
 
-def pause(queue, run):
+def pause(queue: Queue, run: RunData) -> None:
     with queue.factory.begin() as session:
         row = session.get(WorkbenchRun, run["id"])
+        assert row is not None
         row.payload = json.dumps({**json.loads(row.payload), "user_paused": True})
         row.status = "cancelled"
 
 
-def test_recovery_ignores_an_unrelated_historical_paused_branch(queue):
+def test_recovery_ignores_an_unrelated_historical_paused_branch(queue: Queue) -> None:
     old = queue.send("旧分支")
     pause(queue, old)
     current = message_actions.regenerate(*queue.owner, old["id"], 1, "regenerate-branch")
@@ -33,7 +38,7 @@ def test_recovery_ignores_an_unrelated_historical_paused_branch(queue):
     assert [item[2] for item in candidates] == [current["chat_id"]]
 
 
-def test_recovery_keeps_the_queue_paused_when_its_own_parent_is_paused(queue):
+def test_recovery_keeps_the_queue_paused_when_its_own_parent_is_paused(queue: Queue) -> None:
     current = queue.send("原任务")
     waiting = queue.send("排队消息")
     pause(queue, current)
@@ -43,16 +48,20 @@ def test_recovery_keeps_the_queue_paused_when_its_own_parent_is_paused(queue):
 
 
 @pytest.mark.parametrize("phase", ["idle", "running", "paused"])
-def test_attachment_only_send_with_persistent_knowledge_selection(queue, monkeypatch, phase):
+def test_attachment_only_send_with_persistent_knowledge_selection(
+    queue: Queue, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
     original = queue.send("原任务") if phase != "idle" else None
     if phase == "paused":
+        assert original is not None
         pause(queue, original)
     monkeypatch.setattr(
         service, "compile_config", lambda *_: {"model": "frozen-model", "knowledge": {"sets": [{"id": "kb"}]}}
     )
     monkeypatch.setattr(files, "validate_attachments", lambda *_: (["/workspace/file.pdf"], []))
-    args = {"files": [{"path": "/file.pdf", "version": "v1"}], "request_key": "attachment-only"}
+    args: dict[str, object] = {"files": [{"path": "/file.pdf", "version": "v1"}], "request_key": "attachment-only"}
     if phase == "paused":
+        assert original is not None
         args["continue_run_id"] = original["id"]
     sent = queue.send("", **args)
     assert sent["status"] == ("waiting_turn" if phase == "running" else "queued")
@@ -63,11 +72,13 @@ def test_attachment_only_send_with_persistent_knowledge_selection(queue, monkeyp
     assert "/workspace/file.pdf" in files.generation_query(data)
 
 
-def test_blank_continue_uses_frozen_config_without_compiling_unrelated_current_selection(queue, monkeypatch):
+def test_blank_continue_uses_frozen_config_without_compiling_unrelated_current_selection(
+    queue: Queue, monkeypatch: pytest.MonkeyPatch
+) -> None:
     original = queue.send("使用原模型完成报告")
     pause(queue, original)
 
-    def unavailable_current_selection(*_):
+    def unavailable_current_selection(*_: object) -> NoReturn:
         raise Conflict("新选择的模型不可用；原任务冻结配置仍有效")
 
     monkeypatch.setattr(service, "compile_config", unavailable_current_selection)
@@ -75,7 +86,7 @@ def test_blank_continue_uses_frozen_config_without_compiling_unrelated_current_s
     assert json.loads(queue.get(continued["id"]).payload)["effective_soul"] == {"model": "frozen-model"}
 
 
-def test_steering_retry_after_lost_response_keeps_the_original_target(queue):
+def test_steering_retry_after_lost_response_keeps_the_original_target(queue: Queue) -> None:
     current = queue.send("原任务")
     queue.running(current["id"])
     waiting = queue.send("调整说明")
@@ -89,7 +100,7 @@ def test_steering_retry_after_lost_response_keeps_the_original_target(queue):
     assert not json.loads(queue.get(next_run["id"]).payload).get("steering_messages")
 
 
-def test_steering_at_final_seal_keeps_the_message_waiting(queue):
+def test_steering_at_final_seal_keeps_the_message_waiting(queue: Queue) -> None:
     current = queue.send("原任务")
     queue.running(current["id"])
     waiting = queue.send("结束边界调整")
@@ -100,7 +111,7 @@ def test_steering_at_final_seal_keeps_the_message_waiting(queue):
 
 
 @pytest.mark.parametrize("edited_query", [None, "编辑后重新执行原任务"])
-def test_regenerated_task_accepts_steering_in_the_current_version(queue, edited_query):
+def test_regenerated_task_accepts_steering_in_the_current_version(queue: Queue, edited_query: str | None) -> None:
     original = queue.send("原任务")
     queue.finish(original["id"])
     current = message_actions.regenerate(*queue.owner, original["id"], 1, "regenerate", query=edited_query)
@@ -110,7 +121,7 @@ def test_regenerated_task_accepts_steering_in_the_current_version(queue, edited_
     assert accepted["steer_target_run_id"] == current["id"]
 
 
-def test_regeneration_does_not_gain_permission_to_queue_behind_an_active_task(queue):
+def test_regeneration_does_not_gain_permission_to_queue_behind_an_active_task(queue: Queue) -> None:
     original = queue.send("原任务")
     queue.finish(original["id"])
     active = queue.send("正在处理的新任务")
@@ -120,25 +131,31 @@ def test_regeneration_does_not_gain_permission_to_queue_behind_an_active_task(qu
 
 
 @pytest.mark.parametrize("failure", [Conflict("附件已改变"), Forbidden("附件不属于当前会话")])
-def test_attachment_only_knowledge_send_keeps_file_validation(queue, monkeypatch, failure):
+def test_attachment_only_knowledge_send_keeps_file_validation(
+    queue: Queue, monkeypatch: pytest.MonkeyPatch, failure: HTTPException
+) -> None:
     monkeypatch.setattr(service, "compile_config", lambda *_: {"knowledge": {"sets": [{"id": "kb"}]}})
 
-    def invalid_attachment(*_):
+    def invalid_attachment(*_: object) -> NoReturn:
         raise failure
 
     monkeypatch.setattr(files, "validate_attachments", invalid_attachment)
-    with pytest.raises(type(failure), match=failure.description):
+    with pytest.raises(type(failure), match=failure.description or ""):
         queue.send("", files=[{"path": "invalid.pdf", "version": "old"}], request_key="invalid")
     assert queue.published == []
 
 
-def test_blank_continue_uses_owned_original_revision_despite_current_config_changes(queue, monkeypatch):
+def test_blank_continue_uses_owned_original_revision_despite_current_config_changes(
+    queue: Queue, monkeypatch: pytest.MonkeyPatch
+) -> None:
     original = queue.send("冻结的原始任务")
     waiting = [queue.send(name) for name in ("A", "B", "C")]
     pause(queue, original)
     original_row = queue.get(original["id"])
     with queue.factory.begin() as session:
-        session.get(WorkbenchChat, original["chat_id"]).version = 2
+        stored_row = session.get(WorkbenchChat, original["chat_id"])
+        assert stored_row is not None
+        stored_row.version = 2
         session.add(
             WorkbenchRevision(
                 id=str(uuid4()),
@@ -170,16 +187,18 @@ def test_blank_continue_uses_owned_original_revision_despite_current_config_chan
     assert data["resource_mentions"]["skills"] == []
     assert json.loads(queue.get(waiting[0]["id"]).payload)["branch_parent_run_id"] == continued["id"]
     with queue.factory() as session:
-        assert session.get(WorkbenchChat, original["chat_id"]).version == 2
+        stored_row = session.get(WorkbenchChat, original["chat_id"])
+        assert stored_row is not None
+        assert stored_row.version == 2
     assert queue.send("", continue_run_id=original["id"], request_key="continue")["id"] == continued["id"]
     assert queue.published == [original["id"], continued["id"]]
 
 
-def test_blank_continue_still_checks_current_agent_permission(queue, monkeypatch):
+def test_blank_continue_still_checks_current_agent_permission(queue: Queue, monkeypatch: pytest.MonkeyPatch) -> None:
     original = queue.send("已授权任务")
     pause(queue, original)
 
-    def revoked(*_):
+    def revoked(*_: object) -> NoReturn:
         raise Forbidden("Agent 权限已撤回")
 
     monkeypatch.setattr(service, "_authorized_template", revoked)
@@ -188,7 +207,7 @@ def test_blank_continue_still_checks_current_agent_permission(queue, monkeypatch
     assert queue.published == [original["id"]]
 
 
-def test_recovery_filters_fifty_paused_heads_before_limiting_the_batch(queue):
+def test_recovery_filters_fifty_paused_heads_before_limiting_the_batch(queue: Queue) -> None:
     old = queue.send("历史暂停")
     pause(queue, old)
     current = message_actions.regenerate(*queue.owner, old["id"], 1, "regenerate")
@@ -197,6 +216,7 @@ def test_recovery_filters_fifty_paused_heads_before_limiting_the_batch(queue):
     template = queue.get(current["id"])
     with queue.factory.begin() as session:
         original_chat = session.get(WorkbenchChat, current["chat_id"])
+        assert original_chat is not None
         for _ in range(50):
             chat_id, parent_id, waiting_id = (str(uuid4()) for _ in range(3))
             session.add(
