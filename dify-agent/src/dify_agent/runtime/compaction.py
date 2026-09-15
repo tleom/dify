@@ -9,31 +9,51 @@ not one-token Dify policy thresholds.
 """
 
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai_harness.compaction import ClearToolResults, SummarizingCompaction, TieredCompaction
+from pydantic_ai_harness.compaction import (
+    ClampOversizedMessages,
+    ClearToolResults,
+    SummarizingCompaction,
+    TieredCompaction,
+)
+
+WORKBENCH_UNKNOWN_WINDOW_INPUT_BUDGET = 8_000
 
 
 def build_compaction_capability(
     *,
     context_window_tokens: int | None,
     model_settings: ModelSettings | None,
+    workbench: bool = False,
 ) -> TieredCompaction[None] | None:
-    """Build compaction for the effective model window, or disable it when unknown."""
-    if context_window_tokens is None:
-        return None
+    """Use a real model window, or an explicit Workbench input policy when unknown.
 
-    input_budget = context_window_tokens * 4 // 5
-    max_tokens = model_settings.get("max_tokens") if model_settings is not None else None
-    if max_tokens is not None and max_tokens > 0:
-        input_budget = min(input_budget, context_window_tokens - max_tokens)
+    The fallback is a conservative history budget, not a guessed model capacity.
+    Non-Workbench callers retain the opt-in behavior for unknown model windows.
+    """
+    if context_window_tokens is None:
+        if not workbench:
+            return None
+        input_budget = WORKBENCH_UNKNOWN_WINDOW_INPUT_BUDGET
+    else:
+        input_budget = context_window_tokens * 4 // 5
+        max_tokens = model_settings.get("max_tokens") if model_settings is not None else None
+        if max_tokens is not None and max_tokens > 0:
+            input_budget = min(input_budget, context_window_tokens - max_tokens)
     if input_budget <= 0:
         raise ValueError("Model max_tokens must leave a positive input context budget.")
 
     return TieredCompaction(
         tiers=[
+            ClampOversizedMessages(
+                max_part_tokens=max(1, input_budget // 2),
+                keep_head_chars=min(2_000, input_budget // 2),
+                keep_tail_chars=min(2_000, input_budget // 2),
+            ),
             ClearToolResults(max_tokens=1, keep_pairs=3, clear_tool_inputs=False),
             SummarizingCompaction(
                 max_tokens=1,
                 keep_messages=20,
+                keep_tokens=input_budget // 2,
                 preserve_first_user_message=True,
                 incremental=True,
             ),

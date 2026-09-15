@@ -21,6 +21,16 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp"}
 def generation_query(payload):
     """Native images are visual input; only other attachments need sandbox locators."""
     query = payload["query"]
+    recovery = payload.get("recovery", {})
+    if recovery.get("attempt", 0) > 0:
+        query += (
+            "\n平台已自动继续任务，请从已完成进度接续。原任务："
+            + recovery.get("goal", "")
+            + "\n上一轮错误："
+            + (recovery.get("previous_error") or "执行意外中断")
+            + "\n先核查历史、现有文件和作业状态，再修正失败步骤。"
+            "不要从头重复任务，不要重发结果不明的外部写入或付费请求。"
+        )
     if not payload.get("continuation"):
         query += payload.get("mention_prompt", "")
     paths = payload.get("sandbox_paths", [])

@@ -109,6 +109,9 @@ def regenerate(tenant_id, account_id, run_id, version, request_key, *, query=Non
             raise NotFound()
         payload = {
             "activity_protocol": activity_protocol,
+            # New native runs support steering independently of whether a
+            # regeneration may queue behind another active task.
+            "followup_protocol": 1,
             "query": original["query"] if query is None else query,
             "edited_from": run.id if query is not None else None,
             "inputs": original.get("inputs", {}),

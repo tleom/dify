@@ -19,25 +19,36 @@ def test_enqueue_freezes_only_a_negotiated_and_enabled_protocol(
     monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., None], enabled: bool, requested: int | None
 ) -> None:
     config_overrides(WORKBENCH_ACTIVITY_ENABLED=enabled)
+    monkeypatch.setattr(service, "authorize", lambda *_args: None)
     monkeypatch.setattr(
         service, "template", lambda *_args: {"soul": {}, "agent_id": "agent", "snapshot_id": "snapshot"}
     )
     monkeypatch.setattr(service, "read_chat", lambda *_args: {"version": 1, "selection": {"model": "model"}})
     monkeypatch.setattr(service, "compile_config", lambda *_args: {})
     monkeypatch.setattr(
-        service, "_chat", lambda *_args, **_kwargs: SimpleNamespace(id="chat", version=1, agent_id="agent")
+        service,
+        "_chat",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            id="chat", tenant_id="tenant", account_id="account", version=1, agent_id="agent"
+        ),
     )
     monkeypatch.setattr(mentions, "default_capabilities", lambda _soul, selection: selection)
     monkeypatch.setattr(branches, "resolve_parent", lambda *_args: {})
     session = Mock()
-    session.scalar.side_effect = [None, None, SimpleNamespace(id="revision")]
+    session.scalars.return_value = []
+    session.scalar.side_effect = [None, None, None, SimpleNamespace(id="revision")]
+    monkeypatch.setattr(service.session_factory, "create_session", lambda: nullcontext(session))
     monkeypatch.setattr(
         service.session_factory, "get_session_maker", lambda: SimpleNamespace(begin=lambda: nullcontext(session))
     )
     monkeypatch.setattr(
         service,
         "run_dto",
-        lambda run: {"id": run.id, "activity_protocol": json.loads(run.payload)["activity_protocol"]},
+        lambda run: {
+            "id": run.id,
+            "status": run.status,
+            "activity_protocol": json.loads(run.payload)["activity_protocol"],
+        },
     )
     monkeypatch.setattr(scheduler, "publish", Mock())
     payload: dict[str, str | int] = {"query": "hello"}

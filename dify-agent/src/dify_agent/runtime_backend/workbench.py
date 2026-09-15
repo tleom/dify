@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shlex
 import time
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from dify_agent.runtime_backend.protocols import (
     RuntimeLease,
 )
 from dify_agent.runtime_backend.shellctl import ShellctlRuntimeLease, run_shellctl_control_command
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -129,12 +132,16 @@ class WorkbenchExecutionBindingBackend:
             },
         )
 
-        async def pulse():
-            while True:
-                await asyncio.sleep(30)
-                await self._manager(workspace, "touch")
+        return WorkbenchRuntimeLease(lease, asyncio.create_task(self._keep_alive(workspace)), workspace, binding)
 
-        return WorkbenchRuntimeLease(lease, asyncio.create_task(pulse()), workspace, binding)
+    async def _keep_alive(self, workspace: str) -> None:
+        """Keep retrying safe touch requests after a transient manager outage."""
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await self._manager(workspace, "touch")
+            except Exception:
+                logger.warning("Workbench sandbox keepalive failed; will retry: %s", workspace, exc_info=True)
 
     async def release(self, lease: RuntimeLease) -> None:
         if not isinstance(lease, WorkbenchRuntimeLease):

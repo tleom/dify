@@ -9,11 +9,14 @@ create-run payloads are never persisted because layer config may include
 sensitive runtime configuration.
 """
 
+import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Awaitable
-from typing import cast
+from typing import Any, cast
 
 from redis.asyncio import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 
 from agenton.compositor import CompositorSessionSnapshot
 from dify_agent.protocol.schemas import (
@@ -199,6 +202,37 @@ class RedisRunStore(RunEventSink):
             value = value.decode()
         return RunRecord.model_validate_json(value)
 
+    async def checkpoint_history(self, run_id: str, state: str) -> None:
+        """SET is safe to repeat even when its response was lost."""
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                await self.redis.set(f"{self.prefix}:history:{run_id}", state, ex=self.run_retention_seconds)
+                return
+            except (RedisConnectionError, RedisTimeoutError):
+                if time.monotonic() >= deadline:
+                    raise
+                await asyncio.sleep(1)
+
+    async def get_history_checkpoint(self, run_id: str) -> dict | None:
+        """Prefer terminal history; a dead process may only have a prior checkpoint."""
+        from agenton_collections.layers.pydantic_ai import PydanticAIHistoryRuntimeState
+
+        entries = await self.redis.xrevrange(run_events_key(self.prefix, run_id), count=1)
+        if entries:
+            event = self._decode_event(run_id, *entries[0])
+            snapshot = getattr(event.data, "session_snapshot", None)
+            if snapshot is not None:
+                for layer in snapshot.layers:
+                    if layer.name == "history":
+                        return PydanticAIHistoryRuntimeState.model_validate(layer.runtime_state).model_dump(mode="json")
+        state = await self.redis.get(f"{self.prefix}:history:{run_id}")
+        if not state:
+            return None
+        checkpoint = json.loads(state)
+        checkpoint.pop("steering_delivered_ids", None)
+        return PydanticAIHistoryRuntimeState.model_validate(checkpoint).model_dump(mode="json")
+
     async def create_run_once(self, run_id: str, owner: dict[str, str] | None = None) -> tuple[RunRecord, bool]:
         """Keep a durable ticket tombstone even after normal event retention expires."""
         record = RunRecord(run_id=run_id, status="running")
@@ -342,12 +376,20 @@ class RedisRunStore(RunEventSink):
 
     async def wait_for_cancellation(self, run_id: str) -> RunCancellationIntent:
         """Wait until the first accepted private cancellation intent is available."""
-        response = await self.redis.xread(
-            {run_cancel_intent_key(self.prefix, run_id): "0-0"},
-            block=0,
-            count=1,
-        )
-        return self._decode_cancellation_intent(response[0][1][0][1])
+        deadline = None
+        while True:
+            try:
+                response = await self.redis.xread(
+                    {run_cancel_intent_key(self.prefix, run_id): "0-0"},
+                    block=0,
+                    count=1,
+                )
+                return self._decode_cancellation_intent(response[0][1][0][1])
+            except (RedisConnectionError, RedisTimeoutError):
+                deadline = deadline or time.monotonic() + 60
+                if time.monotonic() >= deadline:
+                    raise
+                await asyncio.sleep(1)
 
     async def finalize_cancellation(
         self,
@@ -395,6 +437,35 @@ class RedisRunStore(RunEventSink):
             status=cast(RunStatus, _decode_redis_text(result[1])),
             event_id=_decode_redis_text(result[2]) or None,
         )
+
+    async def get_fenced_state(self, run_id: str) -> dict:
+        """Read the final captured context before permitting a continuation."""
+        from agenton_collections.layers.pydantic_ai import PydanticAIHistoryRuntimeState
+
+        state: dict[str, Any] = {}
+        entries = await self.redis.xrevrange(run_events_key(self.prefix, run_id), count=1)
+        event = self._decode_event(run_id, *entries[0]) if entries else None
+        snapshot = (
+            getattr(event.data, "session_snapshot", None)
+            if event is not None and event.type in _TERMINAL_RUN_EVENT_TYPES
+            else None
+        )
+        for layer in snapshot.layers if snapshot is not None else []:
+            if layer.name == "history":
+                state["history"] = PydanticAIHistoryRuntimeState.model_validate(layer.runtime_state).model_dump(
+                    mode="json"
+                )
+            if layer.name == "workbench_followups":
+                state["steering_delivered_ids"] = sorted(layer.runtime_state.get("seen_ids", []))
+        if "history" not in state:
+            raw = await self.redis.get(f"{self.prefix}:history:{run_id}")
+            if raw:
+                checkpoint = json.loads(raw)
+                delivered_ids = checkpoint.pop("steering_delivered_ids", None)
+                state["history"] = PydanticAIHistoryRuntimeState.model_validate(checkpoint).model_dump(mode="json")
+                if delivered_ids is not None:
+                    state["steering_delivered_ids"] = delivered_ids
+        return state
 
     async def get_events(self, run_id: str, *, after: str = "0-0", limit: int = 100) -> RunEventsResponse:
         """Read a bounded page of events after ``after`` cursor."""

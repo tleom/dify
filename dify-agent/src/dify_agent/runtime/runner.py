@@ -395,11 +395,39 @@ class AgentRunRunner:
                 files_layer = next(
                     (slot.layer for slot in run.slots.values() if isinstance(slot.layer, WorkbenchFilesLayer)), None
                 )
+                from dify_agent.layers.workbench_followups import WorkbenchFollowupsLayer
+                from dify_agent.runtime.workbench_followups import WorkbenchFollowupsCapability
+
+                followups_layer = next(
+                    (slot.layer for slot in run.slots.values() if isinstance(slot.layer, WorkbenchFollowupsLayer)), None
+                )
+                followups = (
+                    WorkbenchFollowupsCapability(followups_layer, self.dify_api_http_client, self.run_id)
+                    if followups_layer is not None
+                    else None
+                )
                 shell_layer = next(
                     (slot.layer for slot in run.slots.values() if isinstance(slot.layer, DifyShellLayer)), None
                 )
                 shell_arguments = (
                     ShellArgumentCompatibilityCapability() if files_layer is not None or activity is not None else None
+                )
+                from dify_agent.runtime.workbench_tool_recovery import WorkbenchToolRecoveryCapability
+                from dify_agent.runtime.workbench_checkpoint import HistoryCheckpointSink, WorkbenchHistoryCheckpoint
+
+                tool_recovery = (
+                    WorkbenchToolRecoveryCapability()
+                    if self.request.execution_ticket or files_layer is not None or activity is not None
+                    else None
+                )
+                checkpoint = (
+                    WorkbenchHistoryCheckpoint(
+                        sink=self.sink,
+                        run_id=self.run_id,
+                        seen_ids=followups_layer.runtime_state.seen_ids if followups_layer is not None else None,
+                    )
+                    if tool_recovery is not None and isinstance(self.sink, HistoryCheckpointSink)
+                    else None
                 )
                 changes = (
                     WorkbenchFileChanges(shell_layer, activity, files_layer)
@@ -475,6 +503,8 @@ class AgentRunRunner:
                             data=event,
                             agent_message_delta=text_delta,
                         )
+                        if tool_recovery is not None:
+                            tool_recovery.observe(event)
 
                 try:
                     output_contract = resolve_run_output_contract(run)
@@ -491,6 +521,17 @@ class AgentRunRunner:
                     compaction = build_compaction_capability(
                         context_window_tokens=llm_layer.config.context_window_tokens,
                         model_settings=llm_layer.config.model_settings,
+                        workbench=tool_recovery is not None,
+                    )
+                    from dify_agent.runtime.workbench_tool_output import WorkbenchToolOutputLimits
+
+                    tool_output = (
+                        WorkbenchToolOutputLimits(shell_layer, compaction.target_tokens)
+                        if tool_recovery is not None
+                        and shell_layer is not None
+                        and compaction is not None
+                        and compaction.target_tokens is not None
+                        else None
                     )
                     if self.request.execution_ticket:
                         from dify_agent.runtime.context_status import WorkbenchContextStatus
@@ -523,7 +564,16 @@ class AgentRunRunner:
                 agent = create_agent(
                     model,
                     tools=tools,
-                    **({"output_retries": 2} if mentions_layer is not None or delivery is not None else {}),
+                    **(
+                        # Unknown names bypass tool hooks. Keep the SDK's per-name
+                        # retry ceiling above any possible model step count; the
+                        # capability enforces five consecutive results instead.
+                        {"output_retries": 4, "tool_retries": _MAX_AGENT_STEPS_PER_RUN}
+                        if tool_recovery is not None
+                        else {"output_retries": 2}
+                        if mentions_layer is not None or delivery is not None
+                        else {}
+                    ),
                     output_type=_resolve_agent_output_type(
                         output_contract.output_type, ask_human_layer is not None or environment_layer is not None
                     ),
@@ -544,7 +594,16 @@ class AgentRunRunner:
                                     instructions=run.prompts or None,
                                     capabilities=[
                                         capability
-                                        for capability in (compaction, shell_arguments, activity, delivery)
+                                        for capability in (
+                                            followups,
+                                            checkpoint,
+                                            compaction,
+                                            shell_arguments,
+                                            tool_output,
+                                            tool_recovery,
+                                            activity,
+                                            delivery,
+                                        )
                                         if capability is not None
                                     ],
                                     usage_limits=UsageLimits(request_limit=_MAX_AGENT_STEPS_PER_RUN),

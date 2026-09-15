@@ -2,6 +2,30 @@ from controllers.console.workbench import WorkbenchChatEnvelopeResponse, Workben
 from libs.helper import dump_response
 
 
+def test_steering_requires_a_captured_target_and_followup_queries_are_bounded():
+    from uuid import uuid4
+
+    import pytest
+    from pydantic import ValidationError
+
+    from controllers.console.workbench import WorkbenchFollowupsQuery, WorkbenchSteerPayload
+
+    with pytest.raises(ValidationError):
+        WorkbenchSteerPayload.model_validate({})
+    target = str(uuid4())
+    assert WorkbenchSteerPayload.model_validate({"target_run_id": target}).target_run_id == target
+    assert WorkbenchFollowupsQuery.model_validate({"tracked": ",".join([target] * 4)}).tracked
+    with pytest.raises(ValidationError):
+        WorkbenchFollowupsQuery.model_validate({"tracked": ",".join([target] * 5)})
+
+    from controllers.console.workbench import WorkbenchRunPayload
+
+    base = {"version": 1, "request_key": "continue", "query": ""}
+    with pytest.raises(ValidationError):
+        WorkbenchRunPayload.model_validate(base)
+    assert WorkbenchRunPayload.model_validate({**base, "continue_run_id": target}).continue_run_id == target
+
+
 def test_history_responses_preserve_context_usage_without_stream_events() -> None:
     usage = {
         "event": "workbench_context",

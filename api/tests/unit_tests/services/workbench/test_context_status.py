@@ -1,8 +1,8 @@
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Any, Literal
-from unittest.mock import Mock
+from typing import Literal
+from unittest.mock import ANY, Mock
 
 import pytest
 from dify_agent.protocol.schemas import ContextStatusData, ContextStatusRunEvent
@@ -11,7 +11,7 @@ from services.workbench import context_status
 from tests.unit_tests.config_override import apply_config_overrides
 
 
-def setup(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> tuple[SimpleNamespace, Mock]:
+def setup(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> tuple[SimpleNamespace, Mock]:
     run = SimpleNamespace(
         id="workbench",
         tenant_id="tenant",
@@ -25,7 +25,7 @@ def setup(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> tuple[SimpleName
     factory = Mock()
     factory.begin.return_value = nullcontext(Mock())
     monkeypatch.setattr(context_status.session_factory, "get_session_maker", lambda: factory)
-    monkeypatch.setattr(context_status, "current_run", lambda *_args: run)
+    monkeypatch.setattr(context_status, "current_run", Mock(return_value=run))
     apply_config_overrides(monkeypatch, WORKBENCH_ENABLED=True)
     redis = Mock()
     redis.xadd.return_value = b"12-0"
@@ -49,6 +49,13 @@ def event(phase: Literal["usage", "compacting", "compacted", "failed"] = "usage"
 def test_persists_latest_reading_and_merges_compaction_in_stream_order(monkeypatch: pytest.MonkeyPatch) -> None:
     run, redis = setup(monkeypatch)
     context_status.record_context_status("tenant", "conversation", "account", event("compacted"))
+    context_status.current_run.assert_called_once_with(
+        ANY,
+        "tenant",
+        "conversation",
+        "account",
+        for_update=True,
+    )
     payload = json.loads(run.payload)
     assert payload["context_usage"]["model"] == "provider::model"
     run.event_log = json.dumps([{"event": "agent_message", "_id": "11-0"}, {"event": "agent_message", "_id": "13-0"}])
