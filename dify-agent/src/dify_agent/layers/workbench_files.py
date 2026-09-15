@@ -7,7 +7,7 @@ from typing import ClassVar, Self
 
 import httpx
 from markdown_it import MarkdownIt
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_ai import RunContext, Tool
 
 from agenton.layers import LayerConfig, LayerDeps, PlainLayer
@@ -19,7 +19,8 @@ class WorkbenchFilesDeps(LayerDeps):
 
 
 class WorkbenchFilesState(BaseModel):
-    pass
+    workbench_run_id: str | None = None
+    changed_paths: set[str] = Field(default_factory=set)
 
 
 @dataclass
@@ -29,17 +30,20 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
     inner_api_url: str
     inner_api_key: str
     _verified: dict[str, dict[str, str]] = field(default_factory=dict, init=False, repr=False)
-    _changed: set[str] = field(default_factory=set, init=False, repr=False)
     _lookup_failed: bool = field(default=False, init=False, repr=False)
 
+    async def on_context_create(self) -> None:
+        self.runtime_state = WorkbenchFilesState(workbench_run_id=self.deps.execution_context.config.workbench_run_id)
+
     async def on_context_resume(self) -> None:
+        if self.runtime_state.workbench_run_id != self.deps.execution_context.config.workbench_run_id:
+            await self.on_context_create()
         self._verified.clear()
-        self._changed.clear()
         self._lookup_failed = False
 
     def record_changes(self, paths: list[str], removed: list[str] | None = None) -> None:
-        self._changed.update(paths)
-        self._changed.difference_update(removed or [])
+        self.runtime_state.changed_paths.update(paths)
+        self.runtime_state.changed_paths.difference_update(removed or [])
         # Fixed URLs survive edits, but delivery must confirm the current file exists.
         self._verified.clear()
 
@@ -85,7 +89,7 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
                 text,
             )
         )
-        if (delivered or (final and self._changed)) and not supplied and not blocked:
+        if (delivered or (final and self.runtime_state.changed_paths)) and not supplied and not blocked:
             return "交付前先查询文件空间确认产物可见，并提供实际 download_url；如查询失败，请明确说明交付受阻。"
         return None
 
@@ -102,6 +106,7 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
             "不要猜测或拼接地址，不要用本地路径、sandbox: 地址、临时上传链接替代文件空间链接。"
             "查询失败时如实说明，不能声称文件已可下载。path 默认 . 列出当前会话文件，"
             "也可传入文件或子目录路径。complete=false 时按具体路径查询未显示的文件。"
+            "downloadable=false 表示该文件或目录无法下载，应拆分过大文件或说明交付受阻。"
         ]
 
     async def get_tools(self, *, http_client: httpx.AsyncClient) -> list[Tool[object]]:
@@ -129,7 +134,9 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
                 response.raise_for_status()
                 # Parse once to reject a proxy's HTML response; preserve server URLs exactly.
                 data = response.json()
-                self._lookup_failed = bool(data.get("error"))
+                self._lookup_failed = bool(data.get("error")) or any(
+                    isinstance(entry, dict) and entry.get("downloadable") is False for entry in data.get("entries", [])
+                )
                 for entry in data.get("entries", []):
                     if (
                         isinstance(entry, dict)

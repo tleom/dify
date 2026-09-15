@@ -6,6 +6,7 @@ from fields.base import ResponseModel
 
 
 class WorkbenchFileResponse(ResponseModel):
+    downloadable: bool = True
     download_url: str | None = None
     preview_url: str | None = None
     name: str

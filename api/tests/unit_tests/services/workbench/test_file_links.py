@@ -111,6 +111,7 @@ def file_space(monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., 
                         "size": len(data),
                         "modified": 1.0,
                         "version": "1",
+                        "downloadable": len(data) <= 20 * 1024 * 1024,
                     }
                     for path, data in sorted(contents.items())[:2000]
                 ],
@@ -126,6 +127,7 @@ def file_space(monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., 
                 "size": len(contents[path]),
                 "modified": 1.0,
                 "version": "1",
+                "downloadable": len(contents[path]) <= 20 * 1024 * 1024,
             }
         if request["path"] not in contents:
             raise NotFound()
@@ -215,3 +217,19 @@ def test_configured_public_origin_is_used_without_changing_signed_identity(
     public = file_links.agent_lookup(payload)["entries"][0]
     for mode in ("preview_url", "download_url"):
         assert public[mode] == original[mode].replace("https://files.example.test", "https://agent.xcmggx.com")
+
+
+def test_oversized_files_remain_visible_without_unusable_links(file_space: FileSpace) -> None:
+    payload, root, contents, _, _ = file_space
+    path = root + "/large.bin"
+    contents[path] = b"x" * (20 * 1024 * 1024 + 1)
+    ui = files.operate(payload.tenant_id, payload.account_id, "list", root)["entries"]
+    agent = file_links.agent_lookup(payload)["entries"]
+    specific = file_links.agent_lookup(payload.model_copy(update={"path": "large.bin"}))["entries"]
+    for entries in (ui, agent, specific):
+        entry = next(item for item in entries if item["path"] == path)
+        assert entry["downloadable"] is False
+        assert "download_url" not in entry
+        assert "preview_url" not in entry
+    with pytest.raises(BadRequest, match="超出下载范围"):
+        file_links.lookup(payload.tenant_id, payload.account_id, path)

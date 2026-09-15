@@ -59,6 +59,10 @@ class WorkbenchFileChanges:
 
     async def start(self) -> None:
         self.previous = await self.snapshot()
+        if self.files is not None:
+            removed = self.files.runtime_state.changed_paths - self.previous.keys()
+            if removed:
+                self.files.record_changes([], list(removed))
 
     async def collect(self, *, explicit_path: str | None = None) -> None:
         # Parallel tools share one inventory; serialized observations never duplicate a change.

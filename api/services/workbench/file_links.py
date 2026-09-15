@@ -86,11 +86,20 @@ def read_signed(token: str) -> dict:
     return result
 
 
-def lookup(tenant_id: str, account_id: str, path: str, *, chat_id: str | None = None) -> dict:
+def lookup(
+    tenant_id: str,
+    account_id: str,
+    path: str,
+    *,
+    chat_id: str | None = None,
+    require_downloadable: bool = True,
+) -> dict:
     """Confirm the exact path independently of the bounded directory listing."""
     entry = operate(tenant_id, account_id, "stat", path, chat_id=chat_id)
     if entry["kind"] not in {"file", "directory"}:
         raise NotFound("文件已不存在或不可访问")
+    if require_downloadable and not entry.get("downloadable", True):
+        raise BadRequest("文件超出下载范围，请拆分过大的文件或移除目录内不支持的文件后重试")
     return entry
 
 
@@ -127,7 +136,7 @@ def agent_lookup(payload: AgentFileLinksPayload) -> dict:
     if path == root:
         listing = operate(payload.tenant_id, payload.account_id, "list", path, chat_id=chat_id)
     else:
-        item = lookup(payload.tenant_id, payload.account_id, path, chat_id=chat_id)
+        item = lookup(payload.tenant_id, payload.account_id, path, chat_id=chat_id, require_downloadable=False)
         if item["kind"] == "file":
             return {"directory": root, "entries": [item], "complete": True}
         listing = operate(payload.tenant_id, payload.account_id, "list", path, chat_id=chat_id)

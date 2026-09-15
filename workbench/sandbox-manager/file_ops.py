@@ -71,6 +71,27 @@ def tree_version(fd):
     return version(json.dumps(tree_entries(fd), separators=(",", ":")).encode())
 
 
+def entry_metadata(fd, name, path, info):
+    kind = "directory" if stat.S_ISDIR(info.st_mode) else "file" if stat.S_ISREG(info.st_mode) else "blocked"
+    data = read_file(fd, name) if kind == "file" and info.st_size <= MAX_BYTES else None
+    fingerprint = version(data)
+    downloadable = kind == "file" and fingerprint is not None
+    if kind == "directory":
+        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            entries = tree_entries(child)
+            fingerprint = version(json.dumps(entries, separators=(",", ":")).encode())
+            downloadable = (
+                all(stat.S_ISDIR(mode) or (stat.S_ISREG(mode) and size <= MAX_BYTES)
+                    for _, mode, size, _, _ in entries)
+                and sum(size for _, mode, size, _, _ in entries if stat.S_ISREG(mode)) <= MAX_TREE_BYTES
+            )
+        finally:
+            os.close(child)
+    return {"name": name, "path": path, "kind": kind, "size": info.st_size,
+            "modified": info.st_mtime, "version": fingerprint, "downloadable": downloadable}
+
+
 def archive(fd):
     entries = tree_entries(fd)
     total = sum(size for _, mode, size, _, _ in entries if stat.S_ISREG(mode))
@@ -130,17 +151,7 @@ def operate(payload, root="/workspace"):
                 result = []
                 for entry in sorted(os.listdir(child))[:2000]:
                     info = os.stat(entry, dir_fd=child, follow_symlinks=False)
-                    kind = "directory" if stat.S_ISDIR(info.st_mode) else "file" if stat.S_ISREG(info.st_mode) else "blocked"
-                    data = read_file(child, entry) if kind == "file" and info.st_size <= MAX_BYTES else None
-                    fingerprint = version(data)
-                    if kind == "directory":
-                        nested = os.open(entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=child)
-                        try:
-                            fingerprint = tree_version(nested)
-                        finally:
-                            os.close(nested)
-                    result.append({"name": entry, "path": path + "/" + entry, "kind": kind,
-                                   "size": info.st_size, "modified": info.st_mtime, "version": fingerprint})
+                    result.append(entry_metadata(child, entry, path + "/" + entry, info))
                 return {"path": path, "entries": result}
             finally:
                 os.close(child)
@@ -151,17 +162,7 @@ def operate(payload, root="/workspace"):
         if operation == "stat":
             if info is None:
                 return {"path": path, "kind": "missing"}
-            kind = "directory" if stat.S_ISDIR(info.st_mode) else "file" if stat.S_ISREG(info.st_mode) else "blocked"
-            data = read_file(fd, name) if kind == "file" and info.st_size <= MAX_BYTES else None
-            fingerprint = version(data)
-            if kind == "directory":
-                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-                try:
-                    fingerprint = tree_version(child)
-                finally:
-                    os.close(child)
-            return {"name": name, "path": path, "kind": kind,
-                    "size": info.st_size, "modified": info.st_mtime, "version": fingerprint}
+            return entry_metadata(fd, name, path, info)
         if info is not None and stat.S_ISDIR(info.st_mode):
             if len(path.split("/")) < 2:
                 raise ValueError("The conversation root cannot be downloaded or deleted")

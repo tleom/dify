@@ -99,7 +99,15 @@ def operate(tenant_id, account_id, operation, path, *, chat_id=None, **kwargs) -
             return {
                 "path": path,
                 "entries": [
-                    {**entries[root], "name": chat.title, **_links(tenant_id, account_id, chat.id, root)}
+                    {
+                        **entries[root],
+                        "name": chat.title,
+                        **(
+                            _links(tenant_id, account_id, chat.id, root)
+                            if entries[root].get("downloadable", True)
+                            else {}
+                        ),
+                    }
                     for root, chat in folders.items()
                     if root in entries
                 ],
@@ -123,9 +131,9 @@ def operate(tenant_id, account_id, operation, path, *, chat_id=None, **kwargs) -
         result["name"] = archive_name(title)
     if operation == "list":
         for entry in result["entries"]:
-            if entry["kind"] != "blocked":
+            if entry["kind"] != "blocked" and entry.get("downloadable", True):
                 entry.update(_links(tenant_id, account_id, resolved_chat_id, entry["path"]))
-    if operation == "stat" and result["kind"] in {"file", "directory"}:
+    if operation == "stat" and result["kind"] in {"file", "directory"} and result.get("downloadable", True):
         result.update(_links(tenant_id, account_id, resolved_chat_id, result["path"]))
     return result
 

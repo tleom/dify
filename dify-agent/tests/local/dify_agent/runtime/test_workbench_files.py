@@ -20,6 +20,8 @@ from agenton.layers import LifecycleState
 from agenton.compositor import LayerSessionSnapshot
 from dify_agent.layers.shell.layer import DifyShellLayer, DifyShellLayerConfig
 from dify_agent.layers.runtime import DifyRuntimeLayerConfig
+from dify_agent.layers.execution_context.configs import DifyExecutionContextLayerConfig
+from dify_agent.layers.execution_context.layer import DifyExecutionContextLayer
 from dify_agent.layers.workbench_files import WorkbenchFilesLayer
 from dify_agent.protocol import DeferredToolResultsPayload, RunLayerSpec, RunSucceededEvent, WorkbenchActivityRunEvent
 from dify_agent.runtime.compositor_factory import create_default_layer_providers
@@ -247,7 +249,10 @@ def test_wrapped_arguments_recover_after_invalid_attempts_with_activity_disabled
 
 
 @pytest.mark.parametrize("activity_enabled", [False, True])
-def test_runner_observes_binary_creation_and_editing_and_exports_real_events(monkeypatch, tmp_path, activity_enabled):
+@pytest.mark.parametrize("suspend", [False, True])
+def test_runner_observes_binary_creation_and_editing_and_exports_real_events(
+    monkeypatch, tmp_path, activity_enabled, suspend
+):
     calls = 0
 
     async def stream(messages, info):
@@ -255,15 +260,21 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(mon
         calls += 1
         if calls <= 2:
             yield {0: _call("shell_run", {"script": "create" if calls == 1 else "edit"}, f"shell-{calls}")}
-        elif calls == 3:
+        elif calls == 3 and suspend:
+            yield {0: _call("update_shared_environment", {"reason": "需要依赖", "python": ["pillow"]}, "env")}
+        elif calls == 3 + int(suspend):
             yield "处理完成。"
-        elif calls == 4:
+        elif calls == 4 + int(suspend):
             yield {0: _call("workbench_files", {}, "files")}
         else:
             yield f"文件已生成，可打开查看。[下载图片]({DOWNLOAD})\n![图片]({PREVIEW})"
 
     request, sink, _ = _setup(monkeypatch, stream)
     add_files(request)
+    if suspend:
+        request.composition.layers.append(
+            RunLayerSpec(name="workbench_environment", type="dify.workbench_environment", config={})
+        )
     if not activity_enabled:
         request.composition.layers = [
             layer for layer in request.composition.layers if layer.type != "dify.workbench_activity"
@@ -322,19 +333,26 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(mon
 
     async def scenario():
         async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
-            await AgentRunRunner(
-                run_id="binary",
-                request=request,
-                sink=sink,
-                plugin_daemon_http_client=client,
-                dify_api_http_client=client,
-                layer_providers=create_default_layer_providers(runtime_backend_profile=profile),
-            ).run()
+            for identifier in ["binary", "binary-resume"] if suspend else ["binary"]:
+                if identifier == "binary-resume":
+                    snapshot = sink.events["binary"][-1].data.session_snapshot
+                    pending = next(layer for layer in snapshot.layers if layer.name == "workbench_files")
+                    assert set(pending.runtime_state["changed_paths"]) == {"chart.png", "报告.docx"}
+                    request.session_snapshot = snapshot
+                    request.deferred_tool_results = DeferredToolResultsPayload(calls={"env": {"status": "completed"}})
+                await AgentRunRunner(
+                    run_id=identifier,
+                    request=request,
+                    sink=sink,
+                    plugin_daemon_http_client=client,
+                    dify_api_http_client=client,
+                    layer_providers=create_default_layer_providers(runtime_backend_profile=profile),
+                ).run()
 
     asyncio.run(scenario())
-    events = sink.events["binary"]
+    events = sink.events["binary"] + (sink.events["binary-resume"] if suspend else [])
     assert isinstance(events[-1], RunSucceededEvent)
-    assert calls == 5
+    assert calls == 5 + int(suspend)
     public_stream = "".join(
         json.dumps(event.model_dump(mode="json"), ensure_ascii=False)
         for event in events
@@ -351,10 +369,68 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(mon
     expected = [("file_create", "chart.png"), ("file_create", "报告.docx"), ("file_edit", "报告.docx")]
     assert [(item.tool_name, item.output["path"]) for item in observed] == (expected if activity_enabled else [])
     target = os.environ.get("WORKBENCH_EVENT_FIXTURE")
-    if target and activity_enabled:
+    if target and activity_enabled and not suspend:
         values = [
             {"event": "workbench_activity", "_id": f"{i + 1}-0", "data": event.data.model_dump(mode="json")}
             for i, event in enumerate(events)
             if isinstance(event, WorkbenchActivityRunEvent)
         ]
         Path(target).write_text(json.dumps(values, ensure_ascii=False), encoding="utf-8")
+
+
+def test_new_logical_run_clears_pending_files_but_resume_preserves_them():
+    context = DifyExecutionContextLayer(
+        config=DifyExecutionContextLayerConfig(
+            tenant_id="tenant", agent_mode="agent_app", invoke_from="web-app", workbench_run_id="first"
+        ),
+        daemon_url="",
+        daemon_api_key="",
+    )
+    layer = WorkbenchFilesLayer(config=LayerConfig(), inner_api_url="", inner_api_key="")
+    layer.bind_deps({"execution_context": context})
+    asyncio.run(layer.on_context_create())
+    layer.record_changes(["chart.png", "removed.txt"])
+    layer.record_changes([], ["removed.txt"])
+    layer._verified["chart.png"] = {"preview_url": PREVIEW, "download_url": DOWNLOAD}
+    asyncio.run(layer.on_context_resume())
+    assert layer.runtime_state.changed_paths == {"chart.png"}
+    assert not layer._verified
+    assert layer.delivery_error("操作完成。", final=True)
+    context.config.workbench_run_id = "next"
+    asyncio.run(layer.on_context_resume())
+    assert not layer.runtime_state.changed_paths
+    assert layer.delivery_error("操作完成。", final=True) is None
+
+
+def test_unavailable_download_can_be_reported_without_a_fabricated_link(monkeypatch):
+    calls = 0
+
+    async def stream(messages, info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield {0: _call("workbench_files", {"path": "large.bin"}, "files")}
+        else:
+            yield "文件已生成，但文件下载受阻，需要拆分过大的文件。"
+
+    request, sink, _ = _setup(monkeypatch, stream)
+    add_files(request)
+
+    async def scenario():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"entries": [{"path": "large.bin", "downloadable": False}]})
+            )
+        ) as client:
+            await AgentRunRunner(
+                run_id="unavailable",
+                request=request,
+                sink=sink,
+                plugin_daemon_http_client=client,
+                dify_api_http_client=client,
+            ).run()
+
+    asyncio.run(scenario())
+    assert calls == 2
+    assert isinstance(sink.events["unavailable"][-1], RunSucceededEvent)
+    assert "文件下载受阻" in "".join(item.text for item in _progress(sink.events["unavailable"], "text"))
