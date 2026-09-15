@@ -98,7 +98,11 @@ def operate(tenant_id, account_id, operation, path, *, chat_id=None, **kwargs) -
             entries = {entry["path"]: entry for entry in listing["entries"]}
             return {
                 "path": path,
-                "entries": [{**entries[root], "name": chat.title} for root, chat in folders.items() if root in entries],
+                "entries": [
+                    {**entries[root], "name": chat.title, **_links(tenant_id, account_id, chat.id, root)}
+                    for root, chat in folders.items()
+                    if root in entries
+                ],
             }
         root, chat = resolve_path(session, tenant_id, account_id, path, chat_id=chat_id)
         if operation == "delete" and session.scalar(
@@ -112,12 +116,22 @@ def operate(tenant_id, account_id, operation, path, *, chat_id=None, **kwargs) -
             .limit(1)
         ):
             raise Conflict("此对话正在执行任务，请停止后再删除文件")
-        title = chat.title
+        title, resolved_chat_id = chat.title, chat.id
     manager(identifier, "files", {"operation": "mkdir", "path": root})
     result = manager(identifier, "files", {"operation": operation, "path": path, **kwargs})
     if operation == "get" and result.get("kind") == "directory" and path == root:
         result["name"] = archive_name(title)
+    if operation == "list":
+        for entry in result["entries"]:
+            if entry["kind"] != "blocked":
+                entry.update(_links(tenant_id, account_id, resolved_chat_id, entry["path"]))
     return result
+
+
+def _links(tenant_id, account_id, chat_id, path):
+    from services.workbench.file_links import links
+
+    return links(tenant_id, account_id, chat_id, path)
 
 
 def validate_attachments(tenant_id, account_id, chat_id, files):

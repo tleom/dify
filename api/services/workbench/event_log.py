@@ -23,6 +23,7 @@ from services.workbench.scheduler import event_key
 
 logger = logging.getLogger(__name__)
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
+REDUNDANT_EVENTS = frozenset({"agent_thought", "agent_message"})
 
 
 def uses_journal(run, payload=None):
@@ -49,6 +50,14 @@ def append_locked(session, run, item):
     if json.loads(run.payload).get("activity_closed"):
         return None
     if run.status in TERMINAL_STATUSES and item.get("event") != "workbench_end":
+        return None
+    if item.get("event") in REDUNDANT_EVENTS:
+        # Protocol 1 already records the same content as ordered narrative/tool events.
+        message_id = item.get("message_id")
+        payload = json.loads(run.payload)
+        if message_id and message_id not in payload.get("message_ids", []):
+            payload.setdefault("message_ids", []).append(message_id)
+            run.payload = json.dumps(payload)
         return None
     _append_tool_knowledge(session, run, item)
     stored = _append_record_locked(session, run, item)
@@ -158,25 +167,58 @@ def append_event(run_id, item, *, expected_backend_run_id=None):
 
 
 def history_events(run):
+    return history_snapshot(run)[0]
+
+
+def history_snapshot(run):
     session = object_session(run)
     if session is not None:
-        return _history(session, run.id)
+        return _history_snapshot(session, run.id)
     with session_factory.create_session() as session:
-        return _history(session, run.id)
+        return _history_snapshot(session, run.id)
 
 
 def _history(session, run_id):
+    return _history_snapshot(session, run_id)[0]
+
+
+def _history_snapshot(session, run_id):
     # Attempt endings belong to stream control. The DTO's current run status
     # describes history, including a task that has resumed after a pause.
-    return [
-        item
-        for value in session.scalars(
-            select(WorkbenchRunEvent.payload)
-            .where(WorkbenchRunEvent.run_id == run_id)
-            .order_by(WorkbenchRunEvent.sequence)
-        )
-        if (item := json.loads(value)).get("event") != "workbench_end"
-    ]
+    items = []
+    cursor = 0
+    for sequence, value in session.execute(
+        select(WorkbenchRunEvent.sequence, WorkbenchRunEvent.payload)
+        .where(WorkbenchRunEvent.run_id == run_id)
+        .order_by(WorkbenchRunEvent.sequence)
+    ):
+        cursor = sequence
+        item = json.loads(value)
+        if item.get("event") not in REDUNDANT_EVENTS | {"workbench_end"}:
+            items.append(item)
+    return compact_narratives(items), f"{cursor}-0"
+
+
+def compact_narratives(items):
+    """Coalesce adjacent deltas without changing the first event identity or ordering."""
+    result = []
+    parts = []
+    key = None
+    for item in items:
+        data = item.get("data") if item.get("event") == "workbench_activity" else None
+        current = (data.get("kind"), data.get("segment_id")) if isinstance(data, dict) else None
+        if current and current[0] in {"text", "reasoning"} and isinstance(data.get("text"), str):
+            if current == key:
+                parts.append(data["text"])
+                continue
+        if parts:
+            result[-1]["data"]["text"] = "".join(parts)
+        key = current if current and current[0] in {"text", "reasoning"} else None
+        parts = [data["text"]] if key else []
+        result.append({**item, "data": {**data}} if key else item)
+    if parts:
+        result[-1]["data"]["text"] = "".join(parts)
+    return result
 
 
 def read_state(tenant_id, account_id, run_id):
@@ -222,7 +264,7 @@ def stream_events(tenant_id, account_id, run_id, *, after=0):
             after = item["_sequence"]
             # Previous native attempts end while their logical task continues.
             # Emit a terminal record only after all committed pages are drained.
-            if item.get("event") != "workbench_end":
+            if item.get("event") not in REDUNDANT_EVENTS | {"workbench_end"}:
                 yield item
         if len(items) == 100:
             continue

@@ -1,0 +1,159 @@
+"""Real ownership queries, stable link issuance, and Flask file delivery."""
+
+import base64
+from urllib.parse import urlsplit
+from uuid import uuid4
+
+import pytest
+from flask import Flask
+from flask_restx import Api
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from werkzeug.exceptions import BadRequest, Forbidden, NotFound
+
+from controllers.files.workbench_files import WorkbenchFileContent
+from core.db import session_factory as factory_module
+from models.agent import AgentWorkspace, AgentWorkspaceOwnerType
+from models.base import TypeBase
+from models.workbench import WorkbenchChat, WorkbenchRun
+from services.workbench import file_links, files
+
+
+@pytest.fixture
+def file_space(monkeypatch, config_overrides):
+    config_overrides(SECRET_KEY="file-link-test-key", FILES_URL="https://files.example.test", WORKBENCH_ENABLED=True)
+    engine = create_engine("sqlite://")
+    TypeBase.metadata.create_all(
+        engine, tables=[model.__table__ for model in (WorkbenchChat, WorkbenchRun, AgentWorkspace)]
+    )
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    monkeypatch.setattr(factory_module, "_session_maker", factory)
+    tenant, account, app_id, chat_id, run_id, workspace_id = (str(uuid4()) for _ in range(6))
+    root = "conversations/" + chat_id
+    payload = file_links.AgentFileLinksPayload(
+        tenant_id=tenant, account_id=account, app_id=app_id, workbench_run_id=run_id
+    )
+    with factory.begin() as session:
+        session.add(
+            WorkbenchChat(
+                id=chat_id,
+                tenant_id=tenant,
+                account_id=account,
+                agent_id=str(uuid4()),
+                app_id=app_id,
+                base_snapshot_id=str(uuid4()),
+                title="图表会话",
+            )
+        )
+        session.add(
+            WorkbenchRun(
+                id=run_id,
+                tenant_id=tenant,
+                account_id=account,
+                chat_id=chat_id,
+                revision_id=str(uuid4()),
+                request_key="test",
+                payload="{}",
+                status="running",
+            )
+        )
+        session.add(
+            AgentWorkspace(
+                id=workspace_id,
+                tenant_id=tenant,
+                app_id=app_id,
+                owner_type=AgentWorkspaceOwnerType.WORKBENCH_USER,
+                owner_id=account,
+                owner_scope_key="root",
+                backend_workspace_ref=workspace_id,
+            )
+        )
+    # Only the sandbox data plane is replaced: authorization and HTTP serialization are real.
+    contents = {root + "/图表.png": b"\x89PNG\r\n\x1a\n", root + "/报告.html": b"<script>test()</script>"}
+
+    def manager(workspace, action, request):
+        assert workspace == workspace_id
+        assert action == "files"
+        if request["operation"] == "mkdir":
+            return {}
+        if request["operation"] == "list":
+            return {
+                "path": root,
+                "entries": [
+                    {
+                        "name": path.rsplit("/", 1)[1],
+                        "path": path,
+                        "kind": "file",
+                        "size": len(data),
+                        "modified": 1.0,
+                        "version": "1",
+                    }
+                    for path, data in contents.items()
+                ],
+            }
+        if request["path"] not in contents:
+            raise NotFound()
+        return {
+            "name": request["path"].rsplit("/", 1)[1],
+            "kind": "file",
+            "version": "1",
+            "data": base64.b64encode(contents[request["path"]]).decode(),
+        }
+
+    monkeypatch.setattr(files, "ensure_workspace", lambda *_: workspace_id)
+    monkeypatch.setattr(files, "manager", manager)
+    monkeypatch.setattr(file_links, "manager", manager)
+    app = Flask(__name__)
+    Api(app).add_resource(WorkbenchFileContent, "/files/workbench/<token>/<filename>")
+    yield payload, root, contents, factory, app.test_client()
+    engine.dispose()
+
+
+def test_ui_and_agent_receive_identical_stable_links_and_inline_bytes(file_space):
+    payload, root, contents, _, client = file_space
+    ui = files.operate(payload.tenant_id, payload.account_id, "list", root)["entries"]
+    agent = file_links.agent_lookup(payload)["entries"]
+    assert agent == ui
+    assert file_links.agent_lookup(payload)["entries"] == ui
+    for item in ui:
+        download = client.get(urlsplit(item["download_url"]).path + "?mode=download")
+        preview = client.get(urlsplit(item["preview_url"]).path + "?mode=preview")
+        assert download.status_code == preview.status_code == 200
+        assert download.data == preview.data == contents[item["path"]]
+        assert download.headers["Content-Disposition"].startswith("attachment")
+        assert preview.headers["Content-Disposition"].startswith("inline")
+        assert preview.headers["Content-Security-Policy"] == "sandbox allow-scripts allow-downloads"
+        assert preview.headers["X-Content-Type-Options"] == "nosniff"
+    assert client.get(urlsplit(ui[0]["preview_url"]).path + "?mode=preview").mimetype == "image/png"
+    specific = file_links.agent_lookup(payload.model_copy(update={"path": "/workspace/" + ui[0]["path"]}))
+    assert specific["entries"] == ui[:1]
+
+
+def test_signature_tamper_owner_mismatch_missing_file_and_deleted_chat_revoke(file_space):
+    payload, root, contents, factory, client = file_space
+    entry = file_links.agent_lookup(payload)["entries"][0]
+    url = urlsplit(entry["download_url"]).path
+    token = url.split("/")[3]
+    forged = token[:-1] + ("a" if token[-1] != "a" else "b")
+    assert client.get(url.replace(token, forged)).status_code == 404
+    with pytest.raises(Forbidden):
+        file_links.agent_lookup(payload.model_copy(update={"account_id": str(uuid4())}))
+    with pytest.raises(NotFound):
+        file_links.agent_lookup(payload.model_copy(update={"path": "missing.png"}))
+    with pytest.raises(BadRequest, match="只能查询"):
+        file_links.agent_lookup(payload.model_copy(update={"path": "conversations/another/file.png"}))
+    removed = contents.pop(entry["path"])
+    assert client.get(url).status_code == 404
+    contents[entry["path"]] = removed
+    with factory.begin() as session:
+        session.get(WorkbenchChat, root.split("/")[1]).deleted = 1
+    assert client.get(url).status_code == 404
+
+
+def test_configured_public_origin_is_used_without_changing_signed_identity(file_space, config_overrides):
+    payload, _, _, _, _ = file_space
+    original = file_links.agent_lookup(payload)["entries"][0]
+    config_overrides(FILES_URL="https://agent.xcmggx.com")
+    public = file_links.agent_lookup(payload)["entries"][0]
+    for mode in ("preview_url", "download_url"):
+        assert public[mode] == original[mode].replace("https://files.example.test", "https://agent.xcmggx.com")

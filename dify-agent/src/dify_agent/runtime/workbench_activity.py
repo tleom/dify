@@ -1,8 +1,10 @@
 """Connect workbench activity state to the installed Pydantic AI lifecycle."""
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.messages import (
     FunctionToolResultEvent,
     ModelResponse,
@@ -26,6 +28,7 @@ class WorkbenchActivityCapability(AbstractCapability[None]):
     layer: WorkbenchActivityLayer
     sink: RunEventSink
     run_id: str
+    invalid_calls: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
         self.layer._native_run_id = self.run_id
@@ -45,7 +48,24 @@ class WorkbenchActivityCapability(AbstractCapability[None]):
         return response
 
     async def before_tool_execute(self, ctx, *, call, tool_def, args):
+        self.invalid_calls.pop(call.tool_name, None)
         await self.layer.start_call(call, args)
+        return args
+
+    async def before_tool_validate(self, ctx, *, call, tool_def, args):
+        if call.tool_name not in {"shell_run", "file_create", "file_edit"}:
+            return args
+        # Some compatible providers wrap the actual arguments in an extra JSON string.
+        # Decode only complete JSON; never repair or execute a truncated script.
+        try:
+            value = json.loads(args) if isinstance(args, str) else args
+            if isinstance(value, dict) and set(value) == {"arguments"}:
+                nested = value["arguments"]
+                decoded = json.loads(nested) if isinstance(nested, str) else nested
+                if isinstance(decoded, dict):
+                    return decoded
+        except (TypeError, ValueError):
+            pass
         return args
 
     async def after_tool_validate(self, ctx, *, call, tool_def, args):
@@ -56,6 +76,18 @@ class WorkbenchActivityCapability(AbstractCapability[None]):
         return args
 
     async def on_tool_validate_error(self, ctx, *, call, tool_def, args, error):
+        if call.tool_name in {"shell_run", "file_create", "file_edit"}:
+            count = self.invalid_calls.get(call.tool_name, 0) + 1
+            self.invalid_calls[call.tool_name] = count
+            message = (
+                "工具参数无效，本次操作未执行。请直接提供工具要求的 JSON 字段，不要嵌套 arguments。"
+                "长脚本请分段使用 file_create / file_edit 保存，再通过 shell_run 执行简短命令。"
+            )
+            await self.layer.start_call(call, args)
+            if count >= 3:
+                await self.layer.finish_call(call.tool_call_id, call.tool_name, {"error": message}, failed=True)
+                raise ValueError("连续三次工具参数无效，操作未执行。请缩短或拆分脚本后重试。") from error
+            raise ToolFailed(message) from error
         if call.tool_name != TOOL_NAME:
             raise error
         # A malformed progress report is a no-op tool result, not an Agent retry
@@ -72,8 +104,10 @@ class WorkbenchActivityCapability(AbstractCapability[None]):
                 failed=isinstance(part, RetryPromptPart)
                 or (
                     isinstance(part, ToolReturnPart)
-                    and isinstance(part.metadata, dict)
-                    and part.metadata.get("is_error") is True
+                    and (
+                        part.outcome == "failed"
+                        or (isinstance(part.metadata, dict) and part.metadata.get("is_error") is True)
+                    )
                 ),
             )
         if text_delta:

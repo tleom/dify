@@ -14,6 +14,7 @@ from dify_agent.layers.dify_core_tools import DifyCoreToolConfig, DifyCoreToolsL
 from dify_agent.layers.dify_plugin import DifyPluginToolConfig, DifyPluginToolsLayerConfig
 from dify_agent.layers.execution_context import DifyExecutionContextLayerConfig
 from dify_agent.layers.user_prompt import DifyUserPromptLayerConfig
+from dify_agent.protocol import DeferredToolResultsPayload
 
 from clients.agent_backend import (
     DIFY_CONFIG_LAYER_ID,
@@ -90,11 +91,17 @@ def test_workbench_uses_only_frozen_skills_and_rebuilds_new_turn(monkeypatch: py
 
 def test_workbench_retrieves_same_question_again_on_new_turn():
     data = _soul_with_model_and_skill().model_dump(mode="json")
-    data["knowledge"] = {"sets": [{
-        "id": "dataset-1", "name": "知识库", "datasets": [{"id": "dataset-1"}],
-        "query": {"mode": "user_query", "value": "相同问题"},
-        "retrieval": {"mode": "multiple", "top_k": 3, "reranking_enable": False},
-    }]}
+    data["knowledge"] = {
+        "sets": [
+            {
+                "id": "dataset-1",
+                "name": "知识库",
+                "datasets": [{"id": "dataset-1"}],
+                "query": {"mode": "user_query", "value": "相同问题"},
+                "retrieval": {"mode": "multiple", "top_k": 3, "reranking_enable": False},
+            }
+        ]
+    }
     soul = AgentSoulConfig.model_validate(data)
     builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_NoToolsBuilder())
     ids = []
@@ -117,7 +124,9 @@ def test_activity_protocol_is_frozen_per_turn_and_rollback_preserves_its_reader(
     activity = next(layer for layer in request.composition.layers if layer.name == "workbench_activity")
     assert activity.config.workbench_run_id == "run-1"
     assert activity.config.enabled is enabled
-    # Old tasks never acquire an extra layer while restoring a native snapshot.
+    files = next(layer for layer in request.composition.layers if layer.name == "workbench_files")
+    assert files.deps == {"execution_context": "execution_context"}
+    # Legacy tasks retain their original activity protocol.
     old = builder.build(replace(context, workbench_activity_protocol=0)).request
     assert all(layer.name != "workbench_activity" for layer in old.composition.layers)
 
@@ -135,6 +144,40 @@ def test_workbench_rebuild_accepts_previous_composition(previous_prompt: str, cu
     assert result.request.rebuild_layers is True
     assert result.request.session_snapshot is snapshot
     assert [layer.name for layer in result.request.composition.layers] != [layer.name for layer in snapshot.layers]
+
+
+def test_deferred_workbench_adds_only_file_reader_without_rebuilding_existing_state():
+    builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_NoToolsBuilder())
+    context = replace(_ctx(_soul_with_model()), workbench_run_id="run-1", workbench_activity_protocol=1)
+    normal = builder.build(context).request
+    old = _snapshot_for_layer_names(
+        [layer.name for layer in normal.composition.layers if layer.name != "workbench_files"]
+    )
+    before = old.model_dump()
+    resumed = builder.build(
+        replace(
+            context, session_snapshot=old, deferred_tool_results=DeferredToolResultsPayload(calls={"human": "answer"})
+        )
+    ).request
+    assert not resumed.rebuild_layers
+    assert old.model_dump() == before
+    assert [layer.name for layer in resumed.session_snapshot.layers] == [
+        layer.name for layer in resumed.composition.layers
+    ]
+    restored = [layer for layer in resumed.session_snapshot.layers if layer.name != "workbench_files"]
+    assert restored == old.layers
+    reader = next(layer for layer in resumed.session_snapshot.layers if layer.name == "workbench_files")
+    assert reader.lifecycle_state == LifecycleState.NEW
+    assert reader.runtime_state == {}
+    changed = old.model_copy(update={"layers": old.layers[1:]})
+    with pytest.raises(AgentSessionSnapshotIncompatibleError):
+        builder.build(
+            replace(
+                context,
+                session_snapshot=changed,
+                deferred_tool_results=DeferredToolResultsPayload(calls={"human": "answer"}),
+            )
+        )
 
 
 class TestBuildForAgentApp:

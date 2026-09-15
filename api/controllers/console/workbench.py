@@ -19,6 +19,7 @@ from core.app.entities.app_invoke_entities import InvokeFrom
 from core.db.session_factory import session_factory
 from extensions.ext_redis import redis_client
 from fields.base import ResponseModel
+from fields.workbench_file_fields import WorkbenchFileLinksResponse, WorkbenchFileResponse
 from libs.helper import dump_response
 from libs.login import current_account_with_tenant
 from models.model import AppMode
@@ -153,6 +154,7 @@ class WorkbenchAttachmentResponse(ResponseModel):
 
 
 class WorkbenchRunResponse(ResponseModel):
+    events_cursor: str | None = None
     activity_protocol: int = 0
     id: str
     chat_id: str
@@ -234,15 +236,6 @@ class WorkbenchChatListResponse(ResponseModel):
     data: list[WorkbenchChatSummaryResponse]
 
 
-class WorkbenchFileResponse(ResponseModel):
-    name: str
-    path: str
-    kind: Literal["file", "directory", "blocked"]
-    size: int
-    modified: float
-    version: str | None
-
-
 class WorkbenchDirectoryResponse(ResponseModel):
     path: str
     entries: list[WorkbenchFileResponse]
@@ -311,6 +304,7 @@ register_response_schema_models(
     WorkbenchChatEnvelopeResponse,
     WorkbenchChatListResponse,
     WorkbenchFilesResponse,
+    WorkbenchFileLinksResponse,
     WorkbenchUploadEnvelopeResponse,
     WorkbenchDeletedEnvelopeResponse,
     WorkbenchStopEnvelopeResponse,
@@ -494,6 +488,17 @@ class Files(WorkbenchResource):
             WorkbenchDeletedEnvelopeResponse,
             {"data": operate(*self.owner(), "delete", payload.path, version=payload.version)},
         )
+
+
+@console_ns.route("/workbench/files/links")
+class FileLinks(WorkbenchResource):
+    @console_ns.doc(params=query_params_from_model(WorkbenchFileQuery))
+    @console_ns.response(200, "Verified file-space links", console_ns.models[WorkbenchFileLinksResponse.__name__])
+    def get(self):
+        from services.workbench.file_links import lookup
+
+        query = WorkbenchFileQuery.model_validate(request.args.to_dict())
+        return dump_response(WorkbenchFileLinksResponse, {"data": lookup(*self.owner(), query.path)})
 
 
 @console_ns.route("/workbench/files/download")

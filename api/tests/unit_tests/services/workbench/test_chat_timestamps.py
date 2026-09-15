@@ -115,6 +115,23 @@ def test_timestamp_contract_documents_required_epoch_seconds() -> None:
         assert "Unix seconds" in schema["properties"][field]["description"]
 
 
+def test_configuration_change_preserves_conversation_date(history, monkeypatch: pytest.MonkeyPatch) -> None:
+    from services.workbench.policy import Selection
+
+    factory, tenant, account, chat_id = history
+    with factory() as session:
+        chat = session.get(WorkbenchChat, chat_id)
+        assert chat is not None
+        template = {"agent_id": chat.agent_id, "snapshot_id": chat.base_snapshot_id}
+    monkeypatch.setattr(service, "template", lambda *_: template)
+    monkeypatch.setattr(service, "compile_config", lambda *_: {})
+    detail = service.read_chat(tenant, account, chat_id)
+    selection = Selection.model_validate({**detail["selection"], "model_parameters": {"temperature": 0.5}})
+    result = service.update_config(tenant, account, chat_id, 1, selection)
+    assert result["version"] == 2
+    assert result["updated_at"] == detail["updated_at"]
+
+
 @pytest.mark.parametrize(
     "status",
     [

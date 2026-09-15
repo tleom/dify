@@ -328,7 +328,8 @@ def test_workbench_prefix_excludes_local_installation_and_path_assumptions() -> 
     assert shell_layer_module._LOCAL_SANDBOX_ENVIRONMENT_PROMPT in native
     layer.deps.execution_context.config.workbench_run_id = "run-1"
     workbench = layer._build_prefix_prompt()
-    assert workbench == shell_layer_module._SHELL_LAYER_PREFIX_PROMPT
+    assert workbench.startswith(shell_layer_module._SHELL_LAYER_PREFIX_PROMPT)
+    assert "file_create" in workbench and "file_edit" in workbench
     assert shell_layer_module._LOCAL_SANDBOX_ENVIRONMENT_PROMPT not in workbench
 
 

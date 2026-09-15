@@ -240,9 +240,10 @@ def run_dto(run):
 
     payload = json.loads(run.payload)
     ids = message_ids(run)
-    from services.workbench.event_log import history_events, uses_journal
+    from services.workbench.event_log import history_snapshot, uses_journal
 
     journal = uses_journal(run, payload)
+    history, cursor = history_snapshot(run) if journal else (None, None)
     return {
         "id": run.id,
         "chat_id": run.chat_id,
@@ -251,9 +252,8 @@ def run_dto(run):
         "pending": payload.get("pending"),
         "status": run.status,
         "error": run.error,
-        "events": history_events(run)
-        if journal
-        else [*run_knowledge_events(run, payload), *merge_context_events(run, payload)],
+        "events_cursor": cursor,
+        "events": history if journal else [*run_knowledge_events(run, payload), *merge_context_events(run, payload)],
         "activity_protocol": 1 if journal else 0,
         "context_usage": payload.get("context_usage"),
         "query": payload.get("query", ""),
@@ -410,6 +410,8 @@ def update_config(tenant_id, account_id, chat_id, version, selection):
         if chat.agent_id != base["agent_id"]:
             raise Conflict("管理员已切换通用 Agent，请新建会话")
         chat.version += 1
+        # Configuration selection is not new conversation activity.
+        flag_modified(chat, "updated_at")
         session.add(
             WorkbenchRevision(
                 id=str(uuid4()),
@@ -560,24 +562,41 @@ def resolve_run_generation(run_id, tenant_id, account_id):
 def delete_chat(tenant_id, account_id, chat_id):
     authorize(tenant_id, account_id)
     binding_id = None
+    cancelled = []
     with session_factory.get_session_maker().begin() as session:
         chat = _chat(session, tenant_id, account_id, chat_id, lock=True)
-        active = session.scalar(
-            select(WorkbenchRun.id).where(
-                WorkbenchRun.chat_id == chat.id,
-                WorkbenchRun.status.in_(
-                    ["queued", "running", "waiting_input", "environment_update", "environment_installing"]
-                ),
+        runs = list(
+            session.scalars(
+                select(WorkbenchRun)
+                .where(
+                    WorkbenchRun.chat_id == chat.id,
+                    WorkbenchRun.tenant_id == tenant_id,
+                    WorkbenchRun.account_id == account_id,
+                )
+                .with_for_update()
             )
         )
-        if active:
+        if any(run.status in (*EXECUTING_STATUSES, "environment_update") for run in runs):
             raise Conflict("请先停止此会话的任务")
         from extensions.ext_redis import redis_client
         from services.workbench.scheduler import PREFIX
 
-        run_ids = session.scalars(select(WorkbenchRun.id).where(WorkbenchRun.chat_id == chat.id))
-        if any(redis_client.zscore(PREFIX + "active", run_id) is not None for run_id in run_ids):
+        if any(
+            run.status != "waiting_input" and redis_client.zscore(PREFIX + "active", run.id) is not None for run in runs
+        ):
             raise Conflict("任务仍在确认停止，请稍后再删除会话")
+        from services.workbench.event_log import append_locked, uses_journal
+
+        for run in runs:
+            if run.status != "waiting_input":
+                continue
+            payload = json.loads(run.payload)
+            payload.pop("pending", None)
+            payload.pop("continuation", None)
+            run.payload, run.status, run.error = json.dumps(payload), "cancelled", None
+            if uses_journal(run):
+                append_locked(session, run, {"event": "workbench_end", "status": "cancelled", "error": None})
+            cancelled.append(run.id)
         from models.model import Conversation
         from services.agent.workspace_service import AgentWorkspaceService
 
@@ -590,6 +609,12 @@ def delete_chat(tenant_id, account_id, chat_id):
                 )
                 conversation.agent_workspace_binding_id = None
         chat.deleted = 1
+    if cancelled:
+        from tasks.workbench_tasks import force_stop
+
+        for run_id in cancelled:
+            redis_client.setex(PREFIX + "stop:" + run_id, 86400, "1")
+            force_stop.delay(run_id, account_id)
     if binding_id:
         from tasks.collect_agent_resources_task import collect_agent_resources
 
@@ -606,6 +631,15 @@ def resume(tenant_id, account_id, run_id, values, action):
     if sum(len(key) + len(value) for key, value in values.items()) > 100000:
         raise ValueError("输入内容过长")
     with session_factory.get_session_maker().begin() as session:
+        # Serialize deletion and resume in the same chat -> run lock order.
+        chat_id = session.scalar(
+            select(WorkbenchRun.chat_id).where(
+                WorkbenchRun.id == run_id, WorkbenchRun.tenant_id == tenant_id, WorkbenchRun.account_id == account_id
+            )
+        )
+        if chat_id is None:
+            raise NotFound()
+        _chat(session, tenant_id, account_id, chat_id, lock=True)
         run = session.scalar(
             select(WorkbenchRun)
             .where(
