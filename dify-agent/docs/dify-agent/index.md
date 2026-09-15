@@ -99,7 +99,9 @@ Workbench runs with a conversation shell also apply the SDK's `ToolOutputLimits`
 Oversized tool results are stored under that conversation's
 `.cache/workbench-tool-results`, and the model receives a handle and bounded
 preview. `read_tool_result` reads selected lines, literal matches, or character
-slices of a long line without replaying the original operation. Stored output
+slices of a long line without replaying the original operation. Commit verification
+hashes fixed-size chunks; line counts, literal filtering and character slices also
+stream chunks, including within a single oversized line. Stored output
 survives a new native run while the conversation sandbox remains available and
 does not appear as a generated deliverable. Failed storage returns an explicitly
 truncated result without inventing a handle. Reduction preserves business-error

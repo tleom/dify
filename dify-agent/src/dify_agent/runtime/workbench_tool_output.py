@@ -121,9 +121,59 @@ class WorkbenchToolOutputLimits(ToolOutputLimits):
         return reduced
 
 
-_PROGRAM = """
+_PROGRAM = r"""
 import base64, hashlib, json, os, re, sys
 from pathlib import Path
+
+def line_parts(target):
+    # TextIO handles UTF-8 boundaries and universal CR/LF newlines. Preserve the
+    # remaining str.splitlines separators without buffering an entire long line.
+    unfinished = False
+    with target.open('r', encoding='utf-8', errors='replace') as stream:
+        while chunk := stream.read(64 * 1024):
+            start = 0
+            for boundary in re.finditer(r'[\n\v\f\x1c-\x1e\x85\u2028\u2029]', chunk):
+                yield chunk[start:boundary.start()], True
+                start = boundary.end()
+                unfinished = False
+            if start < len(chunk):
+                yield chunk[start:], False
+                unfinished = True
+        if unfinished:
+            yield '', True
+
+def scan(target, args, start=None, end=None):
+    count, line_length, total, selected = 0, 0, 0, 0
+    pattern = args['pattern']
+    found, tail = not pattern, ''
+    output, candidate = [], []
+    first, last = args['char_offset'], args['char_offset'] + args['max_chars']
+    for part, finished in line_parts(target):
+        if not found:
+            search = tail + part
+            found = pattern in search
+            tail = search[-(len(pattern) - 1):] if len(pattern) > 1 else ''
+        wanted = start is not None and start <= count < end
+        if wanted:
+            position = total + bool(selected) + line_length
+            left, right = max(0, first - position), min(len(part), last - position)
+            if left < right:
+                candidate.append(part[left:right])
+        line_length += len(part)
+        if finished:
+            if found:
+                if wanted:
+                    if selected and first <= total < last:
+                        output.append('\n')
+                    output.extend(candidate)
+                    total += bool(selected) + line_length
+                    selected += 1
+                count += 1
+            if end is not None and count >= end:
+                break
+            found, tail, line_length, candidate = not pattern, '', 0, []
+    return count, ''.join(output), total
+
 try:
     args = json.loads(base64.b64decode(sys.argv[1]))
     handle = args['handle']
@@ -146,8 +196,12 @@ try:
             stream.seek(offset)
             stream.write(base64.b64decode(args['data']))
     elif operation == 'commit':
-        data = temporary.read_bytes()
-        if len(data) != args['size'] or hashlib.sha256(data).hexdigest() != args['digest']:
+        digest, size = hashlib.sha256(), 0
+        with temporary.open('rb') as stream:
+            while chunk := stream.read(1024 * 1024):
+                size += len(chunk)
+                digest.update(chunk)
+        if size != args['size'] or digest.hexdigest() != args['digest']:
             raise ValueError('Incomplete stored output')
         os.replace(temporary, target)
     elif operation == 'read':
@@ -155,19 +209,17 @@ try:
             stream.seek(args['offset'])
             result = {'data': base64.b64encode(stream.read(32 * 1024)).decode(), 'size': target.stat().st_size}
     elif operation == 'slice':
-        lines = target.read_text(encoding='utf-8', errors='replace').splitlines()
-        if args['pattern'] is not None:
-            lines = [line for line in lines if args['pattern'] in line]
+        matching, _, _ = scan(target, args)
         offset, limit = args['offset'], args['limit']
-        end = max(0, len(lines) - offset) if args['from_end'] else min(len(lines), offset + limit)
+        end = max(0, matching - offset) if args['from_end'] else min(matching, offset + limit)
         start = max(0, end - limit) if args['from_end'] else offset
-        text = '\\n'.join(lines[start:end])
+        _, text, length = scan(target, args, start, end) if start < end else (0, '', 0)
         first = args['char_offset']
-        last = min(len(text), first + args['max_chars'])
+        last = min(length, first + args['max_chars'])
         result = {'text': json.dumps({
-            'handle': handle, 'matching_lines': len(lines), 'line_offset': start,
-            'next_char_offset': last if last < len(text) else None,
-            'text': text[first:last],
+            'handle': handle, 'matching_lines': matching, 'line_offset': start,
+            'next_char_offset': last if last < length else None,
+            'text': text,
         }, ensure_ascii=False)}
     else:
         raise ValueError('Invalid stored output operation')
