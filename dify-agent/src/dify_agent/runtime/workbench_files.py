@@ -32,7 +32,7 @@ ignored_prefixes = (
     'playwright-artifacts-', 'puppeteer_dev_chrome_profile-',
     'puppeteer_dev_firefox_profile-',
 )
-ignored_suffixes = ('.log', '.tmp', '.temp', '.pyc', '.pyo', '.swp', '.swo', '.lock', '~')
+ignored_suffixes = ('.log', '.tmp', '.temp', '.pyc', '.pyo', '.swp', '.swo', '~')
 def visible(name, directory=False):
     name = name.lower()
     return not (

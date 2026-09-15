@@ -47,6 +47,11 @@ def test_inventory_keeps_documents_and_scripts_without_browser_office_or_cache_n
         ".gitignore",
         ".npmrc",
         ".github/workflows/report.yml",
+        "uv.lock",
+        "poetry.lock",
+        "yarn.lock",
+        "Gemfile.lock",
+        "Cargo.lock",
     ]
     noise = [
         *(f"playwright_chromiumdev_profile-A6TuKz/Default/Cache/item-{index}" for index in range(108)),

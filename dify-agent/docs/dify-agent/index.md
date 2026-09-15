@@ -123,10 +123,11 @@ ordered `file_create` / `file_edit` tool records with `output.source=workspace_c
 including binary files produced by shell scripts or other tools. Explicit file tools
 retain their original row without a duplicate observation. Inventories do not follow
 symlinks or include internal configuration, dependency/cache directories, browser profiles,
-Office work profiles, logs, lock files, or edit temporary files. These incidental
+Office work profiles, logs, or edit temporary files. These incidental
 files neither emit inventory rows nor count as pending file deliverables. Documents,
 images, data files, generation scripts and user configuration files (including
-`.env`, `.gitignore`, `.npmrc`, and `.github/workflows`) remain observable. Explicit file-tool calls
+`.env`, `.gitignore`, `.npmrc`, `.github/workflows`, and dependency lockfiles) remain
+observable. Explicit file-tool calls
 retain their original records, including failures. The workbench frontend applies
 the same exclusions to historical inventory rows without modifying stored events.
 Inventories are limited to
