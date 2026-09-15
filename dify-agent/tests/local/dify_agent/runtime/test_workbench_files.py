@@ -254,6 +254,8 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(
     monkeypatch, tmp_path, activity_enabled, suspend
 ):
     calls = 0
+    old_url = "https://files.example.test/files/workbench/signed/old.txt?mode=download"
+    (tmp_path / "old.txt").write_text("already existed", encoding="utf-8")
 
     async def stream(messages, info):
         nonlocal calls
@@ -263,9 +265,9 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(
         elif calls == 3 and suspend:
             yield {0: _call("update_shared_environment", {"reason": "需要依赖", "python": ["pillow"]}, "env")}
         elif calls == 3 + int(suspend):
-            yield "处理完成。"
-        elif calls == 4 + int(suspend):
             yield {0: _call("workbench_files", {}, "files")}
+        elif calls == 4 + int(suspend):
+            yield f"[下载旧文件]({old_url})"
         else:
             yield f"文件已生成，可打开查看。[下载图片]({DOWNLOAD})\n![图片]({PREVIEW})"
 
@@ -326,7 +328,10 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(
         return httpx.Response(
             200,
             json={
-                "entries": [{"path": "chart.png", "preview_url": PREVIEW, "download_url": DOWNLOAD}],
+                "entries": [
+                    {"path": "conversations/chat/chart.png", "preview_url": PREVIEW, "download_url": DOWNLOAD},
+                    {"path": "conversations/chat/old.txt", "preview_url": old_url, "download_url": old_url},
+                ],
                 "complete": True,
             },
         )
@@ -358,7 +363,7 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(
         for event in events
         if event.type == "pydantic_ai_event"
     )
-    assert "处理完成。" not in public_stream and DOWNLOAD in public_stream
+    assert "下载旧文件" not in public_stream and DOWNLOAD in public_stream
     observed = [
         item
         for item in _progress(events, "tool")
@@ -434,3 +439,77 @@ def test_unavailable_download_can_be_reported_without_a_fabricated_link(monkeypa
     assert calls == 2
     assert isinstance(sink.events["unavailable"][-1], RunSucceededEvent)
     assert "文件下载受阻" in "".join(item.text for item in _progress(sink.events["unavailable"], "text"))
+
+
+@pytest.mark.parametrize("failure", ["http", "unavailable"])
+def test_file_changes_require_a_new_lookup_after_a_previous_failure(failure):
+    context = DifyExecutionContextLayer(
+        config=DifyExecutionContextLayerConfig(
+            tenant_id="tenant",
+            agent_mode="agent_app",
+            invoke_from="web-app",
+            workbench_run_id="run",
+            user_from="account",
+            user_id="owner",
+            app_id="app",
+        ),
+        daemon_url="",
+        daemon_api_key="",
+    )
+    layer = WorkbenchFilesLayer(config=LayerConfig(), inner_api_url="https://api.example.test", inner_api_key="")
+    layer.bind_deps({"execution_context": context})
+    calls = 0
+
+    def transport(request):
+        nonlocal calls
+        calls += 1
+        if calls in {1, 3}:
+            return (
+                httpx.Response(503)
+                if failure == "http"
+                else httpx.Response(
+                    200, json={"entries": [{"path": "conversations/chat/chart.png", "downloadable": False}]}
+                )
+            )
+        return httpx.Response(
+            200,
+            json={
+                "entries": [
+                    {
+                        "path": "conversations/chat/chart.png",
+                        "preview_url": PREVIEW,
+                        "download_url": DOWNLOAD,
+                    }
+                ]
+            },
+        )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            tool = (await layer.get_tools(http_client=client))[0]
+            await tool.function(None, path="chart.png")
+            layer.record_changes(["chart.png"])
+            assert layer.delivery_error("文件下载受阻。", final=True) is not None
+            await tool.function(None, path="chart.png")
+            assert layer.delivery_error(f"[下载]({DOWNLOAD})", final=True) is None
+            await tool.function(None, path="chart.png")
+            assert layer.delivery_error(f"[下载]({DOWNLOAD})", final=True) is not None
+
+    asyncio.run(scenario())
+    assert calls == 3
+
+
+@pytest.mark.parametrize(
+    "path,kind,valid",
+    [
+        ("old/chart.png", "file", False),
+        ("new/chart.png", "file", True),
+        ("new", "directory", True),
+        ("ne", "directory", False),
+    ],
+)
+def test_delivered_url_matches_generated_path_or_containing_directory(path, kind, valid):
+    layer = WorkbenchFilesLayer(config=LayerConfig(), inner_api_url="", inner_api_key="")
+    layer.record_changes(["new/chart.png"])
+    layer._verified[path] = {"preview_url": PREVIEW, "download_url": DOWNLOAD, "kind": kind}
+    assert (layer.delivery_error(f"[下载]({DOWNLOAD})", final=True) is None) is valid

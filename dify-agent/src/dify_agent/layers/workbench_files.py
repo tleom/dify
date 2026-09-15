@@ -46,6 +46,13 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
         self.runtime_state.changed_paths.difference_update(removed or [])
         # Fixed URLs survive edits, but delivery must confirm the current file exists.
         self._verified.clear()
+        self._lookup_failed = False
+
+    def covers_changed_path(self, path: str, *, directory: bool) -> bool:
+        return any(
+            changed == path or (directory and (not path or changed.startswith(path.rstrip("/") + "/")))
+            for changed in self.runtime_state.changed_paths
+        )
 
     def delivery_error(self, text: str, *, final: bool) -> str | None:
         """Validate rendered Markdown targets, including reference links and split model deltas."""
@@ -89,7 +96,14 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
                 text,
             )
         )
-        if (delivered or (final and self.runtime_state.changed_paths)) and not supplied and not blocked:
+        supplied_changed = any(
+            item["download_url"] in supplied
+            and self.covers_changed_path(path, directory=item.get("kind") == "directory")
+            for path, item in self._verified.items()
+        )
+        if final and self.runtime_state.changed_paths and not supplied_changed and not blocked:
+            return "请查询并提供本次生成或修改文件对应的实际 download_url，不能用其他已有文件的链接代替。"
+        if delivered and not supplied and not blocked:
             return "交付前先查询文件空间确认产物可见，并提供实际 download_url；如查询失败，请明确说明交付受阻。"
         return None
 
@@ -124,6 +138,10 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
             """Verify files in this chat's file space and get their actual fixed preview/download URLs."""
             if not path or len(path) > 1024:
                 return '{"error":"文件路径无效"}'
+            requested = _relative_path(path)
+            for verified_path in list(self._verified):
+                if not requested or verified_path == requested or verified_path.startswith(requested + "/"):
+                    self._verified.pop(verified_path)
             try:
                 response = await http_client.post(
                     self.inner_api_url.rstrip("/") + "/inner/api/agent/workbench/files",
@@ -135,24 +153,44 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
                 # Parse once to reject a proxy's HTML response; preserve server URLs exactly.
                 data = response.json()
                 self._lookup_failed = bool(data.get("error")) or any(
-                    isinstance(entry, dict) and entry.get("downloadable") is False for entry in data.get("entries", [])
+                    isinstance(entry, dict)
+                    and entry.get("downloadable") is False
+                    and (
+                        not self.runtime_state.changed_paths
+                        or self.covers_changed_path(
+                            _relative_path(str(entry.get("path") or entry.get("name"))),
+                            directory=entry.get("kind") == "directory",
+                        )
+                    )
+                    for entry in data.get("entries", [])
                 )
                 for entry in data.get("entries", []):
                     if (
                         isinstance(entry, dict)
+                        and entry.get("downloadable") is not False
                         and isinstance(entry.get("download_url"), str)
                         and isinstance(entry.get("preview_url"), str)
                     ):
-                        self._verified[str(entry.get("path") or entry.get("name"))] = {
+                        self._verified[_relative_path(str(entry.get("path") or entry.get("name")))] = {
                             "download_url": entry["download_url"],
                             "preview_url": entry["preview_url"],
+                            "kind": str(entry.get("kind") or "file"),
                         }
                 return response.text
             except (httpx.HTTPError, ValueError):
-                self._lookup_failed = True
+                self._lookup_failed = not self.runtime_state.changed_paths or self.covers_changed_path(
+                    _relative_path(path), directory=True
+                )
                 return '{"error":"文件空间查询失败，尚未确认文件可见和下载链接，请重试或说明阻塞"}'
 
         return [Tool(workbench_files)]
+
+
+def _relative_path(path: str) -> str:
+    path = path.removeprefix("/workspace/")
+    if path.startswith("conversations/"):
+        return "/".join(path.split("/")[2:])
+    return "" if path == "." else path.rstrip("/")
 
 
 def _file_target(url: str) -> bool:

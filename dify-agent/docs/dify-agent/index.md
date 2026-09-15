@@ -113,6 +113,8 @@ Workbench compositions include `dify.workbench_files`, which binds the trusted e
 
 Pending generated paths persist in the session snapshot across deferred continuations of the same workbench run. URL verification resets on resume, and a new logical run clears the pending paths. Entries with `downloadable=false` remain visible but receive no URLs; the model must split unsupported artifacts or explain that delivery is blocked. File downloads are limited to 20 MiB, and directory archives to 50 MiB of supported file contents.
 
+Final delivery requires a download URL for at least one changed path or a directory archive containing it. Each query refreshes verification for its requested path; file changes invalidate previous query results and failures. Unrelated files do not establish delivery or explain a failure to deliver the current artifacts.
+
 Workbench shell sessions also expose `file_create(path, content)` and `file_edit(path, old_text, new_text)` for bounded UTF-8 file operations inside the current workspace. Creation refuses overwrite; editing requires exactly one match and preserves unchanged content. Shell argument envelopes are only unwrapped when complete JSON parses, independently of activity reporting; repeated malformed calls produce bounded, explicit observations.
 
 The runtime inventories regular files inside the conversation directory before execution,
