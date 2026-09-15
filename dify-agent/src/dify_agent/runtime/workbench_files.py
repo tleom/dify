@@ -22,7 +22,10 @@ root = Path.cwd().resolve()
 files = {}
 # TMPDIR points at the conversation directory. Browser and Office profiles are
 # runtime housekeeping, not generated deliverables or report-building scripts.
-ignored_names = {'__pycache__', 'node_modules', 'venv'}
+ignored_names = {
+    '.cache', '.dify_conf', '.git', '.mypy_cache', '.pytest_cache', '.ruff_cache',
+    '.venv', '__pycache__', 'node_modules', 'venv',
+}
 ignored_prefixes = (
     'workbench-office-', 'playwright_chromiumdev_profile-',
     'playwright_firefoxdev_profile-', 'playwright_webkitdev_profile-',
@@ -33,7 +36,7 @@ ignored_suffixes = ('.log', '.tmp', '.temp', '.pyc', '.pyo', '.swp', '.swo', '.l
 def visible(name, directory=False):
     name = name.lower()
     return not (
-        name in ignored_names or name.startswith(('.', 'com.google.chrome.chrome_chrome_url_fetcher_'))
+        name in ignored_names or name.startswith(('.workbench-edit-', 'com.google.chrome.chrome_chrome_url_fetcher_'))
         or (directory and name.startswith(ignored_prefixes)) or name.endswith(ignored_suffixes)
     )
 for directory, names, filenames in os.walk(root, followlinks=False):

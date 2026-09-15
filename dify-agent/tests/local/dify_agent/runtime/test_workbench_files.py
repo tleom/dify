@@ -43,6 +43,10 @@ def test_inventory_keeps_documents_and_scripts_without_browser_office_or_cache_n
         "scripts/generate_report.py",
         "data/source.json",
         "workbench-office-summary.pdf",
+        ".env",
+        ".gitignore",
+        ".npmrc",
+        ".github/workflows/report.yml",
     ]
     noise = [
         *(f"playwright_chromiumdev_profile-A6TuKz/Default/Cache/item-{index}" for index in range(108)),
@@ -51,6 +55,9 @@ def test_inventory_keeps_documents_and_scripts_without_browser_office_or_cache_n
         "puppeteer_dev_chrome_profile-test/Default/History",
         "node_modules/package/index.js",
         ".cache/fontlist-v390.json",
+        ".dify_conf/internal.yml",
+        ".git/objects/internal",
+        ".workbench-edit-temporary",
         "__pycache__/generate_report.cpython-312.pyc",
         "render.log",
         "intermediate.tmp",
