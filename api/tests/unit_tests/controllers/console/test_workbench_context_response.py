@@ -2,7 +2,7 @@ from controllers.console.workbench import WorkbenchChatEnvelopeResponse, Workben
 from libs.helper import dump_response
 
 
-def test_steering_requires_a_captured_target_and_followup_queries_are_bounded():
+def test_steering_requires_a_captured_target_and_followup_queries_are_bounded() -> None:
     from uuid import uuid4
 
     import pytest
