@@ -107,7 +107,8 @@ class WorkbenchExecutionBindingBackend:
         lease.layout = RuntimeLayout(
             home_dir=lease.layout.home_dir, workspace_dir="/workspace/conversations/" + binding
         )
-        # Restrict every shell process to the current conversation, including absolute paths.
+        # The container is user-owned; cwd remains conversation-local. Global
+        # packages live outside /workspace under a root-owned read-only prefix.
         control = backend._control_lease(raw_ref)
         temporary = lease.layout.home_dir + "/tmp"
         try:
@@ -124,11 +125,11 @@ class WorkbenchExecutionBindingBackend:
             workspace_dir=lease.layout.workspace_dir,
             default_cwd=lease.layout.workspace_dir,
             default_env={
-                "SHELLCTL_LANDLOCK_RW_PATHS": lease.layout.workspace_dir + "," + temporary,
+                "SHELLCTL_LANDLOCK_RW_PATHS": "/workspace," + temporary,
                 "TMPDIR": temporary,
                 "TMP": temporary,
                 "TEMP": temporary,
-                "SHELLCTL_LANDLOCK_RO_PATHS": "/usr,/bin,/sbin,/lib,/lib64,/etc,/proc,/opt/dify-agent-tools,/opt/homebrew,/snap,/opt/user-env,/opt/office,/opt/google/chrome",
+                "SHELLCTL_LANDLOCK_RO_PATHS": "/usr,/bin,/sbin,/lib,/lib64,/etc,/proc,/opt/dify-agent-tools,/opt/homebrew,/snap,/opt/user-env,/opt/office,/opt/google/chrome,/opt/workbench-global",
             },
         )
 

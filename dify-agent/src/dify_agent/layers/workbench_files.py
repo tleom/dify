@@ -21,6 +21,7 @@ class WorkbenchFilesDeps(LayerDeps):
 class WorkbenchFilesState(BaseModel):
     workbench_run_id: str | None = None
     changed_paths: set[str] = Field(default_factory=set)
+    path_protocol: int = 0
 
 
 @dataclass
@@ -31,15 +32,29 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
     inner_api_key: str
     _verified: dict[str, dict[str, str]] = field(default_factory=dict, init=False, repr=False)
     _lookup_failed: bool = field(default=False, init=False, repr=False)
+    _directory: str = field(default="", init=False, repr=False)
 
     async def on_context_create(self) -> None:
-        self.runtime_state = WorkbenchFilesState(workbench_run_id=self.deps.execution_context.config.workbench_run_id)
+        self.runtime_state = WorkbenchFilesState(
+            workbench_run_id=self.deps.execution_context.config.workbench_run_id, path_protocol=1
+        )
 
     async def on_context_resume(self) -> None:
         if self.runtime_state.workbench_run_id != self.deps.execution_context.config.workbench_run_id:
             await self.on_context_create()
         self._verified.clear()
         self._lookup_failed = False
+
+    def bind_directory(self, prefix: str) -> None:
+        self._directory = prefix.rstrip("/") + "/"
+        if self.runtime_state.path_protocol == 0:
+            self.runtime_state.changed_paths = {prefix + path for path in self.runtime_state.changed_paths}
+            self.runtime_state.path_protocol = 1
+
+    def canonical_path(self, path: str) -> str:
+        if path.startswith(("/workspace", "conversations/")):
+            return _relative_path(path)
+        return (self._directory + _relative_path(path)).rstrip("/")
 
     def record_changes(self, paths: list[str], removed: list[str] | None = None) -> None:
         self.runtime_state.changed_paths.update(paths)
@@ -114,12 +129,12 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
     @property
     def prefix_prompts(self) -> list[str]:
         return [
-            "所有生成文件保存到当前会话目录。交付文件前调用 workbench_files 查询实际文件，"
+            "默认将生成文件保存到当前会话目录；用户明确指定时可访问个人 /workspace 下的其他目录。交付文件前调用 workbench_files 查询实际文件，"
             "确认文件已在文件空间可见，告知用户可打开查看，并逐字使用工具返回的 download_url 提供下载链接。"
             "在对话中展示图片时使用 ![图片说明](preview_url)，其中 preview_url 必须逐字取自该文件查询结果。"
             "不要猜测或拼接地址，不要用本地路径、sandbox: 地址、临时上传链接替代文件空间链接。"
             "查询失败时如实说明，不能声称文件已可下载。path 默认 . 列出当前会话文件，"
-            "也可传入文件或子目录路径。complete=false 时按具体路径查询未显示的文件。"
+            "也可传入文件或子目录路径，跨对话或个人资源请传入 /workspace/... 绝对路径。complete=false 时按具体路径查询未显示的文件。"
             "downloadable=false 表示该文件或目录无法下载，应拆分过大文件或说明交付受阻。"
         ]
 
@@ -138,7 +153,7 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
             """Verify files in this chat's file space and get their actual fixed preview/download URLs."""
             if not path or len(path) > 1024:
                 return '{"error":"文件路径无效"}'
-            requested = _relative_path(path)
+            requested = self.canonical_path(path)
             for verified_path in list(self._verified):
                 if not requested or verified_path == requested or verified_path.startswith(requested + "/"):
                     self._verified.pop(verified_path)
@@ -152,6 +167,8 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
                 response.raise_for_status()
                 # Parse once to reject a proxy's HTML response; preserve server URLs exactly.
                 data = response.json()
+                if isinstance(data.get("cwd"), str):
+                    self.bind_directory(data["cwd"])
                 self._lookup_failed = bool(data.get("error")) or any(
                     isinstance(entry, dict)
                     and entry.get("downloadable") is False
@@ -179,7 +196,7 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
                 return response.text
             except (httpx.HTTPError, ValueError):
                 self._lookup_failed = not self.runtime_state.changed_paths or self.covers_changed_path(
-                    _relative_path(path), directory=True
+                    self.canonical_path(path), directory=True
                 )
                 return '{"error":"文件空间查询失败，尚未确认文件可见和下载链接，请重试或说明阻塞"}'
 
@@ -187,9 +204,9 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
 
 
 def _relative_path(path: str) -> str:
+    if path == "/workspace":
+        return ""
     path = path.removeprefix("/workspace/")
-    if path.startswith("conversations/"):
-        return "/".join(path.split("/")[2:])
     return "" if path == "." else path.rstrip("/")
 
 

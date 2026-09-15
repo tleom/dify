@@ -110,6 +110,15 @@ def queue_fixture(
             for model in (WorkbenchChat, WorkbenchRevision, WorkbenchRun, AgentWorkspaceBinding, Conversation)
         ],
     )
+    from models.workbench import WorkbenchCommand, WorkbenchControl, WorkbenchRunEvent
+
+    WorkbenchControl.metadata.create_all(
+        engine,
+        tables=[
+            WorkbenchControl.metadata.tables[model.__tablename__]
+            for model in (WorkbenchControl, WorkbenchCommand, WorkbenchRunEvent)
+        ],
+    )
     factory = sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(factory_module, "_session_maker", factory)
     tenant, account, agent, app, snapshot, chat_id, revision = [str(uuid4()) for _ in range(7)]

@@ -93,6 +93,7 @@ def mark_failure(run):
     recovery = payload.get("recovery")
     if (
         run.status not in {"failed", "interrupted"}
+        or payload.get("control", {}).get("kind") == "compact"
         or not isinstance(recovery, dict)
         or recovery.get("cancelled")
         or recovery.get("next_run_id")
@@ -323,11 +324,13 @@ def continue_failed(run_id):
                 "followup_protocol",
                 "queue_selection",
                 "queue_files",
+                "control",
             )
             if key in payload
         }
         next_payload.update(
             query="继续",
+            is_continuation=True,
             attempt=0,
             branch_parent_run_id=source.id,
             parent_message_id=(message_ids(source) or [None])[-1],
@@ -375,6 +378,9 @@ def cancel_chain(tenant_id, account_id, run_id):
         chat, run = locked_run(session, tenant_id, account_id, run_id)
         if run.status in (WAITING, *HIDDEN_STATUSES):
             raise Conflict("这条消息尚未独立执行，请使用队列移除操作")
+        from services.workbench.control import pause_goal
+
+        pause_goal(session, chat)
         for _ in range(MAX_AUTO_CONTINUATIONS + 1):
             payload = json.loads(run.payload)
             state = payload.setdefault("recovery", {"attempt": 0})

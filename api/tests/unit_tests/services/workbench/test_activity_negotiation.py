@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from controllers.console.workbench import WorkbenchRegeneratePayload, WorkbenchRunPayload
+from models.workbench import WorkbenchRun
 from services.workbench import branches, mentions, scheduler, service
 
 
@@ -37,7 +38,7 @@ def test_enqueue_freezes_only_a_negotiated_and_enabled_protocol(
     session = Mock()
     empty_runs: list[object] = []
     session.scalars.return_value = empty_runs
-    session.scalar.side_effect = [None, None, None, SimpleNamespace(id="revision")]
+    session.scalar.side_effect = [None, None, None, SimpleNamespace(id="revision"), None, None]
     monkeypatch.setattr(service.session_factory, "create_session", lambda: nullcontext(session))
     monkeypatch.setattr(
         service.session_factory, "get_session_maker", lambda: SimpleNamespace(begin=lambda: nullcontext(session))
@@ -57,7 +58,7 @@ def test_enqueue_freezes_only_a_negotiated_and_enabled_protocol(
         payload["activity_protocol"] = requested
     result = service.enqueue("tenant", "account", "chat", 1, "request", payload)
     assert result["activity_protocol"] == int(enabled and requested == 1)
-    stored = session.add.call_args.args[0]
+    stored = next(call.args[0] for call in session.add.call_args_list if isinstance(call.args[0], WorkbenchRun))
     assert json.loads(stored.payload)["activity_protocol"] == result["activity_protocol"]
 
 

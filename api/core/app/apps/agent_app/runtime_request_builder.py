@@ -284,6 +284,14 @@ class AgentAppRuntimeRequestBuilder:
             from dify_agent.protocol.schemas import RunLayerSpec
 
             request.composition.layers.append(
+                RunLayerSpec(
+                    name="workbench_control",
+                    type="dify.workbench_control",
+                    deps={"execution_context": "execution_context"},
+                    config={},
+                )
+            )
+            request.composition.layers.append(
                 RunLayerSpec(name="workbench_environment", type="dify.workbench_environment", config={})
             )
             request.composition.layers.append(
@@ -365,7 +373,7 @@ class AgentAppRuntimeRequestBuilder:
             return
         previous = [layer.name for layer in snapshot.layers]
         current = [layer.name for layer in request.composition.layers]
-        additions = {"workbench_files", "workbench_followups"} - set(previous)
+        additions = {"workbench_files", "workbench_followups", "workbench_control"} - set(previous)
         if not additions or previous != [name for name in current if name not in additions]:
             return  # All other composition changes remain incompatible.
         existing = {layer.name: layer for layer in snapshot.layers}

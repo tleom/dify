@@ -1,6 +1,4 @@
 import asyncio
-import sys
-import types
 
 import httpx
 import pytest
@@ -8,49 +6,6 @@ from pydantic_ai.messages import ToolReturn
 
 from agenton.compositor import Compositor, LayerNode, LayerProvider
 
-
-def _install_graphon_stubs() -> None:
-    if "graphon.model_runtime.entities.llm_entities" in sys.modules:
-        return
-
-    graphon_module = types.ModuleType("graphon")
-    model_runtime_module = types.ModuleType("graphon.model_runtime")
-    entities_module = types.ModuleType("graphon.model_runtime.entities")
-    llm_entities_module = types.ModuleType("graphon.model_runtime.entities.llm_entities")
-    message_entities_module = types.ModuleType("graphon.model_runtime.entities.message_entities")
-
-    setattr(llm_entities_module, "LLMResultChunk", type("LLMResultChunk", (), {}))
-    setattr(llm_entities_module, "LLMUsage", type("LLMUsage", (), {}))
-
-    for name in (
-        "AssistantPromptMessage",
-        "AudioPromptMessageContent",
-        "DocumentPromptMessageContent",
-        "ImagePromptMessageContent",
-        "PromptMessage",
-        "PromptMessageContentUnionTypes",
-        "PromptMessageTool",
-        "SystemPromptMessage",
-        "TextPromptMessageContent",
-        "ToolPromptMessage",
-        "UserPromptMessage",
-        "VideoPromptMessageContent",
-    ):
-        setattr(message_entities_module, name, type(name, (), {}))
-
-    sys.modules["graphon"] = graphon_module
-    sys.modules["graphon.model_runtime"] = model_runtime_module
-    sys.modules["graphon.model_runtime.entities"] = entities_module
-    sys.modules["graphon.model_runtime.entities.llm_entities"] = llm_entities_module
-    sys.modules["graphon.model_runtime.entities.message_entities"] = message_entities_module
-
-    setattr(graphon_module, "model_runtime", model_runtime_module)
-    setattr(model_runtime_module, "entities", entities_module)
-    setattr(entities_module, "llm_entities", llm_entities_module)
-    setattr(entities_module, "message_entities", message_entities_module)
-
-
-_install_graphon_stubs()
 
 from dify_agent.layers.dify_core_tools.configs import DifyCoreToolConfig, DifyCoreToolsLayerConfig  # noqa: E402
 from dify_agent.layers.dify_core_tools.layer import DifyCoreToolsLayer  # noqa: E402

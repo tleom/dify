@@ -22,9 +22,10 @@ from pathlib import Path
 try:
     args = json.loads(base64.b64decode(sys.argv[1]))
     root = Path(args["root"]).resolve(strict=True)
+    boundary = Path('/workspace') if root.is_relative_to('/workspace') else root
     path = Path(args["path"])
     path = (path if path.is_absolute() else root / path).resolve()
-    if path == root or not path.is_relative_to(root):
+    if path == boundary or not path.is_relative_to(boundary):
         raise ValueError("File path must stay inside the workspace")
     if args["operation"] == "create":
         content = args["content"]

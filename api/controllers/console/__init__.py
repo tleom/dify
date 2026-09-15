@@ -33,6 +33,8 @@ console_ns = Namespace("console", description="Console management API operations
 
 RESOURCE_MODULES = (
     "controllers.console.workbench",
+    "controllers.console.workbench_control",
+    "controllers.console.workbench_resources",
     "controllers.console.app.app_import",
     "controllers.console.explore.audio",
     "controllers.console.explore.completion",

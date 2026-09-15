@@ -251,6 +251,10 @@ def reconcile():
 
     for owner in waiting_chats():
         advance_followups.delay(*owner)
+    from services.workbench.control import active_goal_chats
+
+    for owner in active_goal_chats():
+        advance_followups.delay(*owner)
     dispatch.delay()
 
 
@@ -268,9 +272,12 @@ def expire_human_input(run_id):
 
 @shared_task(queue="workbench_control")
 def advance_followups(tenant_id, account_id, chat_id):
+    from services.workbench.control import drive_goal, settle
     from services.workbench.followups import advance
 
-    advance(tenant_id, account_id, chat_id)
+    settle(tenant_id, account_id, chat_id)
+    if advance(tenant_id, account_id, chat_id) is None:
+        drive_goal(tenant_id, account_id, chat_id)
 
 
 @shared_task(queue="workbench", acks_late=False, reject_on_worker_lost=False)

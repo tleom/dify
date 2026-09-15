@@ -6,7 +6,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, true
 from werkzeug.exceptions import BadRequest, Conflict
 
 from configs import dify_config
@@ -123,10 +123,14 @@ def operate(tenant_id, account_id, operation, path, *, chat_id=None, **kwargs) -
                 ],
             }
         root, chat = resolve_path(session, tenant_id, account_id, path, chat_id=chat_id)
+        if path in {".", "conversations"} and operation != "list":
+            raise BadRequest("文件空间根目录只能浏览")
         if operation == "delete" and session.scalar(
             select(WorkbenchRun.id)
             .where(
-                WorkbenchRun.chat_id == chat.id,
+                WorkbenchRun.tenant_id == tenant_id,
+                WorkbenchRun.account_id == account_id,
+                WorkbenchRun.chat_id == chat.id if chat else true(),
                 WorkbenchRun.status.in_(
                     ["queued", "running", "stopping", "waiting_input", "environment_update", "environment_installing"]
                 ),
@@ -134,14 +138,15 @@ def operate(tenant_id, account_id, operation, path, *, chat_id=None, **kwargs) -
             .limit(1)
         ):
             raise Conflict("此对话正在执行任务，请停止后再删除文件")
-        title, resolved_chat_id = chat.title, chat.id
-    manager(identifier, "files", {"operation": "mkdir", "path": root})
+        title, resolved_chat_id = (chat.title, chat.id) if chat else ("个人文件空间", None)
+    if chat:
+        manager(identifier, "files", {"operation": "mkdir", "path": root})
     result = manager(identifier, "files", {"operation": operation, "path": path, **kwargs})
     if operation == "get" and result.get("kind") == "directory" and path == root:
         result["name"] = archive_name(title)
     if operation == "list":
         for entry in result["entries"]:
-            if entry["kind"] != "blocked" and entry.get("downloadable", True):
+            if entry["kind"] != "blocked" and entry.get("downloadable", True) and entry["path"] != "conversations":
                 entry.update(_links(tenant_id, account_id, resolved_chat_id, entry["path"]))
     if operation == "stat" and result["kind"] in {"file", "directory"} and result.get("downloadable", True):
         result.update(_links(tenant_id, account_id, resolved_chat_id, result["path"]))

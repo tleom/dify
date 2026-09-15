@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 from pydantic_ai import RunContext, Tool
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.tools import ToolDefinition
+from pydantic_core import to_jsonable_python
 
 from agenton.layers import LayerConfig, NoLayerDeps, PydanticAILayer
 from dify_agent.protocol.schemas import WorkbenchActivityData, WorkbenchProgressData, WorkbenchToolData
@@ -32,7 +33,10 @@ def public_value(value: Any) -> JsonValue:
     try:
         return _JSON.validate_python(value)
     except ValueError:
-        return str(value)
+        try:
+            return _JSON.validate_python(to_jsonable_python(value))
+        except (ValueError, TypeError):
+            return str(value)
 
 
 def result_metadata(value: Any) -> dict[str, Any]:

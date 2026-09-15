@@ -71,8 +71,12 @@ def tree_version(fd):
     return version(json.dumps(tree_entries(fd), separators=(",", ":")).encode())
 
 
-def entry_metadata(fd, name, path, info):
+def entry_metadata(fd, name, path, info, *, shallow=False):
     kind = "directory" if stat.S_ISDIR(info.st_mode) else "file" if stat.S_ISREG(info.st_mode) else "blocked"
+    if shallow:
+        return {"name": name, "path": path, "kind": kind, "size": info.st_size,
+                "modified": info.st_mtime, "version": None,
+                "downloadable": path != "conversations" and (kind == "directory" or (kind == "file" and info.st_size <= MAX_BYTES))}
     data = read_file(fd, name) if kind == "file" and info.st_size <= MAX_BYTES else None
     fingerprint = version(data)
     downloadable = kind == "file" and fingerprint is not None
@@ -129,15 +133,15 @@ def remove_contents(fd):
 
 def operate(payload, root="/workspace"):
     operation = payload["operation"]
-    path = payload.get("path", "conversations")
-    if path.split("/")[0] != "conversations":
-        raise ValueError("Path must be in conversations")
-    fd, name = parent_fd(root, path)
+    path = payload.get("path", ".")
+    if path in {".", "conversations"} and operation != "list":
+        raise ValueError("The workspace root can only be listed")
+    if path == ".":
+        fd, name = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW), "."
+    else:
+        fd, name = parent_fd(root, path)
     try:
         if operation == "mkdir":
-            if len(path.split("/")) != 2 or not path.startswith("conversations/"):
-                raise ValueError("Only a conversation folder can be created")
-            uuid.UUID(name)
             try:
                 os.mkdir(name, mode=0o700, dir_fd=fd)
             except FileExistsError:
@@ -151,7 +155,7 @@ def operate(payload, root="/workspace"):
                 result = []
                 for entry in sorted(os.listdir(child))[:2000]:
                     info = os.stat(entry, dir_fd=child, follow_symlinks=False)
-                    result.append(entry_metadata(child, entry, path + "/" + entry, info))
+                    result.append(entry_metadata(child, entry, ("" if path == "." else path + "/") + entry, info, shallow=True))
                 return {"path": path, "entries": result}
             finally:
                 os.close(child)
@@ -164,8 +168,6 @@ def operate(payload, root="/workspace"):
                 return {"path": path, "kind": "missing"}
             return entry_metadata(fd, name, path, info)
         if info is not None and stat.S_ISDIR(info.st_mode):
-            if len(path.split("/")) < 2:
-                raise ValueError("The conversation root cannot be downloaded or deleted")
             child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             try:
                 fingerprint = tree_version(child)

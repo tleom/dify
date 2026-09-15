@@ -112,6 +112,9 @@ def advance(tenant_id, account_id, chat_id):
 
         payload["parent_message_id"] = (message_ids(parent) or [None])[-1] if parent else None
         run.payload, run.status = json.dumps(payload), "queued"
+        from services.workbench.control import admit_run
+
+        admit_run(session, chat, run, None)
         chat.updated_at = naive_utc_now()
         run_id = run.id
     from services.workbench.scheduler import publish

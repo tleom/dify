@@ -171,6 +171,8 @@ def catalog(tenant_id: str, account_id: str):
         **resources,
         "activity_protocol": 1,
         "followup_protocol": 1,
+        "control_protocol": 1,
+        "resources_protocol": 1,
         "default_selection": default_selection(tenant_id, account_id, base).model_dump(mode="json"),
         "models": [
             {"id": key, "name": value["model"], "provider": value["model_provider"]} for key, value in models.items()
@@ -461,7 +463,7 @@ def update_config(tenant_id, account_id, chat_id, version, selection):
     return read_chat(tenant_id, account_id, chat_id)
 
 
-def enqueue(tenant_id, account_id, chat_id, version, request_key, payload: dict[str, Any]):
+def enqueue(tenant_id, account_id, chat_id, version, request_key, payload: dict[str, Any], *, control=None):
     from services.workbench.followups import WAITING, pending_runs, queued_parent
     from services.workbench.recovery import pending_condition
 
@@ -638,6 +640,10 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload: dict[
             event_log="[]",
         )
         session.add(run)
+        if not defer:
+            from services.workbench.control import admit_run
+
+            admit_run(session, chat, run, control)
         chat.updated_at = naive_utc_now()
         session.flush()
         if paused_parent is not None:
@@ -828,7 +834,7 @@ def resume(tenant_id, account_id, run_id, values, action):
         )
         if chat_id is None:
             raise NotFound()
-        _chat(session, tenant_id, account_id, chat_id, lock=True)
+        chat = _chat(session, tenant_id, account_id, chat_id, lock=True)
         run = session.scalar(
             select(WorkbenchRun)
             .where(
@@ -868,6 +874,10 @@ def resume(tenant_id, account_id, run_id, values, action):
             values=values,
             action=AskHumanSelectedAction(id=selected.id, label=selected.label) if selected else None,
         )
+        if pending.get("tool_name") == "exit_plan_mode":
+            from services.workbench.control import review_answer
+
+            review_answer(session, chat, run, action)
         payload["continuation"] = {"calls": {pending["tool_call_id"]: result.model_dump(mode="json")}}
         payload["submitted_input"] = {"values": values, "action": action}
         payload.pop("pending", None)

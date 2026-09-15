@@ -38,8 +38,12 @@ class WorkbenchEnvironmentLayer(PydanticAILayer[NoLayerDeps, object, EmptyLayerC
             "The task will pause while other runs finish, then resume with the result. "
             "Do not use pip, npm, uv, pnpm, npx, or pnx to install packages or create private replacement environments. "
             "Do not install system packages or modify the read-only shared environment from Shell. "
-            "All uploaded, generated, and intermediate files belong in your current conversation directory. "
-            "Use relative paths from the working directory. Other conversations and the old shared folder are inaccessible."
+            "Your personal sandbox root is /workspace. The working directory is the current conversation directory. "
+            "Unless the user explicitly requests another location or another conversation's files, keep task files and "
+            "investigation within this working directory. /workspace/memory.md stores this user's persistent memory; "
+            "/workspace/skills contains this user's personal skills. They may be used across this user's conversations. "
+            "Administrator-provided tools and global skills are read-only and separate from personal files. "
+            "Never attempt to access another user's sandbox or alter administrator resources."
         )
 
     def _prepare(self, _ctx: RunContext[object], _definition: ToolDefinition):

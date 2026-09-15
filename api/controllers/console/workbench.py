@@ -160,6 +160,8 @@ class WorkbenchModelResponse(ResponseModel):
 
 
 class WorkbenchCatalogResponse(ResponseModel):
+    control_protocol: Literal[1] = 1
+    resources_protocol: Literal[1] = 1
     activity_protocol: Literal[1] = 1
     followup_protocol: Literal[1] = 1
     default_selection: Selection

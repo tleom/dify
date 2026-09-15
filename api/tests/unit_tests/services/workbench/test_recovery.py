@@ -30,6 +30,15 @@ def database(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecoveryDatabase]:
             TypeBase.metadata.tables[model.__tablename__] for model in (WorkbenchChat, WorkbenchRun, WorkbenchRunEvent)
         ],
     )
+    from models.workbench import WorkbenchCommand, WorkbenchControl
+
+    WorkbenchControl.metadata.create_all(
+        engine,
+        tables=[
+            WorkbenchControl.metadata.tables[model.__tablename__]
+            for model in (WorkbenchControl, WorkbenchCommand, WorkbenchRunEvent)
+        ],
+    )
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     monkeypatch.setattr(factory_module, "_session_maker", factory)
     monkeypatch.setattr(service, "authorize", lambda *_: None)
@@ -42,6 +51,7 @@ def database(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecoveryDatabase]:
     fence = Mock(return_value=True)
     fence.real_function = workbench_tasks.fence_remote
     monkeypatch.setattr(workbench_tasks, "fence_remote", fence)
+    monkeypatch.setattr(workbench_tasks, "redis_client", Mock())
     tenant, account, chat_id, run_id = (str(uuid4()) for _ in range(4))
     with factory.begin() as session:
         session.add(
