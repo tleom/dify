@@ -87,11 +87,9 @@ def read_signed(token: str) -> dict:
 
 
 def lookup(tenant_id: str, account_id: str, path: str, *, chat_id: str | None = None) -> dict:
-    """Confirm a path exists using its actual parent listing before issuing links."""
-    parent = str(PurePosixPath(path).parent)
-    listing = operate(tenant_id, account_id, "list", parent, chat_id=chat_id)
-    entry = next((item for item in listing["entries"] if item["path"] == path), None)
-    if entry is None or entry["kind"] == "blocked":
+    """Confirm the exact path independently of the bounded directory listing."""
+    entry = operate(tenant_id, account_id, "stat", path, chat_id=chat_id)
+    if entry["kind"] not in {"file", "directory"}:
         raise NotFound("文件已不存在或不可访问")
     return entry
 

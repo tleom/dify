@@ -125,6 +125,8 @@ def operate(tenant_id, account_id, operation, path, *, chat_id=None, **kwargs) -
         for entry in result["entries"]:
             if entry["kind"] != "blocked":
                 entry.update(_links(tenant_id, account_id, resolved_chat_id, entry["path"]))
+    if operation == "stat" and result["kind"] in {"file", "directory"}:
+        result.update(_links(tenant_id, account_id, resolved_chat_id, result["path"]))
     return result
 
 

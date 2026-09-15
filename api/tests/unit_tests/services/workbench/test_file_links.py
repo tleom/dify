@@ -112,8 +112,20 @@ def file_space(monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., 
                         "modified": 1.0,
                         "version": "1",
                     }
-                    for path, data in contents.items()
+                    for path, data in sorted(contents.items())[:2000]
                 ],
+            }
+        if request["operation"] == "stat":
+            path = request["path"]
+            if path not in contents:
+                return {"path": path, "kind": "missing"}
+            return {
+                "name": path.rsplit("/", 1)[1],
+                "path": path,
+                "kind": "file",
+                "size": len(contents[path]),
+                "modified": 1.0,
+                "version": "1",
             }
         if request["path"] not in contents:
             raise NotFound()
@@ -174,6 +186,24 @@ def test_signature_tamper_owner_mismatch_missing_file_and_deleted_chat_revoke(fi
         assert chat is not None
         chat.deleted = 1
     assert client.get(url).status_code == 404
+
+
+def test_specific_path_lookup_reaches_files_beyond_directory_limit(file_space: FileSpace) -> None:
+    payload, root, contents, _, client = file_space
+    for index in range(2000):
+        contents[f"{root}/a-{index:04}.txt"] = b"entry"
+    path = root + "/z-last.png"
+    contents[path] = b"\x89PNG\r\n\x1a\n"
+    listing = files.operate(payload.tenant_id, payload.account_id, "list", root)
+    assert len(listing["entries"]) == 2000
+    assert all(entry["path"] != path for entry in listing["entries"])
+    assert file_links.agent_lookup(payload)["complete"] is False
+    specific = file_links.agent_lookup(payload.model_copy(update={"path": "z-last.png"}))
+    assert specific["complete"] is True
+    assert len(specific["entries"]) == 1
+    entry = specific["entries"][0]
+    assert entry["path"] == path
+    assert client.get(urlsplit(entry["download_url"]).path).data == contents[path]
 
 
 def test_configured_public_origin_is_used_without_changing_signed_identity(

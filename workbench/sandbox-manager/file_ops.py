@@ -148,6 +148,20 @@ def operate(payload, root="/workspace"):
             info = os.stat(name, dir_fd=fd, follow_symlinks=False)
         except FileNotFoundError:
             info = None
+        if operation == "stat":
+            if info is None:
+                return {"path": path, "kind": "missing"}
+            kind = "directory" if stat.S_ISDIR(info.st_mode) else "file" if stat.S_ISREG(info.st_mode) else "blocked"
+            data = read_file(fd, name) if kind == "file" and info.st_size <= MAX_BYTES else None
+            fingerprint = version(data)
+            if kind == "directory":
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                try:
+                    fingerprint = tree_version(child)
+                finally:
+                    os.close(child)
+            return {"name": name, "path": path, "kind": kind,
+                    "size": info.st_size, "modified": info.st_mtime, "version": fingerprint}
         if info is not None and stat.S_ISDIR(info.st_mode):
             if len(path.split("/")) < 2:
                 raise ValueError("The conversation root cannot be downloaded or deleted")

@@ -386,6 +386,7 @@ class AgentRunRunner:
                     if activity_layer is not None
                     else None
                 )
+                from dify_agent.layers.shell.argument_compatibility import ShellArgumentCompatibilityCapability
                 from dify_agent.layers.shell.layer import DifyShellLayer
                 from dify_agent.layers.workbench_files import WorkbenchFilesLayer
                 from dify_agent.layers.workbench_activity import result_metadata
@@ -396,6 +397,9 @@ class AgentRunRunner:
                 )
                 shell_layer = next(
                     (slot.layer for slot in run.slots.values() if isinstance(slot.layer, DifyShellLayer)), None
+                )
+                shell_arguments = (
+                    ShellArgumentCompatibilityCapability() if files_layer is not None or activity is not None else None
                 )
                 changes = (
                     WorkbenchFileChanges(shell_layer, activity, files_layer)
@@ -540,7 +544,7 @@ class AgentRunRunner:
                                     instructions=run.prompts or None,
                                     capabilities=[
                                         capability
-                                        for capability in (compaction, activity, delivery)
+                                        for capability in (compaction, shell_arguments, activity, delivery)
                                         if capability is not None
                                     ],
                                     usage_limits=UsageLimits(request_limit=_MAX_AGENT_STEPS_PER_RUN),

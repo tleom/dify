@@ -12,6 +12,7 @@ from typing import cast
 
 import httpx
 import pytest
+from pydantic_ai import Tool
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 
 from agenton.layers import LayerConfig
@@ -181,6 +182,8 @@ def test_old_deferred_task_can_acquire_file_reader_without_repeating_work(monkey
     "text, valid",
     [
         ("[资料](https://example.test/docs)", True),
+        ("[Download Python](https://python.org/downloads/)", True),
+        ("[下载文档](https://example.test/docs)", True),
         (f"![图][preview]\n\n[preview]: {PREVIEW}", True),
         (f"[下载]({PREVIEW})", False),
         (f"![图]({DOWNLOAD})", False),
@@ -195,6 +198,52 @@ def test_markdown_targets_and_examples(text, valid):
     layer = WorkbenchFilesLayer(config=LayerConfig(), inner_api_url="", inner_api_key="")
     layer._verified["chart"] = {"preview_url": PREVIEW, "download_url": DOWNLOAD}
     assert (layer.delivery_error(text, final=True) is None) is valid
+
+
+@pytest.mark.parametrize("activity_enabled", [False, True])
+@pytest.mark.parametrize("tool_name", ["shell_run", "file_create", "file_edit"])
+def test_wrapped_arguments_recover_after_invalid_attempts_with_activity_disabled(
+    monkeypatch, activity_enabled, tool_name
+):
+    executed = []
+
+    def shell_run(script: str) -> str:
+        executed.append({"script": script})
+        return "done"
+
+    def file_create(path: str, content: str) -> str:
+        executed.append({"path": path, "content": content})
+        return "done"
+
+    def file_edit(path: str, old_text: str, new_text: str) -> str:
+        executed.append({"path": path, "old_text": old_text, "new_text": new_text})
+        return "done"
+
+    tool, expected = {
+        "shell_run": (shell_run, {"script": "echo ready"}),
+        "file_create": (file_create, {"path": "note.txt", "content": "ready"}),
+        "file_edit": (file_edit, {"path": "note.txt", "old_text": "old", "new_text": "ready"}),
+    }[tool_name]
+    calls = 0
+
+    async def stream(messages, info):
+        nonlocal calls
+        calls += 1
+        if calls <= 3:
+            nested = '{"truncated":' if calls <= 2 else json.dumps(expected)
+            yield {0: _call(tool_name, {"arguments": nested}, f"attempt-{calls}")}
+        else:
+            yield "操作完成。"
+
+    request, _, execute = _setup(monkeypatch, stream, [Tool(tool, max_retries=2)])
+    add_files(request)
+    if not activity_enabled:
+        request.composition.layers = [
+            layer for layer in request.composition.layers if layer.name != "workbench_activity"
+        ]
+    asyncio.run(execute())
+    assert calls == 4
+    assert executed == [expected]
 
 
 @pytest.mark.parametrize("activity_enabled", [False, True])

@@ -111,7 +111,7 @@ when merely disabling reporting.
 
 Workbench compositions include `dify.workbench_files`, which binds the trusted execution context and exposes `workbench_files(path=".")`. Results confirm current-chat files and include the exact `preview_url` and `download_url` returned by the file-space UI. URLs remain stable for the owned path, use signed capabilities, and are invalid after the chat/workspace or file is removed. HTML previews run with an opaque sandbox origin. The model must query files before delivering those URLs.
 
-Workbench shell sessions also expose `file_create(path, content)` and `file_edit(path, old_text, new_text)` for bounded UTF-8 file operations inside the current workspace. Creation refuses overwrite; editing requires exactly one match and preserves unchanged content. Invalid shell argument envelopes are only unwrapped when complete JSON parses; repeated malformed calls produce bounded, explicit observations.
+Workbench shell sessions also expose `file_create(path, content)` and `file_edit(path, old_text, new_text)` for bounded UTF-8 file operations inside the current workspace. Creation refuses overwrite; editing requires exactly one match and preserves unchanged content. Shell argument envelopes are only unwrapped when complete JSON parses, independently of activity reporting; repeated malformed calls produce bounded, explicit observations.
 
 The runtime inventories regular files inside the conversation directory before execution,
 after tool results, and before publishing a model response. New and changed paths emit

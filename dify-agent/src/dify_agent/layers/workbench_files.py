@@ -66,11 +66,7 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
                             break
                         label += child.content
                     download = bool(re.search(r"下载|download", label, re.I))
-                    if (
-                        download
-                        or _file_target(url)
-                        or re.search(r"\.(?:docx?|xlsx?|pptx?|pdf|zip|png|jpe?g)\b", label, re.I)
-                    ):
+                    if _file_target(url) or re.search(r"\.(?:docx?|xlsx?|pptx?|pdf|zip|png|jpe?g)\b", label, re.I):
                         if url not in (downloads if download else previews | downloads):
                             return "文件链接尚未核对。先调用 workbench_files，再逐字使用它返回的实际链接。"
                     if url in downloads:

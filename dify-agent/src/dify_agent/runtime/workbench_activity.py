@@ -1,6 +1,5 @@
 """Connect workbench activity state to the installed Pydantic AI lifecycle."""
 
-import json
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -50,22 +49,6 @@ class WorkbenchActivityCapability(AbstractCapability[None]):
     async def before_tool_execute(self, ctx, *, call, tool_def, args):
         self.invalid_calls.pop(call.tool_name, None)
         await self.layer.start_call(call, args)
-        return args
-
-    async def before_tool_validate(self, ctx, *, call, tool_def, args):
-        if call.tool_name not in {"shell_run", "file_create", "file_edit"}:
-            return args
-        # Some compatible providers wrap the actual arguments in an extra JSON string.
-        # Decode only complete JSON; never repair or execute a truncated script.
-        try:
-            value = json.loads(args) if isinstance(args, str) else args
-            if isinstance(value, dict) and set(value) == {"arguments"}:
-                nested = value["arguments"]
-                decoded = json.loads(nested) if isinstance(nested, str) else nested
-                if isinstance(decoded, dict):
-                    return decoded
-        except (TypeError, ValueError):
-            pass
         return args
 
     async def after_tool_validate(self, ctx, *, call, tool_def, args):
