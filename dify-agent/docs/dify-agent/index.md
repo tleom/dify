@@ -111,6 +111,8 @@ when merely disabling reporting.
 
 Workbench compositions include `dify.workbench_files`, which binds the trusted execution context and exposes `workbench_files(path=".")`. Results confirm current-chat files and include the exact `preview_url` and `download_url` returned by the file-space UI. URLs remain stable for the owned path, use signed capabilities, and are invalid after the chat/workspace or file is removed. HTML previews run with an opaque sandbox origin. The model must query files before delivering those URLs.
 
+The config layer selects file-delivery guidance from the trusted `workbench_run_id` on every invocation, including resumed sessions. Workbench replies use the file-space URLs; ordinary Agent replies retain the upload CLI's `public_download_url` guidance. The upload, public-url, and download CLI commands remain available for structured ToolFile references and incoming files.
+
 Pending generated paths persist in the session snapshot across deferred continuations of the same workbench run. URL verification resets on resume, and a new logical run clears the pending paths. Entries with `downloadable=false` remain visible but receive no URLs; the model must split unsupported artifacts or explain that delivery is blocked. File downloads are limited to 20 MiB, and directory archives to 50 MiB of supported file contents.
 
 Final delivery requires a download URL for at least one changed path or a directory archive containing it. Each query refreshes verification for its requested path; file changes invalidate previous query results and failures. Unrelated files do not establish delivery or explain a failure to deliver the current artifacts.

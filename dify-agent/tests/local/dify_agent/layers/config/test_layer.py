@@ -13,17 +13,44 @@ from dify_agent.layers.config.layer import (
     DifyConfigLayerError,
     _AGENT_FILE_UPLOAD_REPLY_HINT,
 )
+from dify_agent.layers.execution_context.configs import DifyExecutionContextLayerConfig
+from dify_agent.layers.execution_context.layer import DifyExecutionContextLayer
+from dify_agent.layers.runtime.configs import DifyRuntimeLayerConfig
+from dify_agent.layers.runtime.layer import DifyRuntimeLayer
 from dify_agent.layers.shell import DifyShellLayerConfig
 from dify_agent.layers.shell.layer import CompleteRemoteCommandResult, DifyShellLayer
+from dify_agent.runtime_backend.local import LocalExecutionBindingBackend
 
 
-def _shell_layer() -> DifyShellLayer:
-    return DifyShellLayer.from_config_with_settings(
+def _shell_layer(*, workbench_run_id: str | None = None) -> DifyShellLayer:
+    layer = DifyShellLayer.from_config_with_settings(
         DifyShellLayerConfig(),
     )
+    layer.bind_deps(
+        {
+            "runtime": DifyRuntimeLayer.from_config_with_backend(
+                DifyRuntimeLayerConfig(backend_binding_ref="binding-1"),
+                backend=LocalExecutionBindingBackend(endpoint="http://shellctl", auth_token=""),
+            ),
+            "execution_context": DifyExecutionContextLayer.from_config_with_settings(
+                DifyExecutionContextLayerConfig(
+                    tenant_id="tenant-1",
+                    user_id="user-1",
+                    user_from="account",
+                    app_id="app-1",
+                    agent_mode="agent_app",
+                    invoke_from="service-api",
+                    workbench_run_id=workbench_run_id,
+                ),
+                daemon_url="http://plugin-daemon",
+                daemon_api_key="",
+            ),
+        }
+    )
+    return layer
 
 
-def _build_layer(*, writable: bool = True) -> DifyConfigLayer:
+def _build_layer(*, writable: bool = True, workbench_run_id: str | None = None) -> DifyConfigLayer:
     layer = DifyConfigLayer.from_config(
         DifyConfigLayerConfig.model_validate(
             {
@@ -38,7 +65,7 @@ def _build_layer(*, writable: bool = True) -> DifyConfigLayer:
             }
         )
     )
-    layer.bind_deps({"shell": _shell_layer()})
+    layer.bind_deps({"shell": _shell_layer(workbench_run_id=workbench_run_id)})
     return layer
 
 
@@ -92,6 +119,33 @@ def test_build_shell_pull_scripts_include_targets() -> None:
 
     assert skill_script == "set -eu\ndify-agent config skills pull --json alpha 'skill with space'"
     assert file_script == "set -eu\ndify-agent config files pull --json guide.txt 'file with space.txt'"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("workbench_run_id", [None, "run-1"])
+@pytest.mark.parametrize("resumed", [False, True])
+async def test_file_delivery_prompt_uses_invocation_context_with_saved_cli_help(workbench_run_id, resumed) -> None:
+    layer = _build_layer(workbench_run_id=workbench_run_id)
+    layer._initialize_runtime_prompt_state()
+    if resumed:
+        saved = layer.runtime_state.model_dump(mode="json")
+        layer = _build_layer(workbench_run_id=workbench_run_id)
+        layer.runtime_state = layer.runtime_state_type.model_validate(saved)
+        await layer.on_context_resume()
+
+    prompt = layer.build_suffix_prompt()
+    # Both products retain the CLI for incoming files and structured outputs.
+    assert "$ dify-agent file upload --help" in prompt
+    assert "$ dify-agent file public-url --help" in prompt
+    assert "$ dify-agent file download --help" in prompt
+    if workbench_run_id:
+        assert "query workbench_files" in prompt
+        assert "exact download_url" in prompt
+        assert "preview_url for inline images" in prompt
+        assert _AGENT_FILE_UPLOAD_REPLY_HINT not in prompt
+    else:
+        assert _AGENT_FILE_UPLOAD_REPLY_HINT in prompt
+        assert "query workbench_files" not in prompt
 
 
 @pytest.mark.anyio

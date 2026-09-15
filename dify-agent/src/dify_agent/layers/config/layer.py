@@ -53,6 +53,12 @@ _AGENT_FILE_CLI_HELP_COMMANDS: dict[str, tuple[str, ...]] = {
     "dify-agent file download --help": ("file", "download"),
 }
 _CONFIG_CONTEXT_EXCLUDE = {"mentioned_skill_names": True, "mentioned_file_names": True}
+_WORKBENCH_FILE_REPLY_HINT = (
+    "For natural-language Workbench replies, query workbench_files after creating or modifying the final files. "
+    "Use its exact download_url for download links and preview_url for inline images. "
+    "The file upload and public-url CLI commands are only needed when an output schema explicitly requires "
+    "a structured ToolFile reference; their temporary URLs do not replace Workbench file-space links."
+)
 
 
 class DifyConfigLayerError(RuntimeError):
@@ -205,10 +211,18 @@ PY"""
         ]
         if not command_sections:
             return ""
+        # Select from this invocation's trusted context, including when CLI help
+        # was restored from a snapshot created before Workbench file delivery.
+        execution_context = self.deps.shell.deps.execution_context
+        reply_hint = (
+            _WORKBENCH_FILE_REPLY_HINT
+            if execution_context is not None and execution_context.config.workbench_run_id
+            else _AGENT_FILE_UPLOAD_REPLY_HINT
+        )
         return (
             "Agent file CLI reference for installed `dify-agent`:\n"
             + "\n\n".join(command_sections)
-            + f"\n\n{_AGENT_FILE_UPLOAD_REPLY_HINT}"
+            + f"\n\n{reply_hint}"
         )
 
     def _format_config_context_json(self) -> str:
