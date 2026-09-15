@@ -79,14 +79,14 @@ def _import_name(payload):
             entries = payload.get("files", [])
             if sum(len(item["data"]) for item in entries) > 28_000_000:
                 raise ValueError("技能包超过 20 MiB")
-            candidates = [
+            file_candidates = [
                 item
                 for item in entries
                 if item["path"] == "SKILL.md" or (item["path"].count("/") == 1 and item["path"].endswith("/SKILL.md"))
             ]
-            if len(candidates) != 1:
+            if len(file_candidates) != 1:
                 raise ValueError("技能包需要包含一个 SKILL.md")
-            content = base64.b64decode(candidates[0]["data"], validate=True).decode("utf-8-sig")
+            content = base64.b64decode(file_candidates[0]["data"], validate=True).decode("utf-8-sig")
         return skill_metadata(content, personal=True)["name"]
     except (ValueError, UnicodeError, zipfile.BadZipFile, yaml.YAMLError) as error:
         raise BadRequest(str(error)) from error
@@ -150,7 +150,8 @@ def _global_resources(tenant_id, identifier, soul):
     materialized = manager(
         identifier, "global-resources", {"operation": "global_install", "packages": packages}, timeout=180
     )
-    skills, files = [], []
+    skills: list[dict[str, object]] = []
+    files: list[dict[str, object]] = []
     for item, source in zip(materialized["skills"], packages, strict=True):
         item.update(id=source["name"], scope="global", readonly=True, enabled=True, description=source["description"])
         (skills if source["kind"] == "skill" else files).append(item)
