@@ -201,23 +201,28 @@ def _history_snapshot(session, run_id):
 
 def compact_narratives(items):
     """Coalesce adjacent deltas without changing the first event identity or ordering."""
-    result = []
-    parts = []
+    result: list[dict[str, object]] = []
+    parts: list[str] = []
+    narrative: dict[str, object] | None = None
     key = None
     for item in items:
         data = item.get("data") if item.get("event") == "workbench_activity" else None
-        current = (data.get("kind"), data.get("segment_id")) if isinstance(data, dict) else None
-        if current and current[0] in {"text", "reasoning"} and isinstance(data.get("text"), str):
+        if isinstance(data, dict) and data.get("kind") in {"text", "reasoning"} and isinstance(data.get("text"), str):
+            current = (data.get("kind"), data.get("segment_id"))
             if current == key:
                 parts.append(data["text"])
                 continue
-        if parts:
-            result[-1]["data"]["text"] = "".join(parts)
-        key = current if current and current[0] in {"text", "reasoning"} else None
-        parts = [data["text"]] if key else []
-        result.append({**item, "data": {**data}} if key else item)
-    if parts:
-        result[-1]["data"]["text"] = "".join(parts)
+            if narrative is not None:
+                narrative["text"] = "".join(parts)
+            key, parts, narrative = current, [data["text"]], dict(data)
+            result.append({**item, "data": narrative})
+        else:
+            if narrative is not None:
+                narrative["text"] = "".join(parts)
+            key, parts, narrative = None, [], None
+            result.append(item)
+    if narrative is not None:
+        narrative["text"] = "".join(parts)
     return result
 
 

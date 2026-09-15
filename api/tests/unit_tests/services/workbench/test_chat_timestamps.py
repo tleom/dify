@@ -115,7 +115,9 @@ def test_timestamp_contract_documents_required_epoch_seconds() -> None:
         assert "Unix seconds" in schema["properties"][field]["description"]
 
 
-def test_configuration_change_preserves_conversation_date(history, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_configuration_change_preserves_conversation_date(
+    history: tuple[sessionmaker[Session], str, str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     from services.workbench.policy import Selection
 
     factory, tenant, account, chat_id = history

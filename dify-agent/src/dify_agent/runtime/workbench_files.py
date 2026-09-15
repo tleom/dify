@@ -42,7 +42,7 @@ print(json.dumps(files, ensure_ascii=False))
 @dataclass
 class WorkbenchFileChanges:
     shell: DifyShellLayer
-    activity: WorkbenchActivityCapability
+    activity: WorkbenchActivityCapability | None
     files: WorkbenchFilesLayer | None = None
     previous: dict[str, list[int]] = field(default_factory=dict)
     sequence: int = 0
@@ -68,6 +68,9 @@ class WorkbenchFileChanges:
             removed = self.previous.keys() - current.keys()
             if self.files is not None and (changed or removed):
                 self.files.record_changes(changed, list(removed))
+            if self.activity is None:
+                self.previous = current
+                return
             root = self.shell._require_workspace_cwd().rstrip("/")
             explicit = explicit_path.removeprefix(root + "/") if explicit_path else None
             for path in changed:

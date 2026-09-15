@@ -253,7 +253,9 @@ def run_dto(run):
         "status": run.status,
         "error": run.error,
         "events_cursor": cursor,
-        "events": history if journal else [*run_knowledge_events(run, payload), *merge_context_events(run, payload)],
+        "events": history
+        if history is not None
+        else [*run_knowledge_events(run, payload), *merge_context_events(run, payload)],
         "activity_protocol": 1 if journal else 0,
         "context_usage": payload.get("context_usage"),
         "query": payload.get("query", ""),

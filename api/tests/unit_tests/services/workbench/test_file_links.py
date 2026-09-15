@@ -1,16 +1,22 @@
 """Real ownership queries, stable link issuance, and Flask file delivery."""
 
 import base64
+from collections.abc import Callable, Iterator
+from unittest.mock import Mock
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 import pytest
 from flask import Flask
+from flask.testing import FlaskClient
 from flask_restx import Api
+from pydantic import ValidationError
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 from werkzeug.exceptions import BadRequest, Forbidden, NotFound
 
+from controllers.common.schema import query_params_from_model
+from controllers.console.workbench import FileLinks, WorkbenchFileLinksQuery
 from controllers.files.workbench_files import WorkbenchFileContent
 from core.db import session_factory as factory_module
 from models.agent import AgentWorkspace, AgentWorkspaceOwnerType
@@ -18,13 +24,31 @@ from models.base import TypeBase
 from models.workbench import WorkbenchChat, WorkbenchRun
 from services.workbench import file_links, files
 
+type FileSpace = tuple[file_links.AgentFileLinksPayload, str, dict[str, bytes], sessionmaker[Session], FlaskClient]
+
+
+@pytest.mark.parametrize("query", [{}, {"path": ""}])
+def test_single_file_link_route_requires_explicit_nonempty_path(
+    query: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lookup = Mock()
+    monkeypatch.setattr(file_links, "lookup", lookup)
+    assert query_params_from_model(WorkbenchFileLinksQuery)["path"]["required"] is True
+    with Flask(__name__).test_request_context("/workbench/files/links", query_string=query):
+        with pytest.raises(ValidationError):
+            FileLinks().get()
+    lookup.assert_not_called()
+
 
 @pytest.fixture
-def file_space(monkeypatch, config_overrides):
+def file_space(monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., None]) -> Iterator[FileSpace]:
     config_overrides(SECRET_KEY="file-link-test-key", FILES_URL="https://files.example.test", WORKBENCH_ENABLED=True)
     engine = create_engine("sqlite://")
     TypeBase.metadata.create_all(
-        engine, tables=[model.__table__ for model in (WorkbenchChat, WorkbenchRun, AgentWorkspace)]
+        engine,
+        tables=[
+            TypeBase.metadata.tables[model.__tablename__] for model in (WorkbenchChat, WorkbenchRun, AgentWorkspace)
+        ],
     )
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     monkeypatch.setattr(factory_module, "_session_maker", factory)
@@ -71,7 +95,7 @@ def file_space(monkeypatch, config_overrides):
     # Only the sandbox data plane is replaced: authorization and HTTP serialization are real.
     contents = {root + "/图表.png": b"\x89PNG\r\n\x1a\n", root + "/报告.html": b"<script>test()</script>"}
 
-    def manager(workspace, action, request):
+    def manager(workspace: str, action: str, request: dict[str, str]) -> dict[str, object]:
         assert workspace == workspace_id
         assert action == "files"
         if request["operation"] == "mkdir":
@@ -109,7 +133,7 @@ def file_space(monkeypatch, config_overrides):
     engine.dispose()
 
 
-def test_ui_and_agent_receive_identical_stable_links_and_inline_bytes(file_space):
+def test_ui_and_agent_receive_identical_stable_links_and_inline_bytes(file_space: FileSpace) -> None:
     payload, root, contents, _, client = file_space
     ui = files.operate(payload.tenant_id, payload.account_id, "list", root)["entries"]
     agent = file_links.agent_lookup(payload)["entries"]
@@ -129,7 +153,7 @@ def test_ui_and_agent_receive_identical_stable_links_and_inline_bytes(file_space
     assert specific["entries"] == ui[:1]
 
 
-def test_signature_tamper_owner_mismatch_missing_file_and_deleted_chat_revoke(file_space):
+def test_signature_tamper_owner_mismatch_missing_file_and_deleted_chat_revoke(file_space: FileSpace) -> None:
     payload, root, contents, factory, client = file_space
     entry = file_links.agent_lookup(payload)["entries"][0]
     url = urlsplit(entry["download_url"]).path
@@ -146,11 +170,15 @@ def test_signature_tamper_owner_mismatch_missing_file_and_deleted_chat_revoke(fi
     assert client.get(url).status_code == 404
     contents[entry["path"]] = removed
     with factory.begin() as session:
-        session.get(WorkbenchChat, root.split("/")[1]).deleted = 1
+        chat = session.get(WorkbenchChat, root.split("/")[1])
+        assert chat is not None
+        chat.deleted = 1
     assert client.get(url).status_code == 404
 
 
-def test_configured_public_origin_is_used_without_changing_signed_identity(file_space, config_overrides):
+def test_configured_public_origin_is_used_without_changing_signed_identity(
+    file_space: FileSpace, config_overrides: Callable[..., None]
+) -> None:
     payload, _, _, _, _ = file_space
     original = file_links.agent_lookup(payload)["entries"][0]
     config_overrides(FILES_URL="https://agent.xcmggx.com")

@@ -282,6 +282,10 @@ class WorkbenchFileQuery(BaseModel):
     path: str = Field(default="conversations", min_length=1, max_length=1024)
 
 
+class WorkbenchFileLinksQuery(BaseModel):
+    path: str = Field(min_length=1, max_length=1024)
+
+
 class WorkbenchEventsQuery(BaseModel):
     cursor: str = Field(default="0-0", pattern=r"^\d+-\d+$")
 
@@ -292,6 +296,7 @@ register_schema_models(
     WorkbenchChatPayload,
     WorkbenchRunPayload,
     WorkbenchFilePayload,
+    WorkbenchFileLinksQuery,
     WorkbenchResumePayload,
     WorkbenchFeedbackPayload,
     WorkbenchRegeneratePayload,
@@ -492,12 +497,12 @@ class Files(WorkbenchResource):
 
 @console_ns.route("/workbench/files/links")
 class FileLinks(WorkbenchResource):
-    @console_ns.doc(params=query_params_from_model(WorkbenchFileQuery))
+    @console_ns.doc(params=query_params_from_model(WorkbenchFileLinksQuery))
     @console_ns.response(200, "Verified file-space links", console_ns.models[WorkbenchFileLinksResponse.__name__])
     def get(self):
         from services.workbench.file_links import lookup
 
-        query = WorkbenchFileQuery.model_validate(request.args.to_dict())
+        query = WorkbenchFileLinksQuery.model_validate(request.args.to_dict())
         return dump_response(WorkbenchFileLinksResponse, {"data": lookup(*self.owner(), query.path)})
 
 

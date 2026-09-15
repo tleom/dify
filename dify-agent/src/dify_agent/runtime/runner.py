@@ -399,7 +399,7 @@ class AgentRunRunner:
                 )
                 changes = (
                     WorkbenchFileChanges(shell_layer, activity, files_layer)
-                    if shell_layer is not None and activity is not None
+                    if shell_layer is not None and (files_layer is not None or activity is not None)
                     else None
                 )
                 if changes is not None:
@@ -461,7 +461,7 @@ class AgentRunRunner:
                             part = event.part
                             explicit = (
                                 result_metadata(part.content).get("path")
-                                if getattr(part, "tool_name", None) in {"file_create", "file_edit"}
+                                if part.tool_name in {"file_create", "file_edit"}
                                 else None
                             )
                             await changes.collect(explicit_path=explicit if isinstance(explicit, str) else None)

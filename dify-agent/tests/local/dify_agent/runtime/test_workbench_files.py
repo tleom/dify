@@ -197,7 +197,8 @@ def test_markdown_targets_and_examples(text, valid):
     assert (layer.delivery_error(text, final=True) is None) is valid
 
 
-def test_runner_observes_binary_creation_and_editing_and_exports_real_events(monkeypatch, tmp_path):
+@pytest.mark.parametrize("activity_enabled", [False, True])
+def test_runner_observes_binary_creation_and_editing_and_exports_real_events(monkeypatch, tmp_path, activity_enabled):
     calls = 0
 
     async def stream(messages, info):
@@ -206,12 +207,18 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(mon
         if calls <= 2:
             yield {0: _call("shell_run", {"script": "create" if calls == 1 else "edit"}, f"shell-{calls}")}
         elif calls == 3:
+            yield "处理完成。"
+        elif calls == 4:
             yield {0: _call("workbench_files", {}, "files")}
         else:
             yield f"文件已生成，可打开查看。[下载图片]({DOWNLOAD})\n![图片]({PREVIEW})"
 
     request, sink, _ = _setup(monkeypatch, stream)
     add_files(request)
+    if not activity_enabled:
+        request.composition.layers = [
+            layer for layer in request.composition.layers if layer.type != "dify.workbench_activity"
+        ]
     request.composition.layers.extend(
         [
             RunLayerSpec(
@@ -278,6 +285,13 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(mon
     asyncio.run(scenario())
     events = sink.events["binary"]
     assert isinstance(events[-1], RunSucceededEvent)
+    assert calls == 5
+    public_stream = "".join(
+        json.dumps(event.model_dump(mode="json"), ensure_ascii=False)
+        for event in events
+        if event.type == "pydantic_ai_event"
+    )
+    assert "处理完成。" not in public_stream and DOWNLOAD in public_stream
     observed = [
         item
         for item in _progress(events, "tool")
@@ -285,13 +299,10 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(mon
         and isinstance(item.output, dict)
         and item.output.get("source") == "workspace_change"
     ]
-    assert [(item.tool_name, item.output["path"]) for item in observed] == [
-        ("file_create", "chart.png"),
-        ("file_create", "报告.docx"),
-        ("file_edit", "报告.docx"),
-    ]
+    expected = [("file_create", "chart.png"), ("file_create", "报告.docx"), ("file_edit", "报告.docx")]
+    assert [(item.tool_name, item.output["path"]) for item in observed] == (expected if activity_enabled else [])
     target = os.environ.get("WORKBENCH_EVENT_FIXTURE")
-    if target:
+    if target and activity_enabled:
         values = [
             {"event": "workbench_activity", "_id": f"{i + 1}-0", "data": event.data.model_dump(mode="json")}
             for i, event in enumerate(events)
