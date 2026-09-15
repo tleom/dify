@@ -95,7 +95,7 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: 900, height: 650 } })
     const errors = []
     page.on('pageerror', (error) => errors.push(String(error)))
-    await page.goto('file://' + path.join(out, 'index.html'))
+    await page.goto(`file://${path.join(out, 'index.html')}`)
     await page.getByRole('button', { name: '核对' }).click()
     await page.getByRole('button', { name: '已核对' }).waitFor()
     if (errors.length) throw new Error(errors.join('\n'))
@@ -110,7 +110,7 @@ async function main() {
   zip.file('bundle.js', fs.readFileSync(path.join(out, 'bundle.js')))
   zip.file('katex.min.css', fs.readFileSync(path.join(out, 'katex.min.css')))
   for (const name of fs.readdirSync(path.join(out, 'fonts')))
-    zip.file('fonts/' + name, fs.readFileSync(path.join(out, 'fonts', name)))
+    zip.file(`fonts/${name}`, fs.readFileSync(path.join(out, 'fonts', name)))
   fs.writeFileSync(
     path.join(out, 'html-package.zip'),
     await zip.generateAsync({ type: 'nodebuffer' }),
