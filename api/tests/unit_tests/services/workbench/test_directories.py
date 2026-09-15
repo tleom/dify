@@ -39,7 +39,7 @@ def test_explicit_cross_conversation_paths_require_owned_source_and_destination(
 
     chat = SimpleNamespace(id="chat-a")
 
-    def owned_chat(_session, _tenant, _account, identifier):
+    def owned_chat(_session, _tenant, _account, identifier: str) -> SimpleNamespace:
         if identifier not in {"chat-a", "chat-b"}:
             raise NotFound()
         return SimpleNamespace(id=identifier)
@@ -80,6 +80,6 @@ def test_title_only_affects_download_filename() -> None:
     assert directories.archive_name("合同/审查:结果") == "合同审查结果.zip"
 
 
-def test_personal_root_memory_and_skills_are_valid_paths():
+def test_personal_root_memory_and_skills_are_valid_paths() -> None:
     for path in (".", "memory.md", "skills/report/SKILL.md", "shared/file.txt"):
         assert directories.resolve_path(None, "tenant", "account", path) == (".", None)

@@ -30,7 +30,8 @@ jobs:
           uv run --no-project --with pytest==9.0.2 python -m pytest
           workbench/tests/test_file_ops.py
           workbench/tests/test_file_directories.py
-          workbench/tests/test_manager_migration.py -q
+          workbench/tests/test_manager_migration.py
+          workbench/tests/test_personal_resources.py -q
 
   sandbox-runtime-unit:
     name: Sandbox Runtime Unit Tests

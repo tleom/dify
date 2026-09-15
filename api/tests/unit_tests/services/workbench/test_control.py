@@ -1,6 +1,8 @@
 """Mode commands use real SQL transactions and the existing run admission path."""
 
 import json
+from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -13,11 +15,11 @@ from tests.unit_tests.services.workbench.test_followups import queue_fixture
 queue = pytest.fixture(queue_fixture)
 
 
-def command(queue, text, key=None):
+def command(queue: SimpleNamespace, text: str, key: str | None = None) -> dict[str, Any]:
     return control.issue(queue.owner[0], queue.owner[1], queue.chat_id, command=text, request_key=key or str(uuid4()))
 
 
-def test_goal_command_idempotency_and_pause_prevent_duplicate_runs(queue):
+def test_goal_command_idempotency_and_pause_prevent_duplicate_runs(queue: SimpleNamespace) -> None:
     first = command(queue, "/goal 校验文件", "same")
     again = command(queue, "/goal 校验文件", "same")
     assert first["state"]["goal"]["id"] == again["state"]["goal"]["id"]
@@ -31,7 +33,7 @@ def test_goal_command_idempotency_and_pause_prevent_duplicate_runs(queue):
         command(queue, "/goal another", "same")
 
 
-def test_goal_waits_for_user_messages_and_resets_todos_only_at_admission(queue):
+def test_goal_waits_for_user_messages_and_resets_todos_only_at_admission(queue: SimpleNamespace) -> None:
     run = queue.send("原消息")
     queue.running(run["id"])
     ticket = queue.get(run["id"]).backend_run_id
@@ -55,7 +57,7 @@ def test_goal_waits_for_user_messages_and_resets_todos_only_at_admission(queue):
         control.agent_control(payload)
 
 
-def test_plan_review_requires_explicit_action_and_disables_goal_driver(queue):
+def test_plan_review_requires_explicit_action_and_disables_goal_driver(queue: SimpleNamespace) -> None:
     command(queue, "/plan")
     goal = command(queue, "/goal 输出报告")
     assert goal["state"]["goal"]["rounds_started"] == 0
@@ -85,7 +87,7 @@ def test_plan_review_requires_explicit_action_and_disables_goal_driver(queue):
     assert control.read(queue.owner[0], queue.owner[1], queue.chat_id)["plan"]["active"] is False
 
 
-def test_exhausted_failure_blocks_same_goal_generation(queue):
+def test_exhausted_failure_blocks_same_goal_generation(queue: SimpleNamespace) -> None:
     result = command(queue, "/goal 核验")
     queue.finish(result["state"]["goal"]["last_run_id"], "failed")
     control.settle(queue.owner[0], queue.owner[1], queue.chat_id)
