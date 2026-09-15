@@ -284,12 +284,28 @@ class AgentAppRuntimeRequestBuilder:
             from dify_agent.protocol.schemas import RunLayerSpec
 
             request.composition.layers.append(
+                RunLayerSpec(
+                    name="workbench_control",
+                    type="dify.workbench_control",
+                    deps={"execution_context": "execution_context"},
+                    config={},
+                )
+            )
+            request.composition.layers.append(
                 RunLayerSpec(name="workbench_environment", type="dify.workbench_environment", config={})
             )
             request.composition.layers.append(
                 RunLayerSpec(
                     name="workbench_files",
                     type="dify.workbench_files",
+                    deps={"execution_context": "execution_context"},
+                    config={},
+                )
+            )
+            request.composition.layers.append(
+                RunLayerSpec(
+                    name="workbench_followups",
+                    type="dify.workbench_followups",
                     deps={"execution_context": "execution_context"},
                     config={},
                 )
@@ -351,23 +367,22 @@ class AgentAppRuntimeRequestBuilder:
 
     @staticmethod
     def _upgrade_workbench_file_snapshot(request: CreateRunRequest) -> None:
-        """Add only the new stateless file reader to an otherwise identical deferred snapshot."""
+        """Add file access and follow-up delivery to an otherwise identical deferred snapshot."""
         snapshot = request.session_snapshot
-        if (
-            snapshot is None
-            or request.rebuild_layers
-            or any(layer.name == "workbench_files" for layer in snapshot.layers)
-        ):
+        if snapshot is None or request.rebuild_layers:
             return
         previous = [layer.name for layer in snapshot.layers]
         current = [layer.name for layer in request.composition.layers]
-        if previous != [name for name in current if name != "workbench_files"]:
+        additions = {"workbench_files", "workbench_followups", "workbench_control"} - set(previous)
+        if not additions or previous != [name for name in current if name not in additions]:
             return  # All other composition changes remain incompatible.
-        layers = list(snapshot.layers)
-        layers.insert(
-            current.index("workbench_files"),
-            LayerSessionSnapshot(name="workbench_files", lifecycle_state=LifecycleState.NEW, runtime_state={}),
-        )
+        existing = {layer.name: layer for layer in snapshot.layers}
+        layers = [
+            existing[name]
+            if name in existing
+            else LayerSessionSnapshot(name=name, lifecycle_state=LifecycleState.NEW, runtime_state={})
+            for name in current
+        ]
         request.session_snapshot = snapshot.model_copy(update={"layers": layers})
 
     @staticmethod

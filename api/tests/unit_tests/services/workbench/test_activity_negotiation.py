@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from controllers.console.workbench import WorkbenchRegeneratePayload, WorkbenchRunPayload
+from models.workbench import WorkbenchRun
 from services.workbench import branches, mentions, scheduler, service
 
 
@@ -19,25 +20,37 @@ def test_enqueue_freezes_only_a_negotiated_and_enabled_protocol(
     monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., None], enabled: bool, requested: int | None
 ) -> None:
     config_overrides(WORKBENCH_ACTIVITY_ENABLED=enabled)
+    monkeypatch.setattr(service, "authorize", lambda *_args: None)
     monkeypatch.setattr(
         service, "template", lambda *_args: {"soul": {}, "agent_id": "agent", "snapshot_id": "snapshot"}
     )
     monkeypatch.setattr(service, "read_chat", lambda *_args: {"version": 1, "selection": {"model": "model"}})
     monkeypatch.setattr(service, "compile_config", lambda *_args: {})
     monkeypatch.setattr(
-        service, "_chat", lambda *_args, **_kwargs: SimpleNamespace(id="chat", version=1, agent_id="agent")
+        service,
+        "_chat",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            id="chat", tenant_id="tenant", account_id="account", version=1, agent_id="agent"
+        ),
     )
     monkeypatch.setattr(mentions, "default_capabilities", lambda _soul, selection: selection)
     monkeypatch.setattr(branches, "resolve_parent", lambda *_args: {})
     session = Mock()
-    session.scalar.side_effect = [None, None, SimpleNamespace(id="revision")]
+    empty_runs: list[object] = []
+    session.scalars.return_value = empty_runs
+    session.scalar.side_effect = [None, None, None, SimpleNamespace(id="revision"), None, None]
+    monkeypatch.setattr(service.session_factory, "create_session", lambda: nullcontext(session))
     monkeypatch.setattr(
         service.session_factory, "get_session_maker", lambda: SimpleNamespace(begin=lambda: nullcontext(session))
     )
     monkeypatch.setattr(
         service,
         "run_dto",
-        lambda run: {"id": run.id, "activity_protocol": json.loads(run.payload)["activity_protocol"]},
+        lambda run: {
+            "id": run.id,
+            "status": run.status,
+            "activity_protocol": json.loads(run.payload)["activity_protocol"],
+        },
     )
     monkeypatch.setattr(scheduler, "publish", Mock())
     payload: dict[str, str | int] = {"query": "hello"}
@@ -45,7 +58,7 @@ def test_enqueue_freezes_only_a_negotiated_and_enabled_protocol(
         payload["activity_protocol"] = requested
     result = service.enqueue("tenant", "account", "chat", 1, "request", payload)
     assert result["activity_protocol"] == int(enabled and requested == 1)
-    stored = session.add.call_args.args[0]
+    stored = next(call.args[0] for call in session.add.call_args_list if isinstance(call.args[0], WorkbenchRun))
     assert json.loads(stored.payload)["activity_protocol"] == result["activity_protocol"]
 
 

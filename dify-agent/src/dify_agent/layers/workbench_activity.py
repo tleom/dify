@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 from pydantic_ai import RunContext, Tool
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.tools import ToolDefinition
+from pydantic_core import to_jsonable_python
 
 from agenton.layers import LayerConfig, NoLayerDeps, PydanticAILayer
 from dify_agent.protocol.schemas import WorkbenchActivityData, WorkbenchProgressData, WorkbenchToolData
@@ -32,7 +33,10 @@ def public_value(value: Any) -> JsonValue:
     try:
         return _JSON.validate_python(value)
     except ValueError:
-        return str(value)
+        try:
+            return _JSON.validate_python(to_jsonable_python(value))
+        except (ValueError, TypeError):
+            return str(value)
 
 
 def result_metadata(value: Any) -> dict[str, Any]:
@@ -43,6 +47,19 @@ def result_metadata(value: Any) -> dict[str, Any]:
         except (ValueError, TypeError):
             return {}
     return value if isinstance(value, dict) else {}
+
+
+def tool_result_failed(tool_name: str, output: Any, *, failed: bool = False) -> bool:
+    """Share the same business-result interpretation with the retry policy."""
+    metadata = result_metadata(output)
+    failed = failed or bool(metadata.get("error") or metadata.get("is_error") or metadata.get("isError"))
+    failed = failed or metadata.get("status") in {"error", "failed"}
+    failed = failed or (isinstance(metadata.get("exit_code"), int) and metadata["exit_code"] != 0)
+    if tool_name.startswith("knowledge_base_") and isinstance(output, str):
+        failed = failed or output.startswith(
+            ("Knowledge base access failed;", "Knowledge base search is temporarily unavailable;")
+        )
+    return failed
 
 
 def short_text(value: str, limit: int) -> str:
@@ -72,6 +89,7 @@ class WorkbenchActivityState(BaseModel):
     calls: dict[str, ActivityCall] = Field(default_factory=dict)
     jobs: dict[str, bool] = Field(default_factory=dict)
     reports_without_work: int = 0
+    needs_purpose: bool = True
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
 
@@ -109,6 +127,8 @@ class WorkbenchActivityLayer(PydanticAILayer[NoLayerDeps, object, WorkbenchActiv
             "Keep consecutive thinking and tool work in the same activity until you send a normal assistant text reply. "
             "Before related commands, begin an activity with a concise purpose title (normally 6-16 Chinese characters). "
             "When the immediate purpose changes during continuous execution, update that activity's title to the current purpose. "
+            "Always supply title when beginning or changing purpose; goal alone does not rename a title. "
+            "If you already started tool work without a report, report its actual purpose at the next opportunity. "
             "After a normal assistant reply, begin a new activity for subsequent work. "
             "Use goal for explanatory detail, and keep title a short purpose phrase without commands, counts or status labels. "
             "Update the same activity as work advances; close it after its result is checked, preserving the "
@@ -230,8 +250,10 @@ class WorkbenchActivityLayer(PydanticAILayer[NoLayerDeps, object, WorkbenchActiv
             data.action,
         ):
             self._reports[call_id] = identifier
+            state.needs_purpose = False
             return {"accepted": True, "activity_id": identifier, "revision": previous.revision}
         state.activities[identifier] = data
+        state.needs_purpose = False
         state.current_id = identifier
         self._reports[call_id] = identifier
         try:
@@ -301,18 +323,7 @@ class WorkbenchActivityLayer(PydanticAILayer[NoLayerDeps, object, WorkbenchActiv
         if binding is None:
             return
         metadata = result_metadata(output)
-        failed = failed or bool(metadata.get("error") or metadata.get("is_error") or metadata.get("isError"))
-        failed = failed or metadata.get("status") in {"error", "failed"}
-        failed = failed or (isinstance(metadata.get("exit_code"), int) and metadata["exit_code"] != 0)
-        # The knowledge layer deliberately softens transport/access errors into
-        # explicit model observations; they remain failed attempts in the UI.
-        if tool_name.startswith("knowledge_base_") and isinstance(output, str):
-            failed = failed or output.startswith(
-                (
-                    "Knowledge base access failed;",
-                    "Knowledge base search is temporarily unavailable;",
-                )
-            )
+        failed = tool_result_failed(tool_name, output, failed=failed)
         binding.state = "error" if failed else "returned"
         if metadata.get("job_id") is not None:
             binding.job_id = str(metadata["job_id"])

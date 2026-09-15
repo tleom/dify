@@ -7,7 +7,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 from pydantic_ai import ModelRetry, Tool
-from pydantic_ai.messages import RetryPromptPart, ToolReturn, ToolReturnPart
+from pydantic_ai.messages import ToolReturn, ToolReturnPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from dify_agent.layers.dify_plugin.configs import DifyPluginToolConfig, DifyPluginToolsLayerConfig
@@ -90,6 +90,34 @@ def _progress(events, kind):
 def _state(events):
     layer = next(layer for layer in events[-1].data.session_snapshot.layers if layer.name == "workbench_activity")
     return WorkbenchActivityState.model_validate(layer.runtime_state)
+
+
+def test_missing_title_is_requested_at_next_model_boundary_without_replaying_work(monkeypatch):
+    calls = 0
+    executed = []
+
+    async def work():
+        executed.append("work")
+        return "done"
+
+    async def stream(messages, info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield {0: _call("work", {}, "original")}
+        elif calls == 2:
+            assert "current tool group has no purpose title" in info.instructions
+            yield {0: _call("report_activity", {"action": "begin", "title": "重新生成并核验公式"}, "late-title")}
+        elif calls == 3:
+            assert "current tool group has no purpose title" not in info.instructions
+            yield {0: _call("report_activity", {"action": "close", "title": "核对生成文件中的公式"}, "close-title")}
+        else:
+            yield "公式已核对。"
+
+    _, _, execute = _setup(monkeypatch, stream, [Tool(work)])
+    events = asyncio.run(execute())
+    assert executed == ["work"]
+    assert [item.title for item in _progress(events, "activity")] == ["重新生成并核验公式", "核对生成文件中的公式"]
 
 
 def test_reused_provider_ids_keep_distinct_commands_and_model_goal_updates(monkeypatch):
@@ -500,7 +528,7 @@ def test_invalid_report_does_not_abort_or_repeat_business_tools(monkeypatch):
 
 
 @pytest.mark.parametrize("failure_phase", ["validation", "execution"])
-def test_retries_only_record_tools_that_reached_execution(monkeypatch, failure_phase):
+def test_retries_record_validation_errors_without_executing_invalid_calls(monkeypatch, failure_phase):
     requests = 0
     executed = []
 
@@ -517,7 +545,11 @@ def test_retries_only_record_tools_that_reached_execution(monkeypatch, failure_p
             args = {"attempt": "invalid" if failure_phase == "validation" else 1}
             yield {0: _call("work", args, "work")}
         elif requests == 2:
-            assert any(isinstance(part, RetryPromptPart) for message in messages for part in message.parts)
+            assert any(
+                isinstance(part, ToolReturnPart) and part.outcome == "failed"
+                for message in messages
+                for part in message.parts
+            )
             yield {0: _call("work", {"attempt": 2}, "work")}
         else:
             yield "done"
@@ -525,16 +557,16 @@ def test_retries_only_record_tools_that_reached_execution(monkeypatch, failure_p
     _, _, execute = _setup(monkeypatch, stream, [Tool(work)])
     events = asyncio.run(execute())
     expected_attempts = [2] if failure_phase == "validation" else [1, 2]
-    expected_stages = (
-        ["started", "returned"] if failure_phase == "validation" else ["started", "error", "started", "returned"]
-    )
+    expected_stages = ["started", "error", "started", "returned"]
     assert executed == expected_attempts
     tools = _progress(events, "tool")
     assert [item.stage for item in tools] == expected_stages
-    assert [item.input for item in tools if item.stage == "started"] == [
-        {"attempt": attempt} for attempt in expected_attempts
-    ]
-    assert len(_state(events).calls) == len(expected_attempts)
+    assert [
+        json.loads(item.input) if isinstance(item.input, str) else item.input
+        for item in tools
+        if item.stage == "started"
+    ] == [{"attempt": attempt} for attempt in (["invalid", 2] if failure_phase == "validation" else [1, 2])]
+    assert len(_state(events).calls) == 2
 
 
 def test_reporting_only_loop_is_bounded_and_does_not_create_tool_rows(monkeypatch):

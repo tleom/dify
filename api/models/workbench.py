@@ -65,3 +65,31 @@ class WorkbenchRunEvent(DefaultFieldsMixin, Base):
     sequence: Mapped[int] = mapped_column(BigInteger)
     event_key: Mapped[str] = mapped_column(String(128))
     payload: Mapped[str] = mapped_column(LongText)
+
+
+class WorkbenchControl(DefaultFieldsMixin, Base):
+    """One collaboration state per owned conversation, independent of model history."""
+
+    __tablename__ = "workbench_controls"
+    __table_args__ = (
+        UniqueConstraint("chat_id", name="wb_control_chat"),
+        Index("wb_control_active_goal", "goal_active"),
+    )
+    tenant_id: Mapped[str] = mapped_column(StringUUID)
+    account_id: Mapped[str] = mapped_column(StringUUID)
+    chat_id: Mapped[str] = mapped_column(StringUUID)
+    state: Mapped[str] = mapped_column(Text, default="{}")
+    goal_active: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+
+
+class WorkbenchCommand(DefaultFieldsMixin, Base):
+    """Idempotent user commands; results remain available after reconnect."""
+
+    __tablename__ = "workbench_commands"
+    __table_args__ = (UniqueConstraint("chat_id", "request_key", name="wb_command_idempotency"),)
+    tenant_id: Mapped[str] = mapped_column(StringUUID)
+    account_id: Mapped[str] = mapped_column(StringUUID)
+    chat_id: Mapped[str] = mapped_column(StringUUID)
+    request_key: Mapped[str] = mapped_column(String(128))
+    command: Mapped[str] = mapped_column(Text)
+    result: Mapped[str] = mapped_column(Text)

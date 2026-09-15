@@ -39,6 +39,44 @@ require using search instead of full enumeration. `complete`, `unavailable_count
 without enumeration cannot establish complete document coverage. Native Agent
 tool availability, preview limits and error propagation remain unchanged.
 
+Workbench executions can include `dify.workbench_followups`, which depends on
+`dify.execution_context`. This layer polls the authenticated inner API for
+supplements to the current workbench run and persists delivered message IDs in
+its session snapshot. The runtime injects each message at the next model boundary;
+an executing tool finishes normally. A supplement arriving during the final model
+response keeps the same native run open via Pydantic AI's pending-message drain.
+The final seal and user steering are serialized under the owning chat lock, so
+messages arriving after the seal remain in the conversation's three-message FIFO.
+Steering retains the active run's model and resources; separately queued messages
+carry their own frozen selections. Inner API credentials are server-injected.
+Steering requests include the task identity shown when the user clicks; a changed
+target leaves the message queued. Transient inner API transport errors, timeouts,
+429 and server failures retry at the same model/final boundary with cancellable
+backoff. The runtime cannot finish before it confirms the final seal, and retrying
+this control request does not repeat a business tool.
+Regeneration and edited-message regeneration create new follow-up-capable runs;
+this capability does not permit regeneration to bypass the active-task guard.
+Recovery selects each conversation's actual FIFO head before applying its batch
+limit. Only that head's predecessor can hold the queue paused; a cancelled run on
+another historical branch does not block recovery after a lost completion notice.
+
+Workbench Pause stops the native execution and holds the conversation's waiting
+messages. Its terminal fence returns captured model history and delivered steering
+IDs before the worker releases the execution lease. A blank Continue submits the
+internal query `继续` with `continue_run_id`; its response is grouped with the original
+turn in the UI, without an extra user bubble. New text instead creates a visible
+turn using the paused task's context. Either continuation precedes the existing
+three waiting messages; those resume in FIFO order after it ends. Continue keeps
+the original model and resources, while new text uses the current selection.
+Knowledge selection persists across conversations and does not count as unsent
+message content. Attachment-only messages remain valid with selected knowledge;
+the Agent can read the attachment before forming a knowledge search query.
+Blank Continue uses the original owned revision without saving or compiling the
+current draft, including when its save is pending or its version has conflicted.
+The caller and published Agent are still authorized, and execution retains its
+knowledge-access checks. New draft choices remain available after Continue or a
+lost-response retry. Skill and plugin mentions clear when a new message sends.
+
 Workbench executions additionally emit `context_status` events. Their `data.phase`
 is `usage`, `compacting`, `compacted`, or `failed`. Token counts describe the current
 request context, never cumulative billed usage. `estimated` distinguishes native
@@ -46,6 +84,28 @@ pre-request estimates from provider response usage; an unknown model window stay
 null. Compaction phases share `compaction_id` and include `before_tokens`.
 The existing tiered compactor remains responsible for rewriting history. These
 events are non-terminal; consumers that do not display context can ignore them.
+
+Compaction first clamps oversized completed message parts, then clears older
+tool results, then summarizes history while keeping a suffix selected by token
+budget. Keeping a fixed number of recent messages alone cannot bound a short
+history containing large tool arguments. The input target uses 80 percent of the
+reported model window and reserves the configured output allowance. When a
+Workbench model reports no valid window, an explicit 8,000-token history budget
+still enables compaction; it is a policy threshold, not a claimed model capacity.
+Context events keep `window_tokens=null` and report estimated current usage.
+Non-Workbench callers retain the existing unknown-window behavior.
+
+Workbench runs with a conversation shell also apply the SDK's `ToolOutputLimits`.
+Oversized tool results are stored under that conversation's
+`.cache/workbench-tool-results`, and the model receives a handle and bounded
+preview. `read_tool_result` reads selected lines, literal matches, or character
+slices of a long line without replaying the original operation. Commit verification
+hashes fixed-size chunks; line counts, literal filtering and character slices also
+stream chunks, including within a single oversized line. Stored output
+survives a new native run while the conversation sandbox remains available and
+does not appear as a generated deliverable. Failed storage returns an explicitly
+truncated result without inventing a handle. Reduction preserves business-error
+metadata so large failures still count toward the five-failure budget.
 
 The LLM layer accepts an optional `credential_ref` with `type` (`provider` or
 `model`), `id`, and optional `provider`. The API resolves it for the caller's
@@ -152,3 +212,115 @@ deferred calls are preserved; other composition changes remain incompatible.
 
 The frontend keeps context compaction in the current execution group. A normal
 assistant text reply still separates successive groups.
+
+### Workbench failure recovery and human input
+
+Workbench executions allow five consecutive failed business tool calls. Argument
+validation errors return field-specific observations to the model so it can correct
+the next call. A successful business call resets the count, including success from
+a different tool; activity reports do not consume or reset it. Execution failures
+and unknown tool calls use the same budget. The fifth failure is captured in history
+before the attempt ends. These rules are scoped to Workbench execution contexts.
+Once the fifth failure is observed, not-yet-started calls in the same batch are
+recorded explicitly as unexecuted; already-running parallel calls finish and
+retain their outcomes. Skipped calls do not reset or consume the failure count.
+
+New workbench runs persist an automatic continuation budget in their payload.
+A failed or interrupted attempt may create one child turn whose query is `继续`,
+up to three consecutive automatic turns. Each child retains the frozen configuration,
+original goal, attachments and history branch. The old native execution must be
+confirmed stopped before its successor is queued. Pausing cancels pending recovery
+and any automatic successor; a manual new turn or submitted human answer starts a
+fresh budget. Historical failures without recovery metadata are not restarted.
+Timers and successor IDs are persisted so worker restarts do not duplicate turns.
+The automatic `继续` query is issued by the backend and remains internal to the
+execution chain. The frontend groups server-linked successors under the original
+question and assistant reply, preserves each error inline, and appends subsequent
+output without a new user bubble or outline entry. The reply stays active while
+recovery is pending; final response actions appear only once the chain has stopped.
+An explicitly submitted user message, including a manual `继续`, remains visible.
+
+With `followup_protocol=1`, a chat can hold up to three waiting messages. Automatic
+recovery continues the current task before starting these messages and moves the
+queue head onto the successor's history branch. Waiting or removed messages do
+not cancel recovery. A resumed ancestor may have been created after its waiting
+descendants; recovery follows their branch relationship instead of treating that
+ancestor's newer creation time as a replacement task.
+Pausing holds the queue until an explicit continuation;
+waiting messages use the queue-removal endpoint and cannot be paused as independent
+executions. Steering requires the same frozen selection and effective configuration
+as the active task; a message with a different model or resources remains queued.
+Blank continuation retains the original configuration and question, while typed
+continuation remains a visible user message. A supplement accepted during the
+recovery delay is included once in the successor's context. The native follow-up
+hook runs before history checkpointing, and a stopped executor's fence response
+preserves both history and delivered supplement IDs. Checkpoints save those IDs
+atomically with history, including after compaction, so a killed process does not
+cause an already consumed supplement to be inserted again into its successor.
+
+An `ask_human` request receives a unique `human_input.request_id`, a server deadline
+60 seconds after the question enters the waiting state, and `server_now` for display
+clock correction. The frontend shows the remaining seconds inside the `跳过` button
+beside `发送`. Any interaction with the form cancels its countdown and persists that
+decision through `input-interaction`. `input-timeout` resumes only an untouched,
+expired request; `input-skip` explicitly skips the matching question. Both return
+the current run state and resume the same logical run without submitting defaults
+or partially entered answers. A missing answer does not grant new permissions or
+establish facts. All three endpoints enforce account, tenant and question identity.
+
+The API treats a stream without a terminal frame as a failure and tolerates brief
+Redis heartbeat outages until the last confirmed execution lease expires. Recovery
+reconciles lost leases and rechecks renewed ones before interrupting a run. Continued
+execution remains bounded by the runtime's existing model, sandbox and step limits;
+persistent external failures can still exhaust the three-turn recovery budget.
+Remote cleanup calls allow 120 seconds for a response, covering the sandbox
+manager's 90-second cleanup window while connection setup remains limited to
+10 seconds. Reconciliation reads Redis leases before opening its write transaction
+and only updates an unchanged, unlocked execution row. A delayed lease reply or
+a concurrent pause or replacement execution cannot overwrite the newer state.
+
+Remote cleanup acknowledgement is persisted against the current execution ticket
+with its fenced history. Manual continuations and promoted queue entries wait for
+that acknowledgement even if their predecessor's Redis reservation disappears.
+Cancelled, failed and interrupted tickets without acknowledgement are included in
+a rotating reconciliation scan. Older terminal records with a remote ticket and
+no proof are fenced before further work; a missing ticket before dispatch does not
+imply a remote execution. Replies for another ticket or an unknown status cannot
+confirm cleanup. A successful terminal stream records proof in its SQL status
+transaction before capacity is released.
+
+Workbench checkpoints persist history before each model request, before tool
+validation can dispatch an effect, and after successful completion. Request
+instructions are excluded, as in the normal history snapshot. Repeated identical
+history is not rewritten. The native `POST /runs/{run_id}/fence` response uses
+`FenceRunResponse` and returns history only after the executor is confirmed
+stopped; it prefers the terminal history snapshot and otherwise returns the last
+checkpoint. The API saves that history against the matching execution ticket
+before creating a continuation. Interrupted tool calls retain their uncertain
+outcome so the next attempt can inspect files or external state before retrying.
+Checkpoints share the configured Redis run retention; Redis data loss or expiry
+can still lose progress which has not yet reached the application database.
+
+Client SSE reconnection budgets count consecutive reconnects without a new event
+cursor. Receiving new progress resets the budget, allowing a long run to survive
+multiple separated disconnects while still bounding an unproductive reconnect
+loop. Redis checkpoint writes and cancellation observation tolerate connection
+and timeout errors for up to 60 seconds; persistent errors still terminate through
+the normal recovery path. Event appends are not blindly replayed after an
+ambiguous write.
+
+Personal sandbox keep-alive retries after a failed touch instead of permanently
+ending its periodic loop. Stop notifications are best effort and cannot prevent
+remote fencing or later recovery dispatch. Bounded database timer scans rotate
+past previously attempted rows, so unavailable executors or revoked accounts do
+not monopolize the recovery batch. These are local recovery mechanisms; they do
+not remove model context, per-attempt time/step, sandbox resource or external
+service limits.
+
+The integration checks in
+`tests/integration/dify_agent/runtime/test_workbench_fault_recovery.py` require an
+isolated Redis and an external restart supervisor. They exercise a killed native
+process after a completed file operation, restoration through the actual API
+history bridge, and a Redis restart during checkpoint writes and cancellation
+observation. They do not establish arbitrary external side-effect idempotency or
+replace target-environment model, worker and sandbox-manager acceptance tests.

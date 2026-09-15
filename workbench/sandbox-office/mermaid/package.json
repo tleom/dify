@@ -2,5 +2,7 @@
   "name": "workbench-mermaid-cli",
   "version": "1.0.0",
   "private": true,
-  "dependencies": { "@mermaid-js/mermaid-cli": "11.17.0" }
+  "dependencies": {
+    "@mermaid-js/mermaid-cli": "11.17.0"
+  }
 }

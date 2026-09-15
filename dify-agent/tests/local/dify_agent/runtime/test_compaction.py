@@ -10,9 +10,51 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models.test import TestModel
-from pydantic_ai_harness.compaction import ClearToolResults, SummarizingCompaction, TieredCompaction
+from pydantic_ai_harness.compaction import (
+    ClampOversizedMessages,
+    ClearToolResults,
+    SummarizingCompaction,
+    TieredCompaction,
+)
 
 from dify_agent.runtime.compaction import build_compaction_capability
+
+
+def test_oversized_completed_tool_arguments_do_not_poison_the_next_request() -> None:
+    from pydantic_ai_harness.compaction import estimate_token_count
+
+    history = [
+        ModelRequest(parts=[UserPromptPart("Finish the report without repeating completed writes")]),
+        ModelResponse(parts=[ToolCallPart("write", {"script": "x" * 100_000}, "done")]),
+        ModelRequest(parts=[ToolReturnPart("write", {"saved": True}, "done")]),
+    ]
+    capability = build_compaction_capability(context_window_tokens=10_000, model_settings=None)
+    result = Agent(TestModel(call_tools=[])).run_sync("continue", message_history=history, capabilities=[capability])
+    assert estimate_token_count(result.all_messages()) < 8_000
+    assert history[1].parts[0].args == {"script": "x" * 100_000}
+    assert any(
+        isinstance(part, ToolReturnPart) and part.content == {"saved": True}
+        for message in result.all_messages()
+        for part in message.parts
+    )
+
+
+def test_fewer_than_twenty_large_messages_still_compact_to_a_token_budget() -> None:
+    from pydantic_ai_harness.compaction import estimate_token_count
+
+    history = [ModelRequest(parts=[UserPromptPart("Finish the original task")])]
+    for index in range(6):
+        history.extend(
+            [
+                ModelResponse(parts=[TextPart(str(index) + "a" * 4_000)]),
+                ModelRequest(parts=[UserPromptPart("continue")]),
+            ]
+        )
+    capability = build_compaction_capability(context_window_tokens=3_000, model_settings=None)
+    result = Agent(TestModel(call_tools=[], custom_output_text="progress summary")).run_sync(
+        "continue", message_history=history, capabilities=[capability]
+    )
+    assert estimate_token_count(result.all_messages()) < 2_400
 
 
 def test_build_compaction_capability_uses_effective_input_budget_and_standard_tiers() -> None:
@@ -23,15 +65,16 @@ def test_build_compaction_capability_uses_effective_input_budget_and_standard_ti
 
     assert isinstance(capability, TieredCompaction)
     assert capability.target_tokens == 7_000
-    assert len(capability.tiers) == 2
-    assert isinstance(capability.tiers[0], ClearToolResults)
-    assert capability.tiers[0].keep_pairs == 3
-    assert capability.tiers[0].clear_tool_inputs is False
-    assert isinstance(capability.tiers[1], SummarizingCompaction)
-    assert capability.tiers[1].model is None
-    assert capability.tiers[1].keep_messages == 20
-    assert capability.tiers[1].preserve_first_user_message is True
-    assert capability.tiers[1].incremental is True
+    assert len(capability.tiers) == 3
+    assert isinstance(capability.tiers[0], ClampOversizedMessages)
+    assert isinstance(capability.tiers[1], ClearToolResults)
+    assert capability.tiers[1].keep_pairs == 3
+    assert capability.tiers[1].clear_tool_inputs is False
+    assert isinstance(capability.tiers[2], SummarizingCompaction)
+    assert capability.tiers[2].model is None
+    assert capability.tiers[2].keep_tokens == 3_500
+    assert capability.tiers[2].preserve_first_user_message is True
+    assert capability.tiers[2].incremental is True
 
 
 def test_build_compaction_capability_uses_default_budget_and_handles_unknown_window() -> None:

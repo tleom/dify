@@ -27,6 +27,7 @@ def create_agent(
     tools: Sequence[PydanticAITool[object]],
     output_type: OutputSpec[object] = str,
     output_retries: int | None = None,
+    tool_retries: int | None = None,
 ) -> Agent[None, object]:
     """Create the pydantic-ai agent for one run.
 
@@ -37,6 +38,8 @@ def create_agent(
     so agent construction does not need to register a separate validator.
     """
     retries: AgentRetries | None = {"output": output_retries} if output_retries is not None else None
+    if tool_retries is not None:
+        retries = {**(retries or {}), "tools": tool_retries}
     return cast(
         Agent[None, object],
         Agent(

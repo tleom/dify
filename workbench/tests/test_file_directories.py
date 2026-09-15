@@ -31,14 +31,16 @@ class FileOpsTest(unittest.TestCase):
     def test_directory_archive_and_version_checked_delete(self):
         self.upload(self.folder + '/材料.txt', '中文材料'.encode())
         (self.root / self.folder / 'empty').mkdir()
-        row = self.op('list', 'conversations')['entries'][0]
+        listing = self.op('list', 'conversations')['entries'][0]
+        self.assertIsNone(listing['version'])
+        row = self.op('stat', self.folder)
         result = self.op('get', self.folder)
         with zipfile.ZipFile(io.BytesIO(base64.b64decode(result['data']))) as archive:
             self.assertEqual(archive.read('材料.txt').decode(), '中文材料')
             self.assertIn('empty/', archive.namelist())
         self.upload(self.folder + '/new.txt')
         self.assertTrue(self.op('delete', self.folder, version=row['version'])['conflict'])
-        row = self.op('list', 'conversations')['entries'][0]
+        row = self.op('stat', self.folder)
         self.assertTrue(self.op('delete', self.folder, version=row['version'])['deleted'])
         self.assertFalse((self.root / self.folder).exists())
         self.op('mkdir', self.folder)
@@ -50,8 +52,8 @@ class FileOpsTest(unittest.TestCase):
         (self.root / self.folder / 'link').symlink_to(foreign)
         with self.assertRaises((ValueError, OSError)):
             self.op('get', self.folder)
-        row = self.op('list', 'conversations')['entries'][0]
-        self.op('delete', self.folder, version=row['version'])
+        row = self.op('stat', self.folder)
+        self.assertTrue(self.op('delete', self.folder, version=row['version'])['deleted'])
         self.assertEqual(foreign.read_text(), 'protected')
 
     def test_traversal_and_workspace_root_mutation_rejected(self):

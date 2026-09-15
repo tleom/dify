@@ -178,7 +178,7 @@ def test_signature_tamper_owner_mismatch_missing_file_and_deleted_chat_revoke(fi
         file_links.agent_lookup(payload.model_copy(update={"account_id": str(uuid4())}))
     with pytest.raises(NotFound):
         file_links.agent_lookup(payload.model_copy(update={"path": "missing.png"}))
-    with pytest.raises(BadRequest, match="只能查询"):
+    with pytest.raises(NotFound, match="不属于当前用户"):
         file_links.agent_lookup(payload.model_copy(update={"path": "conversations/another/file.png"}))
     removed = contents.pop(entry["path"])
     assert client.get(url).status_code == 404

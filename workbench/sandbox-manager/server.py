@@ -89,6 +89,8 @@ def ensure(key):
                    "-e", "PATH=/opt/user-env/current/python/bin:/opt/office/python/bin:/opt/user-env/current/node/node_modules/.bin:/opt/office/node/node_modules/.bin:/usr/local/bin:/usr/bin:/bin",
                    "-e", "NODE_PATH=/opt/user-env/current/node/node_modules:/opt/office/node/node_modules", IMAGE)
         docker("start", name)
+        docker("exec", "--user", "0", name, "python", "-c",
+               "import os; os.makedirs('/opt/workbench-global', mode=0o755, exist_ok=True)")
         touch(key)
         return {"endpoint": "http://" + name + ":5004", "auth_token": token}
 
@@ -142,6 +144,25 @@ def operation(key, action, payload):
             output = json.loads(result.stdout or "{}")
             if result.returncode and not output.get("conflict"):
                 raise ValueError(output.get("error", "File operation failed"))
+            return output
+    if action in ("personal-resources", "global-resources"):
+        with lock(key):
+            ensure(key)
+            if action == "personal-resources" and payload.get("operation") == "global_install":
+                raise ValueError("Global resources are read-only")
+            if action == "global-resources" and payload.get("operation") != "global_install":
+                raise ValueError("Unsupported global resource operation")
+            helper = Path(__file__).with_name("file_ops.py").read_text()
+            script = Path(__file__).with_name("resource_ops.py").read_text()
+            source = (
+                "import types,sys; helper=types.ModuleType('file_ops'); exec(" + repr(helper)
+                + ",helper.__dict__); sys.modules['file_ops']=helper; exec(" + repr(script) + ")"
+            )
+            result = docker("exec", "--user", "0" if action == "global-resources" else "1000", "-i",
+                            name, "python", "-c", source, stdin=json.dumps(payload), check=False)
+            output = json.loads(result.stdout or "{}")
+            if result.returncode and not output.get("conflict"):
+                raise ValueError(output.get("error", "Resource operation failed"))
             return output
     if action == "environment":
         with lock(key):

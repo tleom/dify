@@ -25,6 +25,9 @@ type Journal = tuple[sessionmaker[Session], str, str, str, str]
 
 @pytest.fixture
 def journal(monkeypatch: pytest.MonkeyPatch) -> Iterator[Journal]:
+    from extensions.ext_redis import redis_client
+
+    monkeypatch.setattr(redis_client, "_client", MagicMock())
     engine = create_engine("sqlite://")
     TypeBase.metadata.create_all(
         engine,
@@ -36,6 +39,15 @@ def journal(monkeypatch: pytest.MonkeyPatch) -> Iterator[Journal]:
                 WorkbenchRunEvent,
                 AgentWorkspaceBinding,
             )
+        ],
+    )
+    from models.workbench import WorkbenchCommand, WorkbenchControl
+
+    WorkbenchControl.metadata.create_all(
+        engine,
+        tables=[
+            WorkbenchControl.metadata.tables[model.__tablename__]
+            for model in (WorkbenchControl, WorkbenchCommand, WorkbenchRunEvent)
         ],
     )
     factory = sessionmaker(bind=engine, expire_on_commit=False)

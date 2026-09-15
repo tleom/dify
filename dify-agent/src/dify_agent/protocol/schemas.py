@@ -225,6 +225,15 @@ class CancelRunResponse(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
 
+class FenceRunResponse(BaseModel):
+    """Stopped execution, recoverable history, and delivered follow-up context."""
+
+    run_id: str
+    status: RunStatus
+    history: dict[str, JsonValue] | None = None
+    steering_delivered_ids: list[str] | None = None
+
+
 class RunStatusResponse(BaseModel):
     """Current server-side status for one run."""
 
@@ -503,6 +512,7 @@ __all__ = [
     "BaseRunEvent",
     "CancelRunRequest",
     "CancelRunResponse",
+    "FenceRunResponse",
     "ContextStatusData",
     "ContextStatusRunEvent",
     "WorkbenchActivityData",

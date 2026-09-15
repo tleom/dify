@@ -284,7 +284,8 @@ class DifyShellLayer(PydanticAILayer[DifyShellLayerDeps, object, DifyShellLayerC
                 "Use these explicit tools for file changes instead of shell heredocs or escaped replacement scripts. "
                 "For long scripts, save short sections with these file tools, then execute a short shell_run command. "
                 "Pass the declared fields directly as JSON, without an extra arguments wrapper. "
-                "Use paths in the conversation directory and read existing text before editing."
+                "Default to paths in the conversation directory. When the user explicitly requests another location, "
+                "use its absolute path under /workspace. Read existing text before editing."
             )
         is_build_draft = (
             execution_context is not None and execution_context.config.agent_config_version_kind == "build_draft"

@@ -37,11 +37,14 @@ class MigrationTests(unittest.TestCase):
 
     def test_running_previous_image_is_not_interrupted(self):
         calls = self.scenario(True, True)
-        self.assertEqual([args[0] for args, _ in calls], ['inspect', 'start'])
+        self.assertEqual([args[0] for args, _ in calls], ['inspect', 'start', 'exec'])
+        preparation = calls[-1][0]
+        self.assertEqual(preparation[1:3], ('--user', '0'))
+        self.assertIn("os.makedirs('/opt/workbench-global', mode=0o755, exist_ok=True)", preparation[-1])
 
     def test_current_image_uses_existing_container(self):
         calls = self.scenario(True, False, True)
-        self.assertEqual([args[0] for args, _ in calls], ['inspect', 'start'])
+        self.assertEqual([args[0] for args, _ in calls], ['inspect', 'start', 'exec'])
 
     def test_stopped_previous_image_retains_container_and_volumes(self):
         calls = self.scenario(True)

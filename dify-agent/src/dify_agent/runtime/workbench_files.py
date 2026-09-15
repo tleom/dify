@@ -16,9 +16,10 @@ from dify_agent.protocol.schemas import WorkbenchToolData
 from dify_agent.runtime.workbench_activity import WorkbenchActivityCapability
 
 SNAPSHOT_SCRIPT = """
-import json, os, stat
+import json, os, stat, sys
 from pathlib import Path
 root = Path.cwd().resolve()
+prefix = sys.argv[1] if len(sys.argv) > 1 else ''
 files = {}
 # TMPDIR points at the conversation directory. Browser and Office profiles are
 # runtime housekeeping, not generated deliverables or report-building scripts.
@@ -53,7 +54,7 @@ for directory, names, filenames in os.walk(root, followlinks=False):
             continue
         if len(files) >= 10000:
             raise RuntimeError('Conversation file inventory exceeds 10000 files')
-        files[path.relative_to(root).as_posix()] = [value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_ino]
+        files[prefix + path.relative_to(root).as_posix()] = [value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_ino]
 print(json.dumps(files, ensure_ascii=False))
 """
 
@@ -68,8 +69,12 @@ class WorkbenchFileChanges:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def snapshot(self) -> dict[str, list[int]]:
+        root = self.shell._require_workspace_cwd().rstrip("/")
+        prefix = root.removeprefix("/workspace/") + "/" if root.startswith("/workspace/") else ""
         result = await self.shell.run_remote_script_complete(
-            "python3 -c " + shlex.quote(SNAPSHOT_SCRIPT), timeout=15, max_output_bytes=4 * 1024 * 1024
+            "python3 -c " + shlex.quote(SNAPSHOT_SCRIPT) + " " + shlex.quote(prefix),
+            timeout=15,
+            max_output_bytes=4 * 1024 * 1024,
         )
         value = json.loads(result.output)
         if not isinstance(value, dict) or any(not isinstance(item, list) or len(item) != 4 for item in value.values()):
@@ -77,6 +82,9 @@ class WorkbenchFileChanges:
         return value
 
     async def start(self) -> None:
+        root = self.shell._require_workspace_cwd().rstrip("/")
+        if self.files is not None:
+            self.files.bind_directory(root.removeprefix("/workspace/") + "/" if root.startswith("/workspace/") else "")
         self.previous = await self.snapshot()
         if self.files is not None:
             removed = self.files.runtime_state.changed_paths - self.previous.keys()
@@ -95,7 +103,9 @@ class WorkbenchFileChanges:
                 self.previous = current
                 return
             root = self.shell._require_workspace_cwd().rstrip("/")
-            explicit = explicit_path.removeprefix(root + "/") if explicit_path else None
+            explicit = explicit_path.removeprefix("/workspace/") if explicit_path else None
+            if explicit_path and not explicit_path.startswith("/") and root.startswith("/workspace/"):
+                explicit = root.removeprefix("/workspace/") + "/" + explicit_path
             for path in changed:
                 if path == explicit:
                     continue

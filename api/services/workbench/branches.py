@@ -28,6 +28,7 @@ def chat_runs(session, chat):
                 WorkbenchRun.chat_id == chat.id,
                 WorkbenchRun.tenant_id == chat.tenant_id,
                 WorkbenchRun.account_id == chat.account_id,
+                WorkbenchRun.status.not_in(("discarded", "steered")),
             )
             .order_by(WorkbenchRun.created_at, WorkbenchRun.id)
         )
@@ -89,19 +90,23 @@ def resolve_parent(session, chat, payload):
 def output_history(session, parent):
     """Read the selected run's captured native runtime history."""
     seen = set()
+    from services.workbench.followups import carry_unseen_history
+
+    parents: list[dict[str, object]] = []
     while parent.id not in seen:
         seen.add(parent.id)
         data = json.loads(parent.payload)
+        parents.insert(0, data)
         if "output_history" in data:
-            return data["output_history"]
+            return carry_unseen_history(data["output_history"], parents)
         if parent.status not in {"failed", "cancelled", "interrupted"}:
             break
         if "input_history" in data:
-            return data["input_history"]
+            return carry_unseen_history(data["input_history"], parents)
         # A task stopped in the queue has no snapshot; retain its selected ancestor.
         parent_id = data.get("branch_parent_run_id")
         if not parent_id:
-            return None
+            return carry_unseen_history(None, parents)
         ancestor = session.scalar(
             select(WorkbenchRun).where(
                 WorkbenchRun.id == parent_id,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shlex
 import time
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from dify_agent.runtime_backend.protocols import (
     RuntimeLease,
 )
 from dify_agent.runtime_backend.shellctl import ShellctlRuntimeLease, run_shellctl_control_command
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -104,7 +107,8 @@ class WorkbenchExecutionBindingBackend:
         lease.layout = RuntimeLayout(
             home_dir=lease.layout.home_dir, workspace_dir="/workspace/conversations/" + binding
         )
-        # Restrict every shell process to the current conversation, including absolute paths.
+        # The container is user-owned; cwd remains conversation-local. Global
+        # packages live outside /workspace under a root-owned read-only prefix.
         control = backend._control_lease(raw_ref)
         temporary = lease.layout.home_dir + "/tmp"
         try:
@@ -121,20 +125,24 @@ class WorkbenchExecutionBindingBackend:
             workspace_dir=lease.layout.workspace_dir,
             default_cwd=lease.layout.workspace_dir,
             default_env={
-                "SHELLCTL_LANDLOCK_RW_PATHS": lease.layout.workspace_dir + "," + temporary,
+                "SHELLCTL_LANDLOCK_RW_PATHS": "/workspace," + temporary,
                 "TMPDIR": temporary,
                 "TMP": temporary,
                 "TEMP": temporary,
-                "SHELLCTL_LANDLOCK_RO_PATHS": "/usr,/bin,/sbin,/lib,/lib64,/etc,/proc,/opt/dify-agent-tools,/opt/homebrew,/snap,/opt/user-env,/opt/office,/opt/google/chrome",
+                "SHELLCTL_LANDLOCK_RO_PATHS": "/usr,/bin,/sbin,/lib,/lib64,/etc,/proc,/opt/dify-agent-tools,/opt/homebrew,/snap,/opt/user-env,/opt/office,/opt/google/chrome,/opt/workbench-global",
             },
         )
 
-        async def pulse():
-            while True:
-                await asyncio.sleep(30)
-                await self._manager(workspace, "touch")
+        return WorkbenchRuntimeLease(lease, asyncio.create_task(self._keep_alive(workspace)), workspace, binding)
 
-        return WorkbenchRuntimeLease(lease, asyncio.create_task(pulse()), workspace, binding)
+    async def _keep_alive(self, workspace: str) -> None:
+        """Keep retrying safe touch requests after a transient manager outage."""
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await self._manager(workspace, "touch")
+            except Exception:
+                logger.warning("Workbench sandbox keepalive failed; will retry: %s", workspace, exc_info=True)
 
     async def release(self, lease: RuntimeLease) -> None:
         if not isinstance(lease, WorkbenchRuntimeLease):

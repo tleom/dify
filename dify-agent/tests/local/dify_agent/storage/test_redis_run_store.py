@@ -118,6 +118,9 @@ class FakeRedis:
             return entries[:count]
         return entries
 
+    async def xrevrange(self, key: str, *, count: int | None = None):
+        return list(reversed(self.streams.get(key, [])))[:count]
+
     async def expire(self, key: str, seconds: int) -> bool:
         self.commands.append(("expire", key, seconds))
         return True
@@ -395,6 +398,40 @@ def test_wait_for_cancellation_ignores_public_events() -> None:
     assert asyncio.run(scenario()).reason == "cancelled"
 
 
+def test_fenced_state_recovers_terminal_history_and_consumed_followups():
+    redis = FakeRedis()
+    store = RedisRunStore(redis, prefix="test")  # pyright: ignore[reportArgumentType]
+    snapshot = CompositorSessionSnapshot(
+        layers=[
+            LayerSessionSnapshot(
+                name="history", lifecycle_state=LifecycleState.SUSPENDED, runtime_state={"messages": []}
+            ),
+            LayerSessionSnapshot(
+                name="workbench_followups",
+                lifecycle_state=LifecycleState.SUSPENDED,
+                runtime_state={"seen_ids": ["message-2", "message-1"]},
+            ),
+        ]
+    )
+
+    async def scenario():
+        assert await store.get_fenced_state("run-1") == {}
+        await store.append_event(RunStartedEvent(run_id="run-1"))
+        assert await store.get_fenced_state("run-1") == {}
+        await store.append_event(
+            RunCancelledEvent(
+                run_id="run-1",
+                data=RunCancelledEventData(session_snapshot=snapshot),
+            )
+        )
+        assert await store.get_fenced_state("run-1") == {
+            "history": {"messages": []},
+            "steering_delivered_ids": ["message-1", "message-2"],
+        }
+
+    asyncio.run(scenario())
+
+
 def test_append_event_serializes_typed_event_without_id_and_expires_run_keys() -> None:
     redis = FakeRedis()
     store = RedisRunStore(redis, prefix="test", run_retention_seconds=60)  # pyright: ignore[reportArgumentType]
@@ -528,3 +565,91 @@ def test_iter_events_ends_after_live_terminal_event(terminal_type: str) -> None:
         return event.type
 
     assert asyncio.run(scenario()) == terminal_type
+
+
+def test_history_checkpoint_survives_missing_terminal_and_prefers_complete_history():
+    from agenton_collections.layers.pydantic_ai import PydanticAIHistoryRuntimeState
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    redis = FakeRedis()
+    store = RedisRunStore(redis, prefix="test", run_retention_seconds=60)
+    partial = PydanticAIHistoryRuntimeState(messages=[ModelRequest(parts=[UserPromptPart("partial")])])
+    complete = PydanticAIHistoryRuntimeState(messages=[ModelRequest(parts=[UserPromptPart("complete")])])
+
+    async def check():
+        await store.checkpoint_history("native", partial.model_dump_json())
+        assert await store.get_history_checkpoint("native") == partial.model_dump(mode="json")
+        terminal = RunSucceededEvent(
+            run_id="native",
+            data=RunSucceededEventData(
+                output="done",
+                session_snapshot=CompositorSessionSnapshot(
+                    layers=[
+                        LayerSessionSnapshot(
+                            name="history",
+                            lifecycle_state=LifecycleState.SUSPENDED,
+                            runtime_state=complete.model_dump(mode="json"),
+                        )
+                    ]
+                ),
+            ),
+        )
+        redis._append_stream_entry("test:runs:native:events", {"payload": terminal.model_dump_json()})
+        assert await store.get_history_checkpoint("native") == complete.model_dump(mode="json")
+
+    asyncio.run(check())
+    assert ("set", "test:history:native", partial.model_dump_json(), 60) in redis.commands
+
+
+def test_transient_redis_failure_does_not_lose_checkpoint_or_cancellation(monkeypatch):
+    from unittest.mock import AsyncMock
+    from redis.exceptions import ConnectionError as RedisConnectionError
+    from dify_agent.storage import redis_run_store as store_module
+
+    redis = FakeRedis()
+    store = RedisRunStore(redis, prefix="test")
+    setter = AsyncMock(side_effect=[RedisConnectionError("temporary"), None])
+    intent = RunCancellationIntent(reason="user", message=None, requested_at=utc_now())
+    reader = AsyncMock(
+        side_effect=[
+            RedisConnectionError("temporary"),
+            [
+                ("intent", [("1-0", {"payload": intent.model_dump_json()})]),
+            ],
+        ]
+    )
+    monkeypatch.setattr(redis, "set", setter)
+    monkeypatch.setattr(redis, "xread", reader)
+    monkeypatch.setattr(store_module.asyncio, "sleep", AsyncMock())
+
+    async def check():
+        await store.checkpoint_history("native", '{"messages":[]}')
+        assert await store.wait_for_cancellation("native") == intent
+
+    asyncio.run(check())
+    assert setter.await_count == reader.await_count == 2
+
+
+def test_fenced_state_recovers_compacted_history_and_delivery_cursor_after_process_loss():
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    from dify_agent.protocol.schemas import RunCancelledEvent, RunCancelledEventData
+    from dify_agent.runtime.workbench_checkpoint import WorkbenchHistoryCheckpoint
+
+    redis = FakeRedis()
+    store = RedisRunStore(redis, prefix="test")
+    checkpoint = WorkbenchHistoryCheckpoint(sink=store, run_id="native", seen_ids={"accepted-change"})
+
+    async def check():
+        await checkpoint.save([ModelRequest(parts=[UserPromptPart("压缩后的进度摘要")])])
+        # A dead process has no terminal snapshot. Fencing records cancellation
+        # without one, so both values must come from the same checkpoint write.
+        event = RunCancelledEvent(run_id="native", data=RunCancelledEventData())
+        redis._append_stream_entry("test:runs:native:events", {"payload": event.model_dump_json()})
+        state = await store.get_fenced_state("native")
+        assert state["steering_delivered_ids"] == ["accepted-change"]
+        assert state["history"]["messages"][0]["parts"][0]["content"] == "压缩后的进度摘要"
+        assert not state["history"]["messages"][0].get("metadata")
+        assert await store.get_history_checkpoint("native") == state["history"]
+
+    asyncio.run(check())

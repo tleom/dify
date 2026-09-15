@@ -1,9 +1,8 @@
 """Connect workbench activity state to the installed Pydantic AI lifecycle."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.messages import (
     FunctionToolResultEvent,
     ModelResponse,
@@ -14,7 +13,7 @@ from pydantic_ai.messages import (
     ThinkingPartDelta,
     ToolReturnPart,
 )
-from pydantic_ai.models import ModelRequestContext
+from pydantic_ai.models import InstructionPart, ModelRequestContext
 from pydantic_ai.tools import RunContext
 
 from dify_agent.layers.workbench_activity import TOOL_NAME, WorkbenchActivityLayer
@@ -27,7 +26,6 @@ class WorkbenchActivityCapability(AbstractCapability[None]):
     layer: WorkbenchActivityLayer
     sink: RunEventSink
     run_id: str
-    invalid_calls: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
         self.layer._native_run_id = self.run_id
@@ -35,6 +33,28 @@ class WorkbenchActivityCapability(AbstractCapability[None]):
 
     async def emit(self, data: WorkbenchProgressData) -> None:
         await self.sink.append_event(WorkbenchActivityRunEvent(run_id=self.run_id, data=data))
+
+    async def before_model_request(self, ctx, request_context):
+        state = self.layer.runtime_state
+        if (
+            self.layer.config.enabled
+            and state.needs_purpose
+            and state.calls
+            and state.reports_without_work < self.layer.config.max_reports_without_work
+        ):
+            # A missing report must not cancel/replay a business tool. Remind the
+            # same model at its next boundary; the title is authored with context.
+            params = request_context.model_request_parameters
+            params.instruction_parts = [
+                *(params.instruction_parts or []),
+                InstructionPart(
+                    content="The current tool group has no purpose title. Use report_activity(action='begin', title=...) "
+                    "to briefly name the actual work you are doing, in the user's language. Supply a concrete purpose "
+                    "rather than '执行任务'. Then continue the existing task without repeating completed operations.",
+                    dynamic=True,
+                ),
+            ]
+        return request_context
 
     async def after_model_request(
         self,
@@ -47,7 +67,6 @@ class WorkbenchActivityCapability(AbstractCapability[None]):
         return response
 
     async def before_tool_execute(self, ctx, *, call, tool_def, args):
-        self.invalid_calls.pop(call.tool_name, None)
         await self.layer.start_call(call, args)
         return args
 
@@ -59,19 +78,8 @@ class WorkbenchActivityCapability(AbstractCapability[None]):
         return args
 
     async def on_tool_validate_error(self, ctx, *, call, tool_def, args, error):
-        if call.tool_name in {"shell_run", "file_create", "file_edit"}:
-            count = self.invalid_calls.get(call.tool_name, 0) + 1
-            self.invalid_calls[call.tool_name] = count
-            message = (
-                "工具参数无效，本次操作未执行。请直接提供工具要求的 JSON 字段，不要嵌套 arguments。"
-                "长脚本请分段使用 file_create / file_edit 保存，再通过 shell_run 执行简短命令。"
-            )
-            await self.layer.start_call(call, args)
-            if count >= 3:
-                await self.layer.finish_call(call.tool_call_id, call.tool_name, {"error": message}, failed=True)
-                raise ValueError("连续三次工具参数无效，操作未执行。请缩短或拆分脚本后重试。") from error
-            raise ToolFailed(message) from error
         if call.tool_name != TOOL_NAME:
+            await self.layer.start_call(call, args)
             raise error
         # A malformed progress report is a no-op tool result, not an Agent retry
         # that can spend the business task's retry budget or repeat side effects.
@@ -94,6 +102,7 @@ class WorkbenchActivityCapability(AbstractCapability[None]):
                 ),
             )
         if text_delta:
+            self.layer.runtime_state.needs_purpose = True
             await self.emit(
                 WorkbenchNarrativeData(
                     workbench_run_id=self.layer.config.workbench_run_id,

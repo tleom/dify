@@ -21,6 +21,7 @@ from dify_agent.protocol.schemas import (
     CancelRunResponse,
     CreateRunRequest,
     CreateRunResponse,
+    FenceRunResponse,
     RunEventsResponse,
     RunStatusResponse,
 )
@@ -67,17 +68,22 @@ def create_runs_router(
             error_type=record.error_type,
         )
 
-    @router.post("/{run_id}/fence")
-    async def fence_run(run_id: str, store: Annotated[RedisRunStore, Depends(store_dep)]):
+    @router.post("/{run_id}/fence", response_model=FenceRunResponse)
+    async def fence_run(run_id: str, store: Annotated[RedisRunStore, Depends(store_dep)]) -> FenceRunResponse:
         from uuid import UUID
+
         try:
             normalized = str(UUID(run_id))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid execution ticket") from exc
         status = await store.fence_run(normalized)
         from dify_agent.runtime.workbench_recovery import recover_fenced_run
+
         status = await recover_fenced_run(store, normalized, status)
-        return {"run_id": normalized, "status": status}
+        state = await store.get_fenced_state(normalized) if status != "running" else {}
+        if status != "running" and state.get("history") is None:
+            state["history"] = await store.get_history_checkpoint(normalized)
+        return FenceRunResponse(run_id=normalized, status=status, **state)
 
     @router.post("/{run_id}/cancel", response_model=CancelRunResponse)
     async def cancel_run(

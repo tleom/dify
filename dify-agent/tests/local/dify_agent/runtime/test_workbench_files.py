@@ -367,7 +367,7 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(
         return {"done": True, "exit_code": 0}
 
     monkeypatch.setattr(DifyShellLayer, "run_remote_script_complete", remote)
-    monkeypatch.setattr(DifyShellLayer, "_require_workspace_cwd", lambda self: tmp_path.as_posix())
+    monkeypatch.setattr(DifyShellLayer, "_require_workspace_cwd", lambda self: "/workspace/conversations/chat")
     monkeypatch.setattr(DifyShellLayer, "_tool_run", shell_run)
     profile = RuntimeBackendProfile(
         home_snapshots=cast(HomeSnapshotBackend, object()),
@@ -392,7 +392,10 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(
                 if identifier == "binary-resume":
                     snapshot = sink.events["binary"][-1].data.session_snapshot
                     pending = next(layer for layer in snapshot.layers if layer.name == "workbench_files")
-                    assert set(pending.runtime_state["changed_paths"]) == {"chart.png", "报告.docx"}
+                    assert set(pending.runtime_state["changed_paths"]) == {
+                        "conversations/chat/chart.png",
+                        "conversations/chat/报告.docx",
+                    }
                     request.session_snapshot = snapshot
                     request.deferred_tool_results = DeferredToolResultsPayload(calls={"env": {"status": "completed"}})
                 await AgentRunRunner(
@@ -421,7 +424,11 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(
         and isinstance(item.output, dict)
         and item.output.get("source") == "workspace_change"
     ]
-    expected = [("file_create", "chart.png"), ("file_create", "报告.docx"), ("file_edit", "报告.docx")]
+    expected = [
+        ("file_create", "conversations/chat/chart.png"),
+        ("file_create", "conversations/chat/报告.docx"),
+        ("file_edit", "conversations/chat/报告.docx"),
+    ]
     assert [(item.tool_name, item.output["path"]) for item in observed] == (expected if activity_enabled else [])
     target = os.environ.get("WORKBENCH_EVENT_FIXTURE")
     if target and activity_enabled and not suspend:
@@ -509,6 +516,7 @@ def test_file_changes_require_a_new_lookup_after_a_previous_failure(failure):
     layer = WorkbenchFilesLayer(config=LayerConfig(), inner_api_url="https://api.example.test", inner_api_key="")
     layer.bind_deps({"execution_context": context})
     calls = 0
+    layer.bind_directory("conversations/chat/")
 
     def transport(request):
         nonlocal calls
@@ -538,7 +546,7 @@ def test_file_changes_require_a_new_lookup_after_a_previous_failure(failure):
         async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
             tool = (await layer.get_tools(http_client=client))[0]
             await tool.function(None, path="chart.png")
-            layer.record_changes(["chart.png"])
+            layer.record_changes(["conversations/chat/chart.png"])
             assert layer.delivery_error("文件下载受阻。", final=True) is not None
             await tool.function(None, path="chart.png")
             assert layer.delivery_error(f"[下载]({DOWNLOAD})", final=True) is None

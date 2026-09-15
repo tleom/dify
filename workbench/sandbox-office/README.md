@@ -4,18 +4,18 @@
 
 ## 内置能力
 
-| 工作 | 工具与库 |
-| --- | --- |
-| Word 生成、模板填充、合并 | python-docx、docxtpl、docxcompose、Node docx、Mammoth、LibreOffice Writer |
-| Excel 读写、样式、图表、公式重算 | openpyxl、XlsxWriter、pandas、python-calamine、xlrd、ExcelJS、LibreOffice Calc |
-| 演示文稿 | python-pptx、PptxGenJS、LibreOffice Impress |
-| PDF 提取、合并、分页、渲染 | PyMuPDF、pypdf、pdfplumber、pikepdf、ReportLab、Poppler、qpdf |
-| 数据分析与计算 | NumPy、SciPy、pandas、DuckDB、PyArrow、numpy-financial、SQLite |
-| 图表及关系图 | Matplotlib、Seaborn、Plotly + Kaleido、Altair + vl-convert-python、ECharts、D3、NetworkX、Graphviz、pydot、Mermaid CLI |
-| SVG、图片与缩略图 | Pillow、CairoSVG、svglib、resvg、Sharp、librsvg、ImageMagick |
-| HTML、Markdown 和排版打印 | Chrome、Playwright、WeasyPrint、BeautifulSoup、lxml、html5lib、cssselect、Cheerio、Markdown-it、highlight.js、KaTeX |
-| 前端页面构建 | React、TypeScript、esbuild、Tailwind CSS CLI、Sass |
-| 其他办公材料 | extract-msg、striprtf、cn2an、python-magic、Pandoc、antiword、7-Zip、JSZip、ExifTool |
+| 工作                             | 工具与库                                                                                                               |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Word 生成、模板填充、合并        | python-docx、docxtpl、docxcompose、Node docx、Mammoth、LibreOffice Writer                                              |
+| Excel 读写、样式、图表、公式重算 | openpyxl、XlsxWriter、pandas、python-calamine、xlrd、ExcelJS、LibreOffice Calc                                         |
+| 演示文稿                         | python-pptx、PptxGenJS、LibreOffice Impress                                                                            |
+| PDF 提取、合并、分页、渲染       | PyMuPDF、pypdf、pdfplumber、pikepdf、ReportLab、Poppler、qpdf                                                          |
+| 数据分析与计算                   | NumPy、SciPy、pandas、DuckDB、PyArrow、numpy-financial、SQLite                                                         |
+| 图表及关系图                     | Matplotlib、Seaborn、Plotly + Kaleido、Altair + vl-convert-python、ECharts、D3、NetworkX、Graphviz、pydot、Mermaid CLI |
+| SVG、图片与缩略图                | Pillow、CairoSVG、svglib、resvg、Sharp、librsvg、ImageMagick                                                           |
+| HTML、Markdown 和排版打印        | Chrome、Playwright、WeasyPrint、BeautifulSoup、lxml、html5lib、cssselect、Cheerio、Markdown-it、highlight.js、KaTeX    |
+| 前端页面构建                     | React、TypeScript、esbuild、Tailwind CSS CLI、Sass                                                                     |
+| 其他办公材料                     | extract-msg、striprtf、cn2an、python-magic、Pandoc、antiword、7-Zip、JSZip、ExifTool                                   |
 
 实际版本可读取 `/opt/office/requirements.lock.txt`、`/opt/office/node/package.json`、`/opt/office/system-packages.txt`。用户自己的 Python/Node 环境仍优先使用，内置依赖作为共享的只读基础环境。
 

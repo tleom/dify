@@ -10,7 +10,7 @@ from typing import cast
 import httpx
 from celery import shared_task
 from flask import Flask, current_app
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from werkzeug.local import LocalProxy
 
@@ -23,7 +23,7 @@ from models import Account
 from models.model import App, AppMode
 from models.workbench import WorkbenchChat, WorkbenchRun
 from services.app_task_service import AppTaskService
-from services.workbench import maintenance, scheduler
+from services.workbench import maintenance, recovery, scheduler
 from services.workbench import runtime as workbench_runtime
 from services.workbench.event_log import append_event, append_locked, notify, uses_journal
 from services.workbench.service import authorize
@@ -36,14 +36,21 @@ def event(run_id, payload):
 
 
 def stop_native(run_id, account_id):
-    task_id = redis_client.get(scheduler.PREFIX + "task:" + run_id)
-    if task_id:
-        task_id = task_id.decode() if isinstance(task_id, bytes) else task_id
-        AppTaskService.stop_task(task_id, InvokeFrom.EXPLORE, account_id, AppMode.AGENT)
+    # This notification is best effort; the durable remote fence below remains
+    # authoritative even when Redis or the old API task is no longer available.
+    try:
+        task_id = redis_client.get(scheduler.PREFIX + "task:" + run_id)
+        if task_id:
+            task_id = task_id.decode() if isinstance(task_id, bytes) else task_id
+            AppTaskService.stop_task(task_id, InvokeFrom.EXPLORE, account_id, AppMode.AGENT)
+    except Exception:
+        logger.warning("Workbench stop notification failed; remote fencing will continue: %s", run_id, exc_info=True)
 
 
 def fence_remote(ticket):
     """Do not release capacity until cancellation has reached a terminal remote state."""
+    from dify_agent.protocol.schemas import FenceRunResponse
+
     if not ticket:
         return True
     endpoint = dify_config.AGENT_BACKEND_BASE_URL
@@ -51,11 +58,22 @@ def fence_remote(ticket):
     if not endpoint or not token:
         raise RuntimeError("Agent backend endpoint and token are required to fence a Workbench run")
     headers = {"Authorization": "Bearer " + token}
-    with httpx.Client(base_url=endpoint, headers=headers, timeout=10, trust_env=False) as client:
+    # The executor's sandbox recovery manager permits 90 seconds of cleanup.
+    # Leave time for its response and checkpoint while keeping connection setup bounded.
+    timeout = httpx.Timeout(10.0, read=120.0)
+    with httpx.Client(base_url=endpoint, headers=headers, timeout=timeout, trust_env=False) as client:
         result = client.post(f"/runs/{ticket}/fence", json={})
         result.raise_for_status()
+        response = FenceRunResponse.model_validate(result.json())
+        if response.run_id != ticket:
+            raise ValueError("Remote cleanup response does not match the execution ticket")
+        state = response.model_dump(mode="json")
+        if state["status"] != "running":
+            from services.workbench.followups import save_fenced_state
+
+            save_fenced_state(ticket, state)
         # running means the remote owner still needs to finish cleanup.
-        return result.json()["status"] != "running"
+        return state["status"] != "running"
 
 
 @shared_task(queue="workbench_control")
@@ -121,22 +139,86 @@ def reconcile():
             if active
             else []
         )
-    for run_id in dict.fromkeys([*expired, *terminal]):
+        # Redis can restart with an empty lease set while the database still
+        # records running tasks. Recover those too, after checking the live lease.
+        orphaned = list(
+            session.scalars(
+                select(WorkbenchRun.id)
+                .where(
+                    WorkbenchRun.status == "running",
+                    WorkbenchRun.id.not_in(active),
+                )
+                .limit(200)
+            )
+        )
+        # Redis loss can also hide executors whose cancellation already
+        # committed. Rotate unavailable tickets so they cannot starve the scan.
+        unconfirmed = list(
+            session.scalars(
+                select(WorkbenchRun.id)
+                .where(recovery.cleanup_pending_condition())
+                .order_by(
+                    func.coalesce(recovery.payload_json()["cleanup_checked_at"].as_float(), 0),
+                    WorkbenchRun.id,
+                )
+                .limit(200)
+            )
+        )
+    for run_id in dict.fromkeys([*expired, *terminal, *orphaned, *unconfirmed]):
         end_event = None
+        with session_factory.create_session() as session:
+            observed = session.execute(
+                select(WorkbenchRun.status, WorkbenchRun.backend_run_id, WorkbenchRun.updated_at).where(
+                    WorkbenchRun.id == run_id
+                )
+            ).one_or_none()
+        if observed is None:
+            continue
+        if observed.status in ("running", "queued"):
+            # A slow Redis reply must not hold a run lock or turn a lease that
+            # was fresh when queried into an expired observation. Heartbeats
+            # cannot revive a lease that had already expired before this lookup.
+            lease_checked_at = time.time()
+            lease = redis_client.zscore(scheduler.PREFIX + "active", run_id)
+            if lease is not None and lease >= lease_checked_at:
+                continue
         with session_factory.get_session_maker().begin() as session:
-            run = session.scalar(select(WorkbenchRun).where(WorkbenchRun.id == run_id).with_for_update())
-            if run is None:
+            # Skip busy or changed rows; a later scan will observe their current
+            # execution. In particular, never fence a replacement ticket using
+            # a lease observation made for its predecessor.
+            run = session.scalar(
+                select(WorkbenchRun)
+                .where(
+                    WorkbenchRun.id == run_id,
+                    WorkbenchRun.status == observed.status,
+                    WorkbenchRun.backend_run_id.is_not_distinct_from(observed.backend_run_id),
+                )
+                .with_for_update(skip_locked=True)
+            )
+            if run is None or run.updated_at != observed.updated_at:
                 continue
             owner = f"{run.tenant_id}:{run.account_id}"
             ticket = run.backend_run_id
             if run.status in ("running", "queued"):
                 run.status = "interrupted"
-                run.error = "执行进程失联，任务不会自动重做。请核对外部操作结果。"
+                run.error = "执行进程失联，正在确认旧执行已结束并保留进度。"
+                recovery.mark_failure(run)
                 if uses_journal(run):
                     end_event = append_locked(
-                        session, run, {"event": "workbench_end", "status": run.status, "error": run.error}
+                        session,
+                        run,
+                        {
+                            "event": "workbench_end",
+                            "status": run.status,
+                            "error": run.error,
+                            "recovery": recovery.recovery_dto(json.loads(run.payload)),
+                        },
                     )
             account_id = run.account_id
+            if ticket:
+                payload = json.loads(run.payload)
+                payload["cleanup_checked_at"] = time.time()
+                run.payload = json.dumps(payload)
         if end_event is not None:
             notify(run_id, end_event)
         stop_native(run_id, account_id)
@@ -160,26 +242,89 @@ def reconcile():
     # Cancellation changes the DB status but must not orphan the Redis gate.
     for tenant_id, account_id in owners | maintenance.gated_owners():
         update_environment.delay(tenant_id, account_id)
+    failed, waiting = recovery.due_runs()
+    for run_id in failed:
+        recover_run.delay(run_id)
+    for run_id in waiting:
+        expire_human_input.delay(run_id)
+    from services.workbench.followups import waiting_chats
+
+    for owner in waiting_chats():
+        advance_followups.delay(*owner)
+    from services.workbench.control import active_goal_chats
+
+    for owner in active_goal_chats():
+        advance_followups.delay(*owner)
     dispatch.delay()
+
+
+@shared_task(queue="workbench_control")
+def recover_run(run_id):
+    if dify_config.WORKBENCH_ENABLED:
+        return recovery.continue_failed(run_id)
+
+
+@shared_task(queue="workbench_control")
+def expire_human_input(run_id):
+    if dify_config.WORKBENCH_ENABLED:
+        return recovery.expire_input(run_id)
+
+
+@shared_task(queue="workbench_control")
+def advance_followups(tenant_id, account_id, chat_id):
+    from services.workbench.control import drive_goal, settle
+    from services.workbench.followups import advance
+
+    settle(tenant_id, account_id, chat_id)
+    if advance(tenant_id, account_id, chat_id) is None:
+        drive_goal(tenant_id, account_id, chat_id)
 
 
 @shared_task(queue="workbench", acks_late=False, reject_on_worker_lost=False)
 def execute(owner, run_id):
     tenant_id, account_id = owner.split(":", 1)
     # A newly submitted turn may queue immediately while its predecessor cleans up.
+    blocked = False
     with session_factory.create_session() as session:
         current = session.get(WorkbenchRun, run_id)
-        if current is not None and current.status == "queued":
-            previous_ids = session.scalars(
-                select(WorkbenchRun.id).where(
-                    WorkbenchRun.chat_id == current.chat_id,
-                    WorkbenchRun.created_at < current.created_at,
+        if (
+            current is not None
+            and current.tenant_id == tenant_id
+            and current.account_id == account_id
+            and current.status == "queued"
+        ):
+            previous_ids = set(
+                session.scalars(
+                    select(WorkbenchRun.id).where(
+                        WorkbenchRun.chat_id == current.chat_id,
+                        WorkbenchRun.tenant_id == tenant_id,
+                        WorkbenchRun.account_id == account_id,
+                        WorkbenchRun.created_at < current.created_at,
+                    )
                 )
             )
-            if any(redis_client.zscore(scheduler.PREFIX + "active", prior) is not None for prior in previous_ids):
-                if scheduler.heartbeat(owner, run_id):
-                    execute.apply_async(args=(owner, run_id), countdown=1)
-                return
+            # Enqueue timestamps may share one database clock tick. The explicit
+            # follow-up parent must also finish remote cleanup before admission.
+            if parent_id := json.loads(current.payload).get("branch_parent_run_id"):
+                previous_ids.add(parent_id)
+            unconfirmed = session.scalar(
+                select(WorkbenchRun.id)
+                .where(
+                    WorkbenchRun.chat_id == current.chat_id,
+                    WorkbenchRun.tenant_id == tenant_id,
+                    WorkbenchRun.account_id == account_id,
+                    WorkbenchRun.id != current.id,
+                    recovery.cleanup_pending_condition(),
+                )
+                .limit(1)
+            )
+            blocked = unconfirmed is not None or any(
+                redis_client.zscore(scheduler.PREFIX + "active", prior) is not None for prior in previous_ids
+            )
+    if blocked:
+        if scheduler.heartbeat(owner, run_id):
+            execute.apply_async(args=(owner, run_id), countdown=1)
+        return
     done = threading.Event()
     claimed = False
     completed_stream = False
@@ -221,16 +366,25 @@ def execute(owner, run_id):
         event(run_id, {"event": "workbench_status", "status": "running"})
 
         def renew():
+            last_success = time.monotonic()
             while not done.wait(5):
                 try:
                     leased = scheduler.heartbeat(owner, run_id)
+                    if leased:
+                        last_success = time.monotonic()
                     if not leased or redis_client.get(scheduler.PREFIX + "stop:" + run_id):
                         with app.app_context():
                             stop_native(run_id, account_id)
                 except Exception:
                     logger.exception("Workbench heartbeat failed")
-                    with app.app_context():
-                        stop_native(run_id, account_id)
+                    # A short Redis outage is not evidence that the executor
+                    # failed. Stop only once the last confirmed 90 s lease ends.
+                    if time.monotonic() - last_success >= 90:
+                        with app.app_context():
+                            try:
+                                stop_native(run_id, account_id)
+                            except Exception:
+                                logger.warning("Native stop unavailable; ticket fencing will retry", exc_info=True)
 
         threading.Thread(target=renew, daemon=True).start()
         with app.test_request_context():
@@ -264,6 +418,7 @@ def execute(owner, run_id):
                 )
                 session.close()
                 buffer = ""
+                terminal_received = False
                 for chunk in result:
                     if isinstance(chunk, Mapping):
                         frames = [dict(chunk)]
@@ -278,6 +433,8 @@ def execute(owner, run_id):
                             if data and data != "[DONE]":
                                 frames.append(json.loads(data))
                     for item in frames:
+                        if item.get("event") in {"message_end", "error"}:
+                            terminal_received = True
                         if item.get("event") == "workbench_context" and isinstance(item.get("data"), dict):
                             context_data = item.pop("data")
                             item.update(context_data)
@@ -289,7 +446,9 @@ def execute(owner, run_id):
                             item["_id"] = cursor.decode() if isinstance(cursor, bytes) else str(cursor)
                         if item.get("event") == "error":
                             status, error = "failed", item.get("message", "Agent 执行失败")
-                completed_stream = True
+                completed_stream = terminal_received
+                if not terminal_received:
+                    status, error = "failed", "执行事件流提前结束，已保留进度，正在恢复任务。"
     except Exception:
         logger.exception("Workbench run failed: %s", run_id)
         status, error = "failed", "Agent 执行失败，请查看管理员日志后重试"
@@ -298,12 +457,14 @@ def execute(owner, run_id):
         if claimed:
             pause_event = None
             end_event = None
+            should_recover = False
+            input_deadline = None
             with session_factory.get_session_maker().begin() as session:
                 run = session.scalar(select(WorkbenchRun).where(WorkbenchRun.id == run_id).with_for_update())
                 if run is None:
                     raise ValueError("Claimed Workbench run is unavailable during cleanup")
                 ticket = run.backend_run_id
-                if redis_client.get(scheduler.PREFIX + "stop:" + run_id):
+                if run.status == "cancelled":
                     status, error = "cancelled", None
                     run.status = status
                 elif run.status in ("environment_update", "waiting_input"):
@@ -320,19 +481,30 @@ def execute(owner, run_id):
                         run.status, run.error = status, error
                 else:
                     status, error = run.status, run.error
+                should_recover = recovery.mark_failure(run)
+                input_deadline = json.loads(run.payload).get("human_input", {}).get("deadline_at")
                 if not journal:
                     run.event_log = json.dumps(events)
                 else:
                     end_event = append_locked(
                         session,
                         run,
-                        {"event": "workbench_end", "status": status, "error": error},
+                        {
+                            "event": "workbench_end",
+                            "status": status,
+                            "error": error,
+                            "recovery": recovery.recovery_dto(json.loads(run.payload)),
+                        },
                     )
+                safe_to_release = completed_stream and status in ("completed", "environment_update", "waiting_input")
+                if safe_to_release and ticket:
+                    payload = json.loads(run.payload)
+                    payload["cleanup_confirmed_ticket"] = ticket
+                    run.payload = json.dumps(payload)
             if pause_event is not None:
                 notify(run_id, pause_event)
             if end_event is not None:
                 notify(run_id, end_event)
-            safe_to_release = completed_stream and status in ("completed", "environment_update", "waiting_input")
             if not safe_to_release:
                 try:
                     safe_to_release = fence_remote(ticket)
@@ -341,9 +513,23 @@ def execute(owner, run_id):
             if safe_to_release:
                 scheduler.release(owner, run_id)
             if not journal:
-                event(run_id, {"event": "workbench_end", "status": status, "error": error})
+                event(
+                    run_id,
+                    {
+                        "event": "workbench_end",
+                        "status": status,
+                        "error": error,
+                        "recovery": recovery.recovery_dto(json.loads(run.payload)),
+                    },
+                )
             if status == "environment_update":
                 update_environment.delay(tenant_id, account_id)
+            elif status == "waiting_input" and input_deadline:
+                expire_human_input.apply_async(args=(run_id,), countdown=max(0, input_deadline - time.time()))
+            if should_recover:
+                recover_run.apply_async(args=(run_id,), countdown=recovery.CONTINUATION_DELAY_SECONDS)
+            if not should_recover and status in ("completed", "failed", "cancelled", "interrupted"):
+                advance_followups.delay(tenant_id, account_id, run.chat_id)
             dispatch.delay()
         else:
             # A late delivery for a cancelled/finished task must not leak its reservation.
