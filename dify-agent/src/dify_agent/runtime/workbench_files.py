@@ -20,10 +20,26 @@ import json, os, stat
 from pathlib import Path
 root = Path.cwd().resolve()
 files = {}
+# TMPDIR points at the conversation directory. Browser and Office profiles are
+# runtime housekeeping, not generated deliverables or report-building scripts.
+ignored_names = {'__pycache__', 'node_modules', 'venv'}
+ignored_prefixes = (
+    'workbench-office-', 'playwright_chromiumdev_profile-',
+    'playwright_firefoxdev_profile-', 'playwright_webkitdev_profile-',
+    'playwright-artifacts-', 'puppeteer_dev_chrome_profile-',
+    'puppeteer_dev_firefox_profile-',
+)
+ignored_suffixes = ('.log', '.tmp', '.temp', '.pyc', '.pyo', '.swp', '.swo', '.lock', '~')
+def visible(name, directory=False):
+    name = name.lower()
+    return not (
+        name in ignored_names or name.startswith(('.', 'com.google.chrome.chrome_chrome_url_fetcher_'))
+        or (directory and name.startswith(ignored_prefixes)) or name.endswith(ignored_suffixes)
+    )
 for directory, names, filenames in os.walk(root, followlinks=False):
-    names[:] = sorted(name for name in names if name not in {'.dify_conf', '__pycache__'} and not (Path(directory) / name).is_symlink())
+    names[:] = sorted(name for name in names if visible(name, directory=True) and not (Path(directory) / name).is_symlink())
     for name in sorted(filenames):
-        if name.startswith('.workbench-edit-'):
+        if not visible(name):
             continue
         path = Path(directory) / name
         try:

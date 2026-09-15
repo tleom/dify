@@ -3,6 +3,8 @@ FROM langgenius/dify-agent-local-sandbox@sha256:f4d404c9dcdf80bd72f65e84c3f2bbd1
 USER root
 ENV DEBIAN_FRONTEND=noninteractive \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    PUPPETEER_SKIP_DOWNLOAD=1 \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome \
     PYTHONIOENCODING=utf-8 \
     LANG=C.UTF-8 \
     CHROME_BIN=/usr/bin/google-chrome \
@@ -24,7 +26,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.ustc.edu.cn/debian|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
-      libreoffice-draw python3-uno ffmpeg libimage-exiftool-perl p7zip-full unrar-free gcc libc6-dev \
+      libreoffice-draw libreoffice-math python3-uno ffmpeg libimage-exiftool-perl p7zip-full unrar-free gcc libc6-dev \
+      graphviz librsvg2-bin imagemagick sqlite3 antiword libmagic1 \
+      libcairo2 libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.in requirements.lock.txt /opt/office/
@@ -39,7 +43,16 @@ RUN npm ci --prefix /opt/office/node --no-fund --no-audit \
     && npm cache clean --force
 
 COPY smoke.py smoke.cjs /opt/office/
+COPY mermaid/package.json mermaid/package-lock.json /opt/office/mermaid/
+RUN npm ci --prefix /opt/office/mermaid --no-fund --no-audit \
+    && npm ls --prefix /opt/office/mermaid --all \
+    && npm cache clean --force
 COPY office.py uno_worker.py /opt/office/
+COPY puppeteer-config.json /opt/office/
+COPY --chmod=755 bin/mmdc.sh /opt/office/bin/mmdc
+RUN ln -s /opt/office/bin/mmdc /opt/office/node/node_modules/.bin/mmdc
+COPY capabilities-smoke.py capabilities-smoke.cjs /opt/office/
+COPY README.md /opt/office/README.md
 COPY private_ipc.c /opt/office/
 RUN gcc -shared -fPIC -O2 -Wall -Wextra -Werror /opt/office/private_ipc.c \
       -ldl -o /opt/office/private_ipc.so

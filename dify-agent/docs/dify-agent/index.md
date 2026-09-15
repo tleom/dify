@@ -122,7 +122,13 @@ after tool results, and before publishing a model response. New and changed path
 ordered `file_create` / `file_edit` tool records with `output.source=workspace_change`,
 including binary files produced by shell scripts or other tools. Explicit file tools
 retain their original row without a duplicate observation. Inventories do not follow
-symlinks or include internal config/cache/edit temporary files; they are limited to
+symlinks or include hidden files, dependency/cache directories, browser profiles,
+Office work profiles, logs, lock files, or edit temporary files. These incidental
+files neither emit inventory rows nor count as pending file deliverables. Documents,
+images, data files and generation scripts remain observable. Explicit file-tool calls
+retain their original records, including failures. The workbench frontend applies
+the same exclusions to historical inventory rows without modifying stored events.
+Inventories are limited to
 10,000 regular files and a 15-second scan. A scan failure is reported rather than
 claiming that file changes were checked. Changes are identified by filesystem size,
 modification/change timestamps and inode; file contents are not copied into the journal.

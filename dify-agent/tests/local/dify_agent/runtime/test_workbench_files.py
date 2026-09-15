@@ -26,12 +26,50 @@ from dify_agent.layers.workbench_files import WorkbenchFilesLayer
 from dify_agent.protocol import DeferredToolResultsPayload, RunLayerSpec, RunSucceededEvent, WorkbenchActivityRunEvent
 from dify_agent.runtime.compositor_factory import create_default_layer_providers
 from dify_agent.runtime.runner import AgentRunRunner
+from dify_agent.runtime.workbench_files import SNAPSHOT_SCRIPT
 from dify_agent.runtime_backend import HomeSnapshotBackend, RuntimeBackendProfile
 from .test_runner import FakeRunnerExecutionBindingBackend, FakeRunnerShellctlClient
 from .test_workbench_activity import _setup, _progress, _call
 
 PREVIEW = "https://files.example.test/files/workbench/signed/chart.png?mode=preview"
 DOWNLOAD = "https://files.example.test/files/workbench/signed/chart.png?mode=download"
+
+
+def test_inventory_keeps_documents_and_scripts_without_browser_office_or_cache_noise(tmp_path):
+    useful = [
+        "报告.docx",
+        "报告.pdf",
+        "chart.png",
+        "scripts/generate_report.py",
+        "data/source.json",
+        "workbench-office-summary.pdf",
+    ]
+    noise = [
+        *(f"playwright_chromiumdev_profile-A6TuKz/Default/Cache/item-{index}" for index in range(108)),
+        "workbench-office-k36__ov8/user/registrymodifications.xcu",
+        "com.google.Chrome.chrome_chrome_url_fetcher_.q3voEv",
+        "puppeteer_dev_chrome_profile-test/Default/History",
+        "node_modules/package/index.js",
+        ".cache/fontlist-v390.json",
+        "__pycache__/generate_report.cpython-312.pyc",
+        "render.log",
+        "intermediate.tmp",
+    ]
+    for name in [*useful, *noise]:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("test", encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-c", SNAPSHOT_SCRIPT],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+    assert sorted(json.loads(result.stdout)) == sorted(useful)
+    # Observability must never remove the actual working files.
+    assert all((tmp_path / name).is_file() for name in noise)
 
 
 def add_files(request):
@@ -310,7 +348,7 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(
 
     async def shell_run(self, script: str, timeout: float = 10):
         if script == "create":
-            code = "from pathlib import Path; import zipfile, base64; z=zipfile.ZipFile('报告.docx','w'); z.writestr('word/document.xml','<document/>'); z.close(); Path('chart.png').write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6ZpAAAAAASUVORK5CYII='))"
+            code = "from pathlib import Path; import zipfile, base64; z=zipfile.ZipFile('报告.docx','w'); z.writestr('word/document.xml','<document/>'); z.close(); Path('chart.png').write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6ZpAAAAAASUVORK5CYII=')); p=Path('playwright_chromiumdev_profile-test/Default'); p.mkdir(parents=True); (p/'History').write_text('browser cache'); p=Path('workbench-office-test/user'); p.mkdir(parents=True); (p/'registrymodifications.xcu').write_text('office settings')"
         else:
             code = "import zipfile; z=zipfile.ZipFile('报告.docx','a'); z.writestr('word/styles.xml','<styles/>'); z.close()"
         subprocess.run([sys.executable, "-c", code], cwd=tmp_path, check=True)
