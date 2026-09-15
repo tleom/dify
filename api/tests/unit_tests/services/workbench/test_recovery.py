@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterator
-from typing import TypedDict, cast
+from typing import TypedDict, cast, override
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -555,3 +555,77 @@ def test_reconcile_recovers_lost_redis_lease_but_preserves_a_fresh_lease(
         assert state is not None
         assert state["pending"] == (not lease_renewed)
     assert fence.call_count == int(not lease_renewed)
+
+
+def test_slow_lease_reply_does_not_revoke_a_lease_that_was_fresh_when_queried(
+    database: RecoveryDatabase, monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., None]
+) -> None:
+    from tasks import workbench_tasks
+
+    from .test_cleanup_recovery import stub_reconcile
+
+    factory, _, _, _, run_id, _, fence = database
+    config_overrides(WORKBENCH_ENABLED=True)
+    stub_reconcile(monkeypatch)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(workbench_tasks.time, "time", lambda: clock["now"])
+
+    def delayed_lease(*_: object) -> float:
+        clock["now"] = 1120.0
+        return 1080.0
+
+    monkeypatch.setattr(workbench_tasks.redis_client, "zscore", delayed_lease)
+    workbench_tasks.reconcile.run()
+    with factory() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        assert run.status == "running"
+    fence.assert_not_called()
+
+
+def test_fence_accepts_a_real_cleanup_response_after_ten_seconds(
+    database: RecoveryDatabase, config_overrides: Callable[..., None]
+) -> None:
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    factory, _, _, _, run_id, _, fence = database
+    fail(factory, run_id)
+    with factory() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        ticket = run.backend_run_id
+    assert ticket is not None
+    response = json.dumps({"run_id": ticket, "status": "cancelled", "history": {"messages": []}}).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            time.sleep(10.5)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        @override
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    worker.start()
+    config_overrides(
+        AGENT_BACKEND_BASE_URL=f"http://127.0.0.1:{server.server_port}", AGENT_BACKEND_API_TOKEN="test-token"
+    )
+    try:
+        assert fence.real_function(ticket)
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2)
+    with factory() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        assert json.loads(run.payload)["cleanup_confirmed_ticket"] == ticket

@@ -58,7 +58,10 @@ def fence_remote(ticket):
     if not endpoint or not token:
         raise RuntimeError("Agent backend endpoint and token are required to fence a Workbench run")
     headers = {"Authorization": "Bearer " + token}
-    with httpx.Client(base_url=endpoint, headers=headers, timeout=10, trust_env=False) as client:
+    # The executor's sandbox recovery manager permits 90 seconds of cleanup.
+    # Leave time for its response and checkpoint while keeping connection setup bounded.
+    timeout = httpx.Timeout(10.0, read=120.0)
+    with httpx.Client(base_url=endpoint, headers=headers, timeout=timeout, trust_env=False) as client:
         result = client.post(f"/runs/{ticket}/fence", json={})
         result.raise_for_status()
         response = FenceRunResponse.model_validate(result.json())
@@ -163,16 +166,40 @@ def reconcile():
         )
     for run_id in dict.fromkeys([*expired, *terminal, *orphaned, *unconfirmed]):
         end_event = None
+        with session_factory.create_session() as session:
+            observed = session.execute(
+                select(WorkbenchRun.status, WorkbenchRun.backend_run_id, WorkbenchRun.updated_at).where(
+                    WorkbenchRun.id == run_id
+                )
+            ).one_or_none()
+        if observed is None:
+            continue
+        if observed.status in ("running", "queued"):
+            # A slow Redis reply must not hold a run lock or turn a lease that
+            # was fresh when queried into an expired observation. Heartbeats
+            # cannot revive a lease that had already expired before this lookup.
+            lease_checked_at = time.time()
+            lease = redis_client.zscore(scheduler.PREFIX + "active", run_id)
+            if lease is not None and lease >= lease_checked_at:
+                continue
         with session_factory.get_session_maker().begin() as session:
-            run = session.scalar(select(WorkbenchRun).where(WorkbenchRun.id == run_id).with_for_update())
-            if run is None:
+            # Skip busy or changed rows; a later scan will observe their current
+            # execution. In particular, never fence a replacement ticket using
+            # a lease observation made for its predecessor.
+            run = session.scalar(
+                select(WorkbenchRun)
+                .where(
+                    WorkbenchRun.id == run_id,
+                    WorkbenchRun.status == observed.status,
+                    WorkbenchRun.backend_run_id.is_not_distinct_from(observed.backend_run_id),
+                )
+                .with_for_update(skip_locked=True)
+            )
+            if run is None or run.updated_at != observed.updated_at:
                 continue
             owner = f"{run.tenant_id}:{run.account_id}"
             ticket = run.backend_run_id
             if run.status in ("running", "queued"):
-                lease = redis_client.zscore(scheduler.PREFIX + "active", run.id)
-                if lease is not None and lease > time.time():
-                    continue
                 run.status = "interrupted"
                 run.error = "执行进程失联，正在确认旧执行已结束并保留进度。"
                 recovery.mark_failure(run)

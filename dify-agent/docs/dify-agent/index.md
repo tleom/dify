@@ -271,6 +271,12 @@ Redis heartbeat outages until the last confirmed execution lease expires. Recove
 reconciles lost leases and rechecks renewed ones before interrupting a run. Continued
 execution remains bounded by the runtime's existing model, sandbox and step limits;
 persistent external failures can still exhaust the three-turn recovery budget.
+Remote cleanup calls allow 120 seconds for a response, covering the sandbox
+manager's 90-second cleanup window while connection setup remains limited to
+10 seconds. Reconciliation reads Redis leases before opening its write transaction
+and only updates an unchanged, unlocked execution row. A delayed lease reply or
+a concurrent pause or replacement execution cannot overwrite the newer state.
+
 Remote cleanup acknowledgement is persisted against the current execution ticket
 with its fenced history. Manual continuations and promoted queue entries wait for
 that acknowledgement even if their predecessor's Redis reservation disappears.

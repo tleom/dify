@@ -32,6 +32,55 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.parametrize("change", ["pause", "replace_ticket"])
+def test_slow_redis_lookup_does_not_lock_or_overwrite_a_changed_execution(
+    pg_queue: Queue, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    from unittest.mock import Mock
+
+    from services.workbench import recovery
+    from tasks import workbench_tasks
+
+    from .test_cleanup_recovery import stub_reconcile
+
+    original = pg_queue.send("等待租约检查时仍可操作")
+    pg_queue.running(original["id"])
+    stub_reconcile(monkeypatch)
+    fence = Mock(return_value=True)
+    monkeypatch.setattr(workbench_tasks, "fence_remote", fence)
+    entered, release = threading.Event(), threading.Event()
+    replacement_ticket = str(uuid4())
+
+    def blocked_lease(*_: object) -> None:
+        entered.set()
+        assert release.wait(10), "test did not release its Redis reply"
+
+    def change_execution() -> None:
+        if change == "pause":
+            recovery.cancel_chain(*pg_queue.owner, original["id"])
+        else:
+            with pg_queue.factory.begin() as session:
+                run = session.get(WorkbenchRun, original["id"])
+                assert run is not None
+                run.backend_run_id = replacement_ticket
+
+    monkeypatch.setattr(workbench_tasks.redis_client, "zscore", blocked_lease)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reconciling = executor.submit(workbench_tasks.reconcile.run)
+        try:
+            assert entered.wait(5)
+            mutation = executor.submit(change_execution)
+            mutation.result(timeout=2)
+        finally:
+            release.set()
+        reconciling.result(timeout=5)
+    current = pg_queue.get(original["id"])
+    assert current.status == ("cancelled" if change == "pause" else "running")
+    if change == "replace_ticket":
+        assert current.backend_run_id == replacement_ticket
+    fence.assert_not_called()
+
+
 @pytest.fixture
 def pg_queue(monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., None], tmp_path: Path) -> Iterator[Queue]:
     schema = "followup_" + uuid4().hex
