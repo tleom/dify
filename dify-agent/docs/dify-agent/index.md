@@ -182,6 +182,22 @@ by file count, output size and execution time. Acquiring a conversation binding
 prepares its current directory from `/workspace` and verifies the persistent home;
 it does not require the obsolete account-named working directory to exist.
 
+Personal memory is refreshed before each model request. The control layer exposes
+`read_memory` and `update_memory(content, version)` for proactive consolidation of
+stable user preferences, explicit corrections, verified reusable lessons and durable
+project context. Temporary task progress and unverified inferences are excluded;
+explicit forget/do-not-retain requests take precedence. Updates use the exact version
+read from the owner's workspace, share the editor's account lock and file CAS, and
+require the current app/run/execution identity. On conflict the model receives the
+latest memory and merges again. Transport retries retain the original payload; an
+already-applied identical value is a no-op. External file IO runs outside database
+transactions. Unreadable memory cannot be silently replaced by the Agent.
+
+For multi-step work, `todo_write` marks each step active before execution and completed
+after verification, before the next step starts. The current list is injected at every
+model boundary. Failures keep the step unfinished; completion is a model decision
+based on task evidence, not an inference from tool-call counts.
+
 The resource catalog lists published global skills first and enabled, valid personal
 skills second. Personal skill IDs use `personal:<name>`; they belong to explicit
 resource mentions, not the global archive selection. The API resolves them against

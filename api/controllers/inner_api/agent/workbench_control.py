@@ -4,7 +4,7 @@ from typing import Any
 
 from dify_agent.protocol.workbench_control import WorkbenchControlState
 from flask_restx import Resource
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from werkzeug.exceptions import BadRequest
 
 from controllers.common.schema import register_response_schema_models, register_schema_models
@@ -13,6 +13,7 @@ from controllers.inner_api.wraps import plugin_inner_api_only
 from fields.base import ResponseModel
 from libs.helper import dump_response
 from services.workbench.control import AgentControlPayload, agent_control
+from services.workbench.resources import AgentMemoryPayload, agent_memory_update
 
 
 class AgentControlResponse(ResponseModel):
@@ -34,12 +35,20 @@ class AgentResourcesResponse(ResponseModel):
     memory: dict[str, Any]
     skills: list[dict[str, Any]]
     global_resources: dict[str, Any] | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class AgentMemoryResponse(ResponseModel):
+    content: str
+    version: str | None
 
 
 register_schema_models(inner_api_ns, AgentControlPayload)
 register_response_schema_models(inner_api_ns, AgentControlResponse)
 register_schema_models(inner_api_ns, AgentResourcesPayload)
 register_response_schema_models(inner_api_ns, AgentResourcesResponse)
+register_schema_models(inner_api_ns, AgentMemoryPayload)
+register_response_schema_models(inner_api_ns, AgentMemoryResponse)
 
 
 @inner_api_ns.route("/agent/workbench/control")
@@ -69,3 +78,16 @@ class AgentWorkbenchResources(Resource):
         result = agent_snapshot(payload, initialize=payload.initialize)
         result["global_resources"] = result.pop("global", None)
         return dump_response(AgentResourcesResponse, result)
+
+
+@inner_api_ns.route("/agent/workbench/memory")
+class AgentWorkbenchMemory(Resource):
+    @plugin_inner_api_only
+    @inner_api_ns.expect(inner_api_ns.models[AgentMemoryPayload.__name__])
+    @inner_api_ns.response(200, "Updated personal memory", inner_api_ns.models[AgentMemoryResponse.__name__])
+    def post(self):
+        try:
+            payload = AgentMemoryPayload.model_validate(inner_api_ns.payload or {})
+        except ValidationError as error:
+            raise BadRequest("记忆更新参数无效") from error
+        return dump_response(AgentMemoryResponse, agent_memory_update(payload))
