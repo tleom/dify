@@ -17,7 +17,7 @@ queue = pytest.fixture(queue_fixture)
 
 
 def test_api_rejects_environment_update_while_plan_is_unapproved(queue: Queue, monkeypatch: pytest.MonkeyPatch) -> None:
-    from extensions.ext_redis import redis_client
+    from extensions import ext_redis
     from models.agent import AgentConfigVersionKind, AgentWorkspaceBinding
     from services.workbench import runtime
 
@@ -42,7 +42,7 @@ def test_api_rejects_environment_update_while_plan_is_unapproved(queue: Queue, m
             )
         )
     redis = MagicMock()
-    monkeypatch.setattr(redis_client, "_client", redis)
+    monkeypatch.setattr(ext_redis, "redis_client", redis)
     terminal = SimpleNamespace(
         deferred_tool_call=DeferredToolCallPayload(
             tool_call_id="install",
@@ -63,7 +63,6 @@ def test_api_rejects_environment_update_while_plan_is_unapproved(queue: Queue, m
 def test_environment_dispatch_rechecks_plan_without_installing(
     queue: Queue, monkeypatch: pytest.MonkeyPatch, mode_change: str
 ) -> None:
-    from extensions.ext_redis import redis_client
     from services.workbench import files
     from tasks import workbench_tasks as tasks
 
@@ -81,7 +80,7 @@ def test_environment_dispatch_rechecks_plan_without_installing(
     redis = MagicMock()
     redis.zcard.return_value = 0
     redis.get.return_value = None
-    monkeypatch.setattr(redis_client, "_client", redis)
+    monkeypatch.setattr(tasks, "redis_client", redis)
     monkeypatch.setattr(tasks, "authorize", lambda *_: None)
     monkeypatch.setattr(tasks, "event", MagicMock())
     monkeypatch.setattr(tasks.dispatch, "delay", MagicMock())
