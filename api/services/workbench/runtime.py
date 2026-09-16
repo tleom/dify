@@ -115,7 +115,9 @@ def current_run(session, tenant_id, conversation_id, account_id, *, for_update=F
             WorkbenchRun.account_id == account_id,
         )
     )
-    return session.scalar(statement.with_for_update() if for_update else statement)
+    # Only this execution row is being changed. Locking both sides of the join
+    # would compete with queue mutations that deliberately lock chat then run.
+    return session.scalar(statement.with_for_update(of=WorkbenchRun) if for_update else statement)
 
 
 def execution_run_id(tenant_id, conversation_id, account_id):
@@ -179,12 +181,15 @@ def capture_run_history(tenant_id, account_id, conversation_id, run_id, snapshot
                 WorkbenchChat.tenant_id == tenant_id,
                 WorkbenchChat.account_id == account_id,
             )
-            .with_for_update()
+            .with_for_update(of=WorkbenchRun)
         )
         if run is None:
             raise Forbidden()
         payload = json.loads(run.payload)
         payload["output_history"] = history_state(snapshot)
+        for layer in snapshot.layers if snapshot is not None else []:
+            if layer.name == "workbench_followups":
+                payload["steering_delivered_ids"] = layer.runtime_state.get("seen_ids", [])
         run.payload = json.dumps(payload)
 
 
@@ -287,6 +292,10 @@ def pause(tenant_id, conversation_id, account_id, terminal, binding_id):
         else:
             run.status = status
         run.payload = json.dumps(payload)
+        if not journal:
+            from services.workbench.recovery import mark_input_wait
+
+            mark_input_wait(run)
         binding = session.get(AgentWorkspaceBinding, binding_id)
         if binding is None or binding.tenant_id != tenant_id:
             raise Forbidden()
@@ -322,7 +331,16 @@ def complete_pause(session, run, *, completed_stream):
     ):
         return None
     run.status = pending["status"]
-    return append_locked(session, run, {
-        "event": "workbench_status", "status": run.status,
-        "backend_run_id": run.backend_run_id, "source_event_id": "workbench-pause",
-    })
+    from services.workbench.recovery import mark_input_wait
+
+    mark_input_wait(run)
+    return append_locked(
+        session,
+        run,
+        {
+            "event": "workbench_status",
+            "status": run.status,
+            "backend_run_id": run.backend_run_id,
+            "source_event_id": "workbench-pause",
+        },
+    )

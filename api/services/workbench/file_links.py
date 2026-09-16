@@ -27,7 +27,7 @@ class FileClaims(BaseModel):
     model_config = ConfigDict(extra="forbid")
     tenant_id: str = Field(min_length=1, max_length=64)
     account_id: str = Field(min_length=1, max_length=64)
-    chat_id: str = Field(min_length=1, max_length=64)
+    chat_id: str | None = Field(default=None, min_length=1, max_length=64)
     path: str = Field(min_length=1, max_length=1024)
 
 
@@ -46,7 +46,7 @@ def _signature(encoded: str) -> str:
     ).hexdigest()
 
 
-def links(tenant_id: str, account_id: str, chat_id: str, path: str) -> dict[str, str]:
+def links(tenant_id: str, account_id: str, chat_id: str | None, path: str) -> dict[str, str]:
     claims = FileClaims(tenant_id=tenant_id, account_id=account_id, chat_id=chat_id, path=path)
     encoded = base64.urlsafe_b64encode(claims.model_dump_json().encode()).decode().rstrip("=")
     suffix = f"/{encoded}.{_signature(encoded)}/{quote(PurePosixPath(path).name, safe='')}"
@@ -76,7 +76,7 @@ def read_signed(token: str) -> dict:
         )
         if workspace is None:
             raise NotFound("文件空间已不可用")
-        identifier, title = workspace.id, chat.title
+        identifier, title = workspace.id, chat.title if chat else "个人文件空间"
     result = manager(identifier, "files", {"operation": "get", "path": claims.path})
     if result.get("kind") == "directory" and claims.path == root:
         from services.workbench.directories import archive_name
@@ -126,20 +126,21 @@ def agent_lookup(payload: AgentFileLinksPayload) -> dict:
         from services.workbench.directories import chat_directory
 
         root, chat_id = chat_directory(session, chat), chat.id
-    path = payload.path.removeprefix("/workspace/")
+    absolute = payload.path == "/workspace" or payload.path.startswith("/workspace/")
+    if payload.path.startswith("/") and not absolute:
+        raise BadRequest("文件必须位于个人 /workspace 空间")
+    path = "." if payload.path == "/workspace" else payload.path.removeprefix("/workspace/")
     if path == ".":
-        path = root
-    elif not path.startswith("conversations/"):
+        path = "." if absolute else root
+    elif not absolute and not path.startswith("conversations/"):
         path = root + "/" + path
-    if path != root and not path.startswith(root + "/"):
-        raise BadRequest("只能查询当前会话目录中的文件")
-    if path == root:
+    if path in {".", "conversations", root}:
         listing = operate(payload.tenant_id, payload.account_id, "list", path, chat_id=chat_id)
     else:
         item = lookup(payload.tenant_id, payload.account_id, path, chat_id=chat_id, require_downloadable=False)
         if item["kind"] == "file":
-            return {"directory": root, "entries": [item], "complete": True}
+            return {"cwd": root, "directory": root, "entries": [item], "complete": True}
         listing = operate(payload.tenant_id, payload.account_id, "list", path, chat_id=chat_id)
     entries = listing["entries"]
     # A specific path lookup can reach files beyond the bounded folder summary.
-    return {"directory": path, "entries": entries[:200], "complete": len(entries) <= 200}
+    return {"cwd": root, "directory": path, "entries": entries[:200], "complete": len(entries) <= 200}

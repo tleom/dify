@@ -232,11 +232,15 @@ def read_state(tenant_id, account_id, run_id):
         run = session.scalar(owned_statement(tenant_id, account_id, run_id))
         if run is None:
             raise NotFound()
+        from services.workbench.recovery import recovery_dto
+
+        recovery = recovery_dto(json.loads(run.payload))
         return {
             "status": run.status,
             "error": run.error,
             "task_id": run.task_id,
             "activity_protocol": 1 if uses_journal(run) else 0,
+            **({"recovery": recovery} if recovery else {}),
         }
 
 
@@ -274,7 +278,15 @@ def stream_events(tenant_id, account_id, run_id, *, after=0):
         if len(items) == 100:
             continue
         if status not in live:
-            yield {"event": "workbench_end", "status": status, "error": error}
+            state = read_state(tenant_id, account_id, run_id)
+            if state["status"] in live:
+                continue
+            yield {
+                "event": "workbench_end",
+                "status": state["status"],
+                "error": state["error"],
+                **({"recovery": state["recovery"]} if "recovery" in state else {}),
+            }
             return
         try:
             redis_client.xread({event_key(run_id): "$"}, count=1, block=1000)

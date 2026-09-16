@@ -705,6 +705,50 @@ def test_stream_events_stops_after_terminal_event() -> None:
     assert calls == 1
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_reconnect_budget_resets_when_a_long_run_makes_progress(asynchronous: bool) -> None:
+    cursors: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cursors.append(request.url.params["after"])
+        index = len(cursors)
+        event = _run_succeeded_event(event_id="7-0") if index == 7 else RunStartedEvent(id=f"{index}-0", run_id="run-1")
+        return httpx.Response(200, content=_event_frame(event))
+
+    if asynchronous:
+
+        async def collect():
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+                client = Client(base_url="http://testserver", async_http_client=http)
+                return [
+                    event async for event in client.stream_events("run-1", max_reconnects=2, reconnect_delay_seconds=0)
+                ]
+
+        events = asyncio.run(collect())
+    else:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            client = Client(base_url="http://testserver", sync_http_client=http)
+            events = list(client.stream_events_sync("run-1", max_reconnects=2, reconnect_delay_seconds=0))
+    assert events[-1].type == "run_succeeded"
+    assert cursors == [f"{index}-0" for index in range(7)]
+
+
+def test_duplicate_replayed_events_do_not_refill_the_reconnect_budget() -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert calls < 8
+        return httpx.Response(200, content=_event_frame(RunStartedEvent(id="1-0", run_id="run-1")))
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        client = Client(base_url="http://testserver", sync_http_client=http)
+        with pytest.raises(DifyAgentStreamError, match="reconnect attempts exhausted"):
+            list(client.stream_events_sync("run-1", max_reconnects=2, reconnect_delay_seconds=0))
+    assert calls == 3
+
+
 def test_stream_events_stops_after_cancelled_terminal_event() -> None:
     calls = 0
     body = "".join(

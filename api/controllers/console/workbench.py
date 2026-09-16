@@ -15,17 +15,14 @@ from controllers.common.schema import query_params_from_model, register_response
 from controllers.console import console_ns
 from controllers.console.workbench_auth import workbench_login_required
 from controllers.console.wraps import account_initialization_required, setup_required
-from core.app.entities.app_invoke_entities import InvokeFrom
 from core.db.session_factory import session_factory
 from extensions.ext_redis import redis_client
 from fields.base import ResponseModel
 from fields.workbench_file_fields import WorkbenchFileLinksResponse, WorkbenchFileResponse
 from libs.helper import dump_response
 from libs.login import current_account_with_tenant
-from models.model import AppMode
-from services.app_task_service import AppTaskService
 from services.workbench import scheduler, service
-from services.workbench.event_log import append_locked, notify, owned_statement, read_state, stream_events, uses_journal
+from services.workbench.event_log import owned_statement, read_state, stream_events
 from services.workbench.mentions import ResourceMentions
 from services.workbench.policy import Selection
 
@@ -72,9 +69,16 @@ class WorkbenchSandboxFilePayload(BaseModel):
     version: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class WorkbenchSteerPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_run_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
+
+
 class WorkbenchRunPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     activity_protocol: Literal[0, 1] = 0
+    queue_when_busy: bool = False
+    continue_run_id: str | None = Field(default=None, pattern=r"^[0-9a-fA-F-]{36}$")
     version: int = Field(ge=1)
     request_key: str = Field(min_length=1, max_length=128)
     query: str = Field(max_length=100000)
@@ -86,7 +90,7 @@ class WorkbenchRunPayload(BaseModel):
 
     @model_validator(mode="after")
     def require_message(self):
-        if not self.query.strip() and not self.files:
+        if not self.query.strip() and not self.files and not self.continue_run_id:
             raise ValueError("请输入消息或添加附件")
         return self
 
@@ -107,6 +111,26 @@ class WorkbenchResumePayload(BaseModel):
 class WorkbenchFeedbackPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     rating: Literal["like", "dislike"] | None
+
+
+class WorkbenchInputInteractionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=1, max_length=200)
+
+
+class WorkbenchHumanInputResponse(ResponseModel):
+    request_id: str
+    tool_call_id: str
+    deadline_at: float | None
+    interacted: bool
+    server_now: float
+
+
+class WorkbenchRecoveryResponse(ResponseModel):
+    attempt: int
+    limit: int
+    pending: bool
+    next_run_id: str | None = None
 
 
 class WorkbenchRegeneratePayload(BaseModel):
@@ -136,7 +160,10 @@ class WorkbenchModelResponse(ResponseModel):
 
 
 class WorkbenchCatalogResponse(ResponseModel):
+    control_protocol: Literal[1] = 1
+    resources_protocol: Literal[1] = 1
     activity_protocol: Literal[1] = 1
+    followup_protocol: Literal[1] = 1
     default_selection: Selection
     models: list[WorkbenchModelResponse]
     tools: list[WorkbenchResourceResponse]
@@ -156,6 +183,14 @@ class WorkbenchAttachmentResponse(ResponseModel):
 class WorkbenchRunResponse(ResponseModel):
     events_cursor: str | None = None
     activity_protocol: int = 0
+    followup_protocol: int = 0
+    is_continuation: bool = False
+    user_paused: bool = False
+    queue_order: int | None = None
+    queue_selection: Selection | None = None
+    queue_files: list[WorkbenchSandboxFilePayload] = Field(default_factory=list)
+    steer_target_run_id: str | None = None
+    steering_messages: list[dict[str, Any]] = Field(default_factory=list)
     id: str
     chat_id: str
     revision_id: str
@@ -171,6 +206,9 @@ class WorkbenchRunResponse(ResponseModel):
     parent_run_id: str | None = None
     parent_message_id: str | None = None
     status: Literal[
+        "waiting_turn",
+        "discarded",
+        "steered",
         "queued",
         "running",
         "waiting_input",
@@ -186,10 +224,25 @@ class WorkbenchRunResponse(ResponseModel):
     events: list[dict[str, Any]]
     context_usage: dict[str, Any] | None = None
     pending: dict[str, Any] | None = None
+    human_input: WorkbenchHumanInputResponse | None = None
+    recovery: WorkbenchRecoveryResponse | None = None
 
 
 class WorkbenchRunEnvelopeResponse(ResponseModel):
     data: WorkbenchRunResponse
+
+
+class WorkbenchFollowupsResponse(ResponseModel):
+    runs: list[WorkbenchRunResponse]
+
+
+class WorkbenchFollowupsEnvelopeResponse(ResponseModel):
+    data: WorkbenchFollowupsResponse
+
+
+class WorkbenchFollowupsQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tracked: str = Field(default="", pattern=r"^(?:[0-9a-fA-F-]{36}(?:,[0-9a-fA-F-]{36}){0,3})?$")
 
 
 class WorkbenchChatSummaryResponse(ResponseModel):
@@ -295,9 +348,12 @@ register_schema_models(
     WorkbenchConfigPayload,
     WorkbenchChatPayload,
     WorkbenchRunPayload,
+    WorkbenchSteerPayload,
+    WorkbenchFollowupsQuery,
     WorkbenchFilePayload,
     WorkbenchFileLinksQuery,
     WorkbenchResumePayload,
+    WorkbenchInputInteractionPayload,
     WorkbenchFeedbackPayload,
     WorkbenchRegeneratePayload,
 )
@@ -306,6 +362,7 @@ register_response_schema_models(
     WorkbenchIdentityResponse,
     WorkbenchCatalogEnvelopeResponse,
     WorkbenchRunEnvelopeResponse,
+    WorkbenchFollowupsEnvelopeResponse,
     WorkbenchChatEnvelopeResponse,
     WorkbenchChatListResponse,
     WorkbenchFilesResponse,
@@ -587,6 +644,48 @@ class Run(WorkbenchResource):
         return dump_response(WorkbenchRunEnvelopeResponse, {"data": dto})
 
 
+@console_ns.route("/workbench/chats/<uuid:chat_id>/followups")
+class Followups(WorkbenchResource):
+    @console_ns.doc(params=query_params_from_model(WorkbenchFollowupsQuery))
+    @console_ns.response(
+        200, "Live queue without event history", console_ns.models[WorkbenchFollowupsEnvelopeResponse.__name__]
+    )
+    def get(self, chat_id):
+        from services.workbench.followups import snapshot
+
+        query = WorkbenchFollowupsQuery.model_validate(request.args.to_dict(flat=True))
+        return dump_response(
+            WorkbenchFollowupsEnvelopeResponse,
+            {"data": snapshot(*self.owner(), str(chat_id), query.tracked.split(",") if query.tracked else [])},
+        )
+
+
+@console_ns.route("/workbench/runs/<uuid:run_id>/queue")
+class FollowupQueue(WorkbenchResource):
+    @console_ns.response(
+        200, "Queued message removed for deletion or editing", console_ns.models[WorkbenchRunEnvelopeResponse.__name__]
+    )
+    def delete(self, run_id):
+        from services.workbench.followups import remove
+
+        return dump_response(WorkbenchRunEnvelopeResponse, {"data": remove(*self.owner(), str(run_id))})
+
+
+@console_ns.route("/workbench/runs/<uuid:run_id>/steer")
+class Steer(WorkbenchResource):
+    @console_ns.expect(console_ns.models[WorkbenchSteerPayload.__name__])
+    @console_ns.response(
+        200, "Queued message attached to the current task", console_ns.models[WorkbenchRunEnvelopeResponse.__name__]
+    )
+    def post(self, run_id):
+        from services.workbench.followups import steer
+
+        payload = WorkbenchSteerPayload.model_validate(console_ns.payload or {})
+        return dump_response(
+            WorkbenchRunEnvelopeResponse, {"data": steer(*self.owner(), str(run_id), payload.target_run_id)}
+        )
+
+
 @console_ns.route("/workbench/runs/<uuid:run_id>/resume")
 class Resume(WorkbenchResource):
     @console_ns.response(
@@ -601,6 +700,52 @@ class Resume(WorkbenchResource):
         )
 
 
+@console_ns.route("/workbench/runs/<uuid:run_id>/input-interaction")
+class InputInteraction(WorkbenchResource):
+    @console_ns.expect(console_ns.models[WorkbenchInputInteractionPayload.__name__])
+    @console_ns.response(
+        200, "Human input countdown cancelled", console_ns.models[WorkbenchRunEnvelopeResponse.__name__]
+    )
+    def post(self, run_id):
+        from services.workbench.recovery import interact
+
+        payload = WorkbenchInputInteractionPayload.model_validate(console_ns.payload or {})
+        return dump_response(
+            WorkbenchRunEnvelopeResponse,
+            {"data": interact(*self.owner(), str(run_id), payload.request_id)},
+        )
+
+
+@console_ns.route("/workbench/runs/<uuid:run_id>/input-timeout")
+class InputTimeout(WorkbenchResource):
+    @console_ns.expect(console_ns.models[WorkbenchInputInteractionPayload.__name__])
+    @console_ns.response(
+        200, "Current state after checking input deadline", console_ns.models[WorkbenchRunEnvelopeResponse.__name__]
+    )
+    def post(self, run_id):
+        from services.workbench.recovery import expire_input
+
+        payload = WorkbenchInputInteractionPayload.model_validate(console_ns.payload or {})
+        owner = self.owner()
+        expire_input(str(run_id), owner=owner, request_id=payload.request_id)
+        dto, _ = owned_run(*owner, str(run_id))
+        return dump_response(WorkbenchRunEnvelopeResponse, {"data": dto})
+
+
+@console_ns.route("/workbench/runs/<uuid:run_id>/input-skip")
+class InputSkip(WorkbenchResource):
+    @console_ns.expect(console_ns.models[WorkbenchInputInteractionPayload.__name__])
+    @console_ns.response(200, "Human question skipped", console_ns.models[WorkbenchRunEnvelopeResponse.__name__])
+    def post(self, run_id):
+        from services.workbench.recovery import expire_input
+
+        payload = WorkbenchInputInteractionPayload.model_validate(console_ns.payload or {})
+        owner = self.owner()
+        expire_input(str(run_id), owner=owner, request_id=payload.request_id, manual=True)
+        dto, _ = owned_run(*owner, str(run_id))
+        return dump_response(WorkbenchRunEnvelopeResponse, {"data": dto})
+
+
 @console_ns.route("/workbench/runs/<uuid:run_id>/stop")
 class Stop(WorkbenchResource):
     @console_ns.response(
@@ -608,26 +753,12 @@ class Stop(WorkbenchResource):
     )
     def post(self, run_id):
         tenant_id, account_id = self.owner()
-        task_id = read_state(tenant_id, account_id, str(run_id))["task_id"]
-        redis_client.setex(scheduler.PREFIX + "stop:" + str(run_id), 86400, "1")
-        end_event = None
-        with session_factory.get_session_maker().begin() as session:
-            run = session.scalar(owned_statement(tenant_id, account_id, str(run_id)).with_for_update())
-            if run is None:
-                raise NotFound()
-            if run.status in ("queued", "running", "waiting_input", "environment_update", "environment_installing"):
-                run.status = "cancelled"
-                if uses_journal(run):
-                    end_event = append_locked(
-                        session, run, {"event": "workbench_end", "status": "cancelled", "error": None}
-                    )
-        if end_event is not None:
-            notify(str(run_id), end_event)
-        if task_id:
-            AppTaskService.stop_task(task_id, InvokeFrom.EXPLORE, account_id, AppMode.AGENT)
+        from services.workbench.recovery import cancel_chain
         from tasks.workbench_tasks import force_stop
 
-        force_stop.delay(str(run_id), account_id)
+        for target in cancel_chain(tenant_id, account_id, str(run_id)):
+            redis_client.setex(scheduler.PREFIX + "stop:" + target, 86400, "1")
+            force_stop.delay(target, account_id)
         return dump_response(WorkbenchStopEnvelopeResponse, {"data": {"status": "cancelled"}})
 
 
@@ -690,6 +821,7 @@ class Events(WorkbenchResource):
                                 "event": "workbench_end",
                                 "status": terminal_state["status"],
                                 "error": terminal_state["error"],
+                                **({"recovery": terminal_state["recovery"]} if "recovery" in terminal_state else {}),
                             }
                         )
                         + "\n\n"

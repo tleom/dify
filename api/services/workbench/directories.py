@@ -8,30 +8,49 @@ from models.workbench import WorkbenchChat
 
 
 def chat_directory(session, chat):
-    binding = session.scalar(
-        select(Conversation.agent_workspace_binding_id).where(
-            Conversation.id == chat.conversation_id, Conversation.app_id == chat.app_id
+    binding = (
+        session.scalar(
+            select(Conversation.agent_workspace_binding_id).where(
+                Conversation.id == chat.conversation_id, Conversation.app_id == chat.app_id
+            )
         )
-    ) if chat.conversation_id else None
+        if chat.conversation_id
+        else None
+    )
     return "conversations/" + (binding or chat.id)
 
 
 def owned_directories(session, tenant_id, account_id):
-    chats = session.scalars(select(WorkbenchChat).where(
-        WorkbenchChat.tenant_id == tenant_id, WorkbenchChat.account_id == account_id,
-        WorkbenchChat.deleted == 0,
-    ).order_by(WorkbenchChat.updated_at.desc()))
+    chats = session.scalars(
+        select(WorkbenchChat)
+        .where(
+            WorkbenchChat.tenant_id == tenant_id,
+            WorkbenchChat.account_id == account_id,
+            WorkbenchChat.deleted == 0,
+        )
+        .order_by(WorkbenchChat.updated_at.desc())
+    )
     return {chat_directory(session, chat): chat for chat in chats}
 
 
 def resolve_path(session, tenant_id, account_id, path, *, chat_id=None):
+    if chat_id is not None:
+        from services.workbench.service import _chat
+
+        _chat(session, tenant_id, account_id, chat_id)
+    if path == ".":
+        return ".", None
     parts = path.split("/")
-    if len(parts) < 2 or any(part in ("", ".", "..") or "\\" in part or "\x00" in part for part in parts):
-        raise BadRequest("请选择对话文件夹中的文件")
+    if any(part in ("", ".", "..") or any(char in part for char in "\\\x00:") for part in parts):
+        raise BadRequest("文件路径必须位于个人文件空间")
+    if parts[0] != "conversations":
+        return ".", None
+    if len(parts) < 2:
+        return "conversations", None
     root = "/".join(parts[:2])
     chat = owned_directories(session, tenant_id, account_id).get(root)
-    if chat is None or (chat_id is not None and chat.id != chat_id):
-        raise NotFound("文件不属于当前对话")
+    if chat is None:
+        raise NotFound("文件不属于当前用户的有效对话")
     return root, chat
 
 

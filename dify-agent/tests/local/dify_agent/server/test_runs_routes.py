@@ -1,4 +1,7 @@
 from fastapi.testclient import TestClient
+from unittest.mock import AsyncMock
+
+import pytest
 
 from dify_agent.protocol import CancelRunResponse, DIFY_AGENT_MODEL_LAYER_ID, RunFailureType
 from dify_agent.runtime.run_scheduler import RunCancellationConflictError, SchedulerStoppingError
@@ -19,6 +22,65 @@ class FakeScheduler:
 
 class FakeStore:
     pass
+
+
+@pytest.mark.parametrize("status", ["running", "cancelled"])
+def test_fence_returns_history_only_after_execution_stops(status: str) -> None:
+    from fastapi import FastAPI
+
+    ticket = "c2890d1b-cd23-4e32-a78a-f9b070a49de2"
+    store = AsyncMock()
+    store.fence_run.return_value = status
+    store.redis.get.return_value = None
+    store.get_fenced_state.return_value = {}
+    store.get_history_checkpoint.return_value = {"messages": []}
+    app = FastAPI()
+    app.include_router(create_runs_router(lambda: store, lambda: FakeScheduler()))  # pyright: ignore[reportArgumentType]
+    client = TestClient(app)
+    response = client.post(f"/runs/{ticket}/fence", json={})
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": ticket,
+        "status": status,
+        "history": {"messages": []} if status != "running" else None,
+        "steering_delivered_ids": None,
+    }
+    assert store.get_history_checkpoint.await_count == int(status != "running")
+    assert client.post("/runs/not-a-ticket/fence", json={}).status_code == 400
+    schema = client.get("/openapi.json").json()
+    assert "history" in schema["components"]["schemas"]["FenceRunResponse"]["properties"]
+
+
+def test_fence_returns_context_only_after_native_execution_is_terminal(monkeypatch):
+    from uuid import uuid4
+    from fastapi import FastAPI
+    from dify_agent.runtime import workbench_recovery
+
+    class Store:
+        status = "running"
+
+        async def fence_run(self, run_id):
+            return self.status
+
+        async def get_fenced_state(self, run_id):
+            assert self.status != "running"
+            return {"history": {"messages": []}, "steering_delivered_ids": ["seen"]}
+
+    async def recover(store, run_id, status):
+        return status
+
+    monkeypatch.setattr(workbench_recovery, "recover_fenced_run", recover)
+    store = Store()
+    app = FastAPI()
+    app.include_router(create_runs_router(lambda: store, lambda: FakeScheduler()))
+    client = TestClient(app)
+    path = f"/runs/{uuid4()}/fence"
+    assert client.post(path).json()["history"] is None
+    store.status = "cancelled"
+    response = client.post(path)
+    assert response.status_code == 200
+    assert response.json()["history"] == {"messages": []}
+    assert response.json()["steering_delivered_ids"] == ["seen"]
 
 
 def test_get_run_status_returns_failure_type() -> None:

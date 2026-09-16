@@ -356,6 +356,18 @@ class AgentRunRunner:
                         )
                 entered_run = True
                 apply_layer_exit_signals(run, self.request.on_exit)
+                from dify_agent.layers.workbench_control import WorkbenchControlLayer
+                from dify_agent.runtime.workbench_control import WorkbenchControlCapability
+
+                control_layer = next(
+                    (slot.layer for slot in run.slots.values() if isinstance(slot.layer, WorkbenchControlLayer)), None
+                )
+                if control_layer is not None:
+                    control_layer.http_client = self.dify_api_http_client
+                    control_layer.run_id = self.run_id
+                    await control_layer.request()
+                    await control_layer.resource_request(initialize=True)
+                control_capability = WorkbenchControlCapability(control_layer) if control_layer else None
                 user_prompts = run.user_prompts
                 deferred_tool_results = _resolve_deferred_tool_results(self.request)
                 if deferred_tool_results is None and not has_non_blank_user_prompt(user_prompts):
@@ -395,11 +407,39 @@ class AgentRunRunner:
                 files_layer = next(
                     (slot.layer for slot in run.slots.values() if isinstance(slot.layer, WorkbenchFilesLayer)), None
                 )
+                from dify_agent.layers.workbench_followups import WorkbenchFollowupsLayer
+                from dify_agent.runtime.workbench_followups import WorkbenchFollowupsCapability
+
+                followups_layer = next(
+                    (slot.layer for slot in run.slots.values() if isinstance(slot.layer, WorkbenchFollowupsLayer)), None
+                )
+                followups = (
+                    WorkbenchFollowupsCapability(followups_layer, self.dify_api_http_client, self.run_id)
+                    if followups_layer is not None
+                    else None
+                )
                 shell_layer = next(
                     (slot.layer for slot in run.slots.values() if isinstance(slot.layer, DifyShellLayer)), None
                 )
                 shell_arguments = (
                     ShellArgumentCompatibilityCapability() if files_layer is not None or activity is not None else None
+                )
+                from dify_agent.runtime.workbench_tool_recovery import WorkbenchToolRecoveryCapability
+                from dify_agent.runtime.workbench_checkpoint import HistoryCheckpointSink, WorkbenchHistoryCheckpoint
+
+                tool_recovery = (
+                    WorkbenchToolRecoveryCapability()
+                    if self.request.execution_ticket or files_layer is not None or activity is not None
+                    else None
+                )
+                checkpoint = (
+                    WorkbenchHistoryCheckpoint(
+                        sink=self.sink,
+                        run_id=self.run_id,
+                        seen_ids=followups_layer.runtime_state.seen_ids if followups_layer is not None else None,
+                    )
+                    if tool_recovery is not None and isinstance(self.sink, HistoryCheckpointSink)
+                    else None
                 )
                 changes = (
                     WorkbenchFileChanges(shell_layer, activity, files_layer)
@@ -475,6 +515,8 @@ class AgentRunRunner:
                             data=event,
                             agent_message_delta=text_delta,
                         )
+                        if tool_recovery is not None:
+                            tool_recovery.observe(event)
 
                 try:
                     output_contract = resolve_run_output_contract(run)
@@ -491,6 +533,17 @@ class AgentRunRunner:
                     compaction = build_compaction_capability(
                         context_window_tokens=llm_layer.config.context_window_tokens,
                         model_settings=llm_layer.config.model_settings,
+                        workbench=tool_recovery is not None,
+                    )
+                    from dify_agent.runtime.workbench_tool_output import WorkbenchToolOutputLimits
+
+                    tool_output = (
+                        WorkbenchToolOutputLimits(shell_layer, compaction.target_tokens)
+                        if tool_recovery is not None
+                        and shell_layer is not None
+                        and compaction is not None
+                        and compaction.target_tokens is not None
+                        else None
                     )
                     if self.request.execution_ticket:
                         from dify_agent.runtime.context_status import WorkbenchContextStatus
@@ -518,68 +571,114 @@ class AgentRunRunner:
                         "Deferred tool results require a 'history' layer with prior message history."
                     )
 
-                from dify_agent.runtime.knowledge import require_knowledge_before_answer
+                if control_layer is not None and (control_layer.runtime_state.control or {}).get("kind") == "compact":
+                    from dify_agent.runtime.manual_compaction import compact_history
 
-                agent = create_agent(
-                    model,
-                    tools=tools,
-                    **({"output_retries": 2} if mentions_layer is not None or delivery is not None else {}),
-                    output_type=_resolve_agent_output_type(
-                        output_contract.output_type, ask_human_layer is not None or environment_layer is not None
-                    ),
-                )
-                require_knowledge_before_answer(agent, knowledge_layer)
-                if mentions_layer is not None:
-                    mentions_layer.require_before_answer(agent)
-                run_timeout = asyncio.timeout(self.run_timeout_seconds)
-                try:
-                    with capture_run_messages() as captured_messages:
-                        try:
-                            async with run_timeout:
-                                result = await agent.run(
-                                    None if deferred_tool_results is not None else normalize_user_input(user_prompts),
-                                    message_history=message_history,
-                                    deferred_tool_results=deferred_tool_results,
-                                    event_stream_handler=handle_events,
-                                    instructions=run.prompts or None,
-                                    capabilities=[
-                                        capability
-                                        for capability in (compaction, shell_arguments, activity, delivery)
-                                        if capability is not None
-                                    ],
-                                    usage_limits=UsageLimits(request_limit=_MAX_AGENT_STEPS_PER_RUN),
-                                )
-                        finally:
-                            if captured_messages:
-                                replace_run_history(history_layer, captured_messages)
-                except TimeoutError as exc:
-                    if not run_timeout.expired():
-                        raise
-                    raise UsageLimitExceeded(
-                        f"Agent run exceeded the configured limit of {self.run_timeout_seconds:g} seconds"
-                    ) from exc
-                complete_usage = model.accumulated_usage if isinstance(model, _HasAccumulatedUsage) else None
-                usage = _serialize_agent_usage(complete_usage if complete_usage is not None else _result_usage(result))
-                self._terminal_usage = usage
-                if isinstance(result.output, DeferredToolRequests):
-                    deferred_layer = (
-                        environment_layer
-                        if (result.output.calls and result.output.calls[0].tool_name == TOOL_NAME)
-                        else ask_human_layer
-                    )
-                    if deferred_layer is None:
-                        raise AgentRunValidationError(
-                            "Deferred tool requests were returned, but no active ask_human layer is available for validation."
+                    async with asyncio.timeout(self.run_timeout_seconds):
+                        output, compact_usage = await compact_history(
+                            layer=control_layer,
+                            model=model,
+                            history=history_layer,
+                            checkpoint=checkpoint,
+                            sink=self.sink,
+                            run_id=self.run_id,
+                            window_tokens=llm_layer.config.context_window_tokens,
                         )
-                    if history_layer is None:
-                        raise AgentRunValidationError(
-                            "ask_human deferred tool requests require a 'history' layer so the pending tool call can be resumed."
-                        )
-                    deferred_tool_call = deferred_layer.build_deferred_tool_call_payload(result.output)
-                    result_kind = "deferred_tool_call"
-                else:
-                    output = _serialize_agent_output(result.output)
+                    usage = _serialize_agent_usage(compact_usage)
+                    self._terminal_usage = usage
                     result_kind = "output"
+                else:
+                    from dify_agent.runtime.knowledge import require_knowledge_before_answer
+
+                    agent = create_agent(
+                        model,
+                        tools=tools,
+                        **(
+                            # Unknown names bypass tool hooks. Keep the SDK's per-name
+                            # retry ceiling above any possible model step count; the
+                            # capability enforces five consecutive results instead.
+                            {"output_retries": 4, "tool_retries": _MAX_AGENT_STEPS_PER_RUN}
+                            if tool_recovery is not None
+                            else {"output_retries": 2}
+                            if mentions_layer is not None or delivery is not None
+                            else {}
+                        ),
+                        output_type=_resolve_agent_output_type(
+                            output_contract.output_type,
+                            ask_human_layer is not None or environment_layer is not None or control_layer is not None,
+                        ),
+                    )
+                    require_knowledge_before_answer(agent, knowledge_layer)
+                    if mentions_layer is not None:
+                        mentions_layer.require_before_answer(agent)
+                    run_timeout = asyncio.timeout(self.run_timeout_seconds)
+                    try:
+                        with capture_run_messages() as captured_messages:
+                            try:
+                                async with run_timeout:
+                                    result = await agent.run(
+                                        None
+                                        if deferred_tool_results is not None
+                                        else normalize_user_input(user_prompts),
+                                        message_history=message_history,
+                                        deferred_tool_results=deferred_tool_results,
+                                        event_stream_handler=handle_events,
+                                        instructions=run.prompts or None,
+                                        capabilities=[
+                                            capability
+                                            for capability in (
+                                                followups,
+                                                control_capability,
+                                                checkpoint,
+                                                compaction,
+                                                shell_arguments,
+                                                tool_output,
+                                                tool_recovery,
+                                                activity,
+                                                delivery,
+                                            )
+                                            if capability is not None
+                                        ],
+                                        usage_limits=UsageLimits(request_limit=_MAX_AGENT_STEPS_PER_RUN),
+                                    )
+                            finally:
+                                if captured_messages:
+                                    replace_run_history(history_layer, captured_messages)
+                    except TimeoutError as exc:
+                        if not run_timeout.expired():
+                            raise
+                        raise UsageLimitExceeded(
+                            f"Agent run exceeded the configured limit of {self.run_timeout_seconds:g} seconds"
+                        ) from exc
+                    complete_usage = model.accumulated_usage if isinstance(model, _HasAccumulatedUsage) else None
+                    usage = _serialize_agent_usage(
+                        complete_usage if complete_usage is not None else _result_usage(result)
+                    )
+                    self._terminal_usage = usage
+                    if isinstance(result.output, DeferredToolRequests):
+                        plan_review = bool(result.output.calls and result.output.calls[0].tool_name == "exit_plan_mode")
+                        deferred_layer = (
+                            environment_layer
+                            if (result.output.calls and result.output.calls[0].tool_name == TOOL_NAME)
+                            else ask_human_layer
+                        )
+                        if deferred_layer is None and not (plan_review and control_layer is not None):
+                            raise AgentRunValidationError(
+                                "Deferred tool requests were returned, but no active ask_human layer is available for validation."
+                            )
+                        if history_layer is None:
+                            raise AgentRunValidationError(
+                                "ask_human deferred tool requests require a 'history' layer so the pending tool call can be resumed."
+                            )
+                        if plan_review and control_layer is not None:
+                            deferred_tool_call = await control_layer.plan_review(result.output)
+                        else:
+                            assert deferred_layer is not None
+                            deferred_tool_call = deferred_layer.build_deferred_tool_call_payload(result.output)
+                        result_kind = "deferred_tool_call"
+                    else:
+                        output = _serialize_agent_output(result.output)
+                        result_kind = "output"
         except RuntimeError as exc:
             if not entered_run and is_agenton_enter_validation_runtime_error(exc):
                 raise AgentRunValidationError(str(exc)) from exc

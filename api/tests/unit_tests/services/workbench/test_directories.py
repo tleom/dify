@@ -32,15 +32,30 @@ def test_directory_listing_filters_owner_and_deletion() -> None:
     }
 
 
-def test_attachment_cannot_reference_another_owned_conversation(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_explicit_cross_conversation_paths_require_owned_source_and_destination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.workbench import service
+
     chat = SimpleNamespace(id="chat-a")
+
+    def owned_chat(_session, _tenant, _account, identifier: str) -> SimpleNamespace:
+        if identifier not in {"chat-a", "chat-b"}:
+            raise NotFound()
+        return SimpleNamespace(id=identifier)
+
+    monkeypatch.setattr(service, "_chat", owned_chat)
     monkeypatch.setattr(directories, "owned_directories", lambda *_args: {"conversations/a": chat})
     assert directories.resolve_path(None, "tenant", "account", "conversations/a/file.txt", chat_id="chat-a") == (
         "conversations/a",
         chat,
     )
+    assert directories.resolve_path(None, "tenant", "account", "conversations/a/file.txt", chat_id="chat-b") == (
+        "conversations/a",
+        chat,
+    )
     with pytest.raises(NotFound):
-        directories.resolve_path(None, "tenant", "account", "conversations/a/file.txt", chat_id="chat-b")
+        directories.resolve_path(None, "tenant", "account", "memory.md", chat_id="foreign")
     with pytest.raises(NotFound):
         directories.resolve_path(None, "tenant", "account", "conversations/foreign/file.txt")
 
@@ -48,7 +63,7 @@ def test_attachment_cannot_reference_another_owned_conversation(monkeypatch: pyt
 @pytest.mark.parametrize(
     "path",
     [
-        "shared/file.txt",
+        "/workspace/foreign",
         "conversations/a/../b/file",
         "conversations/a//file",
         "conversations/a/./file",
@@ -63,3 +78,8 @@ def test_rejects_legacy_or_noncanonical_paths(path: str, monkeypatch: pytest.Mon
 
 def test_title_only_affects_download_filename() -> None:
     assert directories.archive_name("合同/审查:结果") == "合同审查结果.zip"
+
+
+def test_personal_root_memory_and_skills_are_valid_paths() -> None:
+    for path in (".", "memory.md", "skills/report/SKILL.md", "shared/file.txt"):
+        assert directories.resolve_path(None, "tenant", "account", path) == (".", None)

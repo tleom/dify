@@ -39,7 +39,8 @@ def test_stat_finds_exact_file_beyond_bounded_listing(operate: FileOperator, tmp
     assert item["downloadable"] is True
     assert "data" not in item
     first = operate({"operation": "stat", "path": str(entries[0]["path"])}, root)
-    assert first == entries[0]
+    assert entries[0]["version"] is None
+    assert first == {**entries[0], "version": hashlib.sha256(b"entry").hexdigest()}
 
 
 def test_stat_preserves_directory_version_and_blocks_links(operate: FileOperator, tmp_path: Path) -> None:
@@ -55,7 +56,11 @@ def test_stat_preserves_directory_version_and_blocks_links(operate: FileOperator
         list[dict[str, object]], operate({"operation": "list", "path": "conversations/chat"}, root)["entries"]
     )
     for entry in entries:
-        assert operate({"operation": "stat", "path": str(entry["path"])}, root) == entry
+        item = operate({"operation": "stat", "path": str(entry["path"])}, root)
+        assert entry["version"] is None
+        assert {**item, "version": None} == entry
+        if entry["kind"] == "directory":
+            assert isinstance(item["version"], str)
     assert {entry["kind"] for entry in entries if entry["name"] in {"link", "fifo"}} == {"blocked"}
     with pytest.raises((OSError, ValueError)):
         operate({"operation": "stat", "path": "conversations/chat/link/report.txt"}, root)
@@ -64,7 +69,7 @@ def test_stat_preserves_directory_version_and_blocks_links(operate: FileOperator
     assert operate({"operation": "stat", "path": "conversations/chat/missing.txt"}, root)["kind"] == "missing"
 
 
-def test_stat_and_list_match_actual_download_size_limits(operate: FileOperator, tmp_path: Path) -> None:
+def test_stat_resolves_download_size_limits_after_shallow_listing(operate: FileOperator, tmp_path: Path) -> None:
     folder = tmp_path / "conversations" / "chat"
     folder.mkdir(parents=True)
     oversized = folder / "large.bin"
@@ -90,4 +95,8 @@ def test_stat_and_list_match_actual_download_size_limits(operate: FileOperator, 
     (folder / "link").symlink_to(folder / "part-0.bin")
     assert operate({"operation": "stat", "path": "conversations/chat"}, root)["downloadable"] is False
     listing = cast(list[dict[str, object]], operate({"operation": "list", "path": "conversations"}, root)["entries"])
-    assert listing[0]["downloadable"] is False
+    # Listing advertises the folder; stat/get enforce its recursive limits on demand.
+    assert listing[0]["version"] is None
+    assert listing[0]["downloadable"] is True
+    with pytest.raises(ValueError, match="unsupported link"):
+        operate({"operation": "get", "path": "conversations/chat"}, root)

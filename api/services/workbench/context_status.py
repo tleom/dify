@@ -13,7 +13,10 @@ def record_context_status(tenant_id, conversation_id, account_id, public_event):
     if not dify_config.WORKBENCH_ENABLED:
         return
     with session_factory.get_session_maker().begin() as session:
-        run = current_run(session, tenant_id, conversation_id, account_id)
+        # This path writes the same payload as steering and final sealing. Read
+        # it under the execution row lock so unrelated progress cannot replace
+        # a supplement or seal committed while this event is being persisted.
+        run = current_run(session, tenant_id, conversation_id, account_id, for_update=True)
         if run is None or run.tenant_id != tenant_id or run.account_id != account_id:
             return
         if run.backend_run_id != public_event.run_id:

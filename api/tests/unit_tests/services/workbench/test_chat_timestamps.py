@@ -27,6 +27,15 @@ def history(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[sessionmaker[Sess
             TypeBase.metadata.tables[model.__tablename__] for model in (WorkbenchChat, WorkbenchRevision, WorkbenchRun)
         ],
     )
+    from models.workbench import WorkbenchCommand, WorkbenchControl, WorkbenchRunEvent
+
+    WorkbenchControl.metadata.create_all(
+        engine,
+        tables=[
+            WorkbenchControl.metadata.tables[model.__tablename__]
+            for model in (WorkbenchControl, WorkbenchCommand, WorkbenchRunEvent)
+        ],
+    )
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     monkeypatch.setattr(factory_module, "_session_maker", factory)
     monkeypatch.setattr(service, "authorize", Mock())

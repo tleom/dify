@@ -101,6 +101,12 @@ class DifyConfigLayer(PlainLayer[DifyConfigDeps, DifyConfigLayerConfig, DifyConf
         return None
 
     async def _initialize_context(self) -> None:
+        execution = self.deps.shell.deps.execution_context
+        if execution is not None and execution.config.workbench_run_id:
+            self._initialize_runtime_prompt_state()
+            self.runtime_state.pulled_skill_outputs = {}
+            self.runtime_state.pulled_file_outputs = {}
+            return
         if self.config.reset_materialized_assets:
             # Only the runtime-owned asset cache in this conversation's cwd is rebuilt.
             # Directory descriptors prevent a replaced/symlinked cache escaping that cwd.
@@ -173,6 +179,29 @@ PY"""
 
     def build_suffix_prompt(self) -> str:
         sections: list[str] = []
+        execution = self.deps.shell.deps.execution_context
+        if execution is not None and execution.config.workbench_run_id:
+            return (
+                "Administrator configuration is read-only. Use read_skill(scope='global', name=...) to load "
+                "enabled global skills from /opt/workbench-global. Personal skills are under /workspace/skills; "
+                "personal persistent memory is /workspace/memory.md. Follow the current resource catalog.\n"
+                + ("Administrator note:\n" + self.config.note + "\n" if self.config.note else "")
+                + (
+                    "This turn explicitly requests these global skills: "
+                    + ", ".join(self.config.mentioned_skill_names)
+                    + ". Load their instructions with read_skill before using them.\n"
+                    if self.config.mentioned_skill_names
+                    else ""
+                )
+                + (
+                    "This turn explicitly requests these administrator files: "
+                    + ", ".join(self.config.mentioned_file_names)
+                    + ". Read their paths from the current catalog.\n"
+                    if self.config.mentioned_file_names
+                    else ""
+                )
+                + self._format_agent_file_cli_help()
+            )
         if self.runtime_state.config_context_json:
             sections.append(
                 f"{_CONFIG_CONTEXT_HEADING}\n"

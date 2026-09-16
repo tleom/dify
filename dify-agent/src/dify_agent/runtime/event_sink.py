@@ -75,6 +75,10 @@ class InMemoryRunEventSink:
         self.statuses = {}
         self.errors = {}
         self.error_types = {}
+        self.history_checkpoints: dict[str, str] = {}
+
+    async def checkpoint_history(self, run_id: str, state: str) -> None:
+        self.history_checkpoints[run_id] = state
 
     async def append_event(self, event: NonTerminalRunEvent) -> str:
         """Store a non-terminal event and assign a monotonic per-run cursor."""
