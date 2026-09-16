@@ -10,6 +10,7 @@ from flask_restx import Api
 from werkzeug.exceptions import NotFound
 
 from controllers.files.workbench_files import WorkbenchSharedFile
+from models.base import TypeBase
 from models.workbench import WorkbenchChat, WorkbenchFileShare
 from services.workbench import file_shares, files
 from tests.unit_tests.services.workbench.test_file_links import FileSpace
@@ -17,9 +18,11 @@ from tests.unit_tests.services.workbench.test_file_links import file_space as fi
 
 
 @pytest.fixture
-def shares(file_space: FileSpace, monkeypatch: pytest.MonkeyPatch):
+def shares(file_space: FileSpace, monkeypatch: pytest.MonkeyPatch) -> FileSpace:
     payload, root, contents, factory, _ = file_space
-    WorkbenchFileShare.__table__.create(factory.kw["bind"])
+    TypeBase.metadata.create_all(
+        factory.kw["bind"], tables=[TypeBase.metadata.tables[WorkbenchFileShare.__tablename__]]
+    )
     monkeypatch.setattr(file_shares, "ensure_workspace", files.ensure_workspace)
     monkeypatch.setattr(file_shares, "manager", files.manager)
     monkeypatch.setattr(file_shares, "redis_client", Mock(lock=lambda *_args, **_kwargs: nullcontext()))
@@ -28,7 +31,7 @@ def shares(file_space: FileSpace, monkeypatch: pytest.MonkeyPatch):
     return payload, root, contents, factory, app.test_client()
 
 
-def test_permanent_html_link_reads_latest_bytes_and_revocation(shares):
+def test_permanent_html_link_reads_latest_bytes_and_revocation(shares: FileSpace) -> None:
     owner, root, contents, _, client = shares
     path = root + "/报告.html"
     share = file_shares.create_share(owner.tenant_id, owner.account_id, path)
@@ -52,7 +55,7 @@ def test_permanent_html_link_reads_latest_bytes_and_revocation(shares):
     assert file_shares.get_share(owner.tenant_id, owner.account_id, path) is None
 
 
-def test_foreign_owner_expiry_rotation_and_deleted_chat(shares, monkeypatch: pytest.MonkeyPatch):
+def test_foreign_owner_expiry_rotation_and_deleted_chat(shares: FileSpace, monkeypatch: pytest.MonkeyPatch) -> None:
     owner, root, _, factory, client = shares
     path = root + "/报告.html"
     with pytest.raises(NotFound):

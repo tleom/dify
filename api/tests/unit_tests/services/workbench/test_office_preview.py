@@ -8,7 +8,7 @@ from werkzeug.exceptions import BadRequest
 from services.workbench import office_preview
 
 
-def test_conversion_cache_tracks_file_content_and_owner(monkeypatch: pytest.MonkeyPatch):
+def test_conversion_cache_tracks_file_content_and_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     cache: dict[str, bytes] = {}
     redis = Mock(
         get=cache.get,
@@ -29,7 +29,7 @@ def test_conversion_cache_tracks_file_content_and_owner(monkeypatch: pytest.Monk
 
 
 @pytest.mark.parametrize(("name", "data"), [("script.py", "dGVzdA=="), ("file.docx", "!bad"), ("file.docx", "")])
-def test_invalid_document_never_reaches_sandbox(name: str, data: str, monkeypatch: pytest.MonkeyPatch):
+def test_invalid_document_never_reaches_sandbox(name: str, data: str, monkeypatch: pytest.MonkeyPatch) -> None:
     manager = Mock()
     monkeypatch.setattr(office_preview, "manager", manager)
     with pytest.raises(BadRequest):
