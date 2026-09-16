@@ -146,7 +146,17 @@ def test_executor_requires_terminal_frame(
     monkeypatch.setattr(tasks, "notify", Mock())
     monkeypatch.setattr(tasks.threading, "Thread", Mock())
     monkeypatch.setattr(tasks.scheduler, "heartbeat", Mock(return_value=True))
-    monkeypatch.setattr(tasks, "AgentAppGenerator", Mock(return_value=Mock(generate=Mock(return_value=iter(frames)))))
+    read_after_error = Mock()
+
+    def stream() -> Iterator[dict[str, str]]:
+        yield from frames
+        if frames[-1].get("event") == "error":
+            # A real provider can keep this iterator open indefinitely. Reading
+            # again would postpone terminal status and keep renewing the lease.
+            read_after_error()
+            yield {"event": "ping"}
+
+    monkeypatch.setattr(tasks, "AgentAppGenerator", Mock(return_value=Mock(generate=Mock(return_value=stream()))))
     wake_recovery, dispatch = Mock(), Mock()
     monkeypatch.setattr(tasks.recover_run, "apply_async", wake_recovery)
     wake_followups = Mock()
@@ -167,6 +177,7 @@ def test_executor_requires_terminal_frame(
     assert wake_recovery.called is should_recover
     assert wake_followups.called is (expected_status == "completed")
     assert fence.called is should_recover
+    read_after_error.assert_not_called()
     dispatch.assert_called_once()
 
 

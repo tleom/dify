@@ -34,6 +34,7 @@ there are no separate output or snapshot events to correlate.
 import asyncio
 from collections import Counter
 from collections.abc import AsyncIterable, Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast, runtime_checkable
 
@@ -97,6 +98,7 @@ from dify_agent.runtime.history import (
 from dify_agent.runtime.layer_exit_signals import apply_layer_exit_signals, validate_layer_exit_signals
 from dify_agent.runtime.output_type import resolve_run_output_contract, validate_output_layer_composition
 from dify_agent.runtime.user_prompt_validation import EMPTY_USER_PROMPTS_ERROR, has_non_blank_user_prompt
+from dify_agent.runtime.workbench_model_idle import WorkbenchModelIdleCapability
 from dify_agent.runtime_backend import BindingLostError
 
 _AGENT_OUTPUT_ADAPTER = TypeAdapter(object)
@@ -434,6 +436,7 @@ class AgentRunRunner:
                     if self.request.execution_ticket or files_layer is not None or activity is not None
                     else None
                 )
+                model_idle = WorkbenchModelIdleCapability() if tool_recovery is not None else None
                 checkpoint = (
                     WorkbenchHistoryCheckpoint(
                         sink=self.sink,
@@ -488,6 +491,8 @@ class AgentRunRunner:
                     async for event in published_events:
                         if self.is_cancelled():
                             raise asyncio.CancelledError
+                        if model_idle is not None:
+                            model_idle.observe(event)
                         if mentions_layer is not None:
                             mentions_layer.record_event(event)
                         text_delta = _extract_agent_message_delta(event)
@@ -623,7 +628,7 @@ class AgentRunRunner:
                     try:
                         with capture_run_messages() as captured_messages:
                             try:
-                                async with run_timeout:
+                                async with run_timeout, model_idle.guard() if model_idle is not None else nullcontext():
                                     result = await agent.run(
                                         None
                                         if deferred_tool_results is not None
@@ -638,6 +643,7 @@ class AgentRunRunner:
                                                 followups,
                                                 control_capability,
                                                 checkpoint,
+                                                model_idle,
                                                 compaction,
                                                 shell_arguments,
                                                 tool_output,

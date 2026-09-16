@@ -446,6 +446,12 @@ def execute(owner, run_id):
                             item["_id"] = cursor.decode() if isinstance(cursor, bytes) else str(cursor)
                         if item.get("event") == "error":
                             status, error = "failed", item.get("message", "Agent 执行失败")
+                            break
+                    # The terminal error is authoritative even if the upstream
+                    # SSE iterator keeps sending heartbeats instead of closing.
+                    # Finish this attempt and fence its ticket before recovery.
+                    if status == "failed":
+                        break
                 completed_stream = terminal_received
                 if not terminal_received:
                     status, error = "failed", "执行事件流提前结束，已保留进度，正在恢复任务。"

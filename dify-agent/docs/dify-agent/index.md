@@ -297,6 +297,14 @@ the current run state and resume the same logical run without submitting default
 or partially entered answers. A missing answer does not grant new permissions or
 establish facts. All three endpoints enforce account, tenant and question identity.
 
+The API stops consuming immediately after a terminal error frame, even if the
+upstream connection remains open or continues sending keepalives. Workbench
+model requests have a 180-second idle deadline that resets on actual text,
+reasoning or tool-argument output. Tool execution and deferred human input do
+not consume that idle deadline. A silent model ends the attempt through the
+existing checkpoint, remote fencing and bounded automatic recovery path;
+manual cancellation remains cancellation and is never converted into recovery.
+
 The API treats a stream without a terminal frame as a failure and tolerates brief
 Redis heartbeat outages until the last confirmed execution lease expires. Recovery
 reconciles lost leases and rechecks renewed ones before interrupting a run. Continued
