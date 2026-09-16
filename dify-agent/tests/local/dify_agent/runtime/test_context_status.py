@@ -1,6 +1,7 @@
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RequestUsage
 
 from dify_agent.protocol.schemas import RUN_EVENT_ADAPTER
 from dify_agent.runtime.compaction import build_compaction_capability
@@ -85,3 +86,29 @@ def test_unknown_workbench_window_compacts_without_reporting_a_guessed_capacity(
     assert all(event.data.window_tokens is None for event in events)
     assert [event.data.phase for event in events][:3] == ["usage", "compacting", "compacted"]
     assert len(result.all_messages()) < len(history)
+
+
+def test_compacted_usage_does_not_reuse_the_preserved_responses_old_provider_count():
+    history = [ModelRequest(parts=[UserPromptPart("Verify every record")])]
+    for index in range(10):
+        history.extend(
+            [
+                ModelResponse(parts=[TextPart(f"Evidence {index}: " + "material " * 500)]),
+                ModelRequest(parts=[UserPromptPart("continue")]),
+            ]
+        )
+    history.append(ModelResponse(parts=[TextPart("Most recent finding")], usage=RequestUsage(input_tokens=25000)))
+    sink = InMemoryRunEventSink()
+    capability = WorkbenchContextStatus(
+        compaction=build_compaction_capability(context_window_tokens=None, model_settings=None, workbench=True),
+        window_tokens=None,
+        sink=sink,
+        run_id="provider-anchor",
+    )
+    Agent(TestModel(call_tools=[], custom_output_text="Verified evidence retained")).run_sync(
+        "continue", message_history=history, capabilities=[capability]
+    )
+    before, after = sink.events["provider-anchor"][1:3]
+    assert before.data.used_tokens >= 25000
+    assert after.data.phase == "compacted"
+    assert after.data.used_tokens < before.data.used_tokens - 5000

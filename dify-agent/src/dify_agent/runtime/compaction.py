@@ -16,6 +16,8 @@ from pydantic_ai_harness.compaction import (
     TieredCompaction,
 )
 
+from dify_agent.runtime.workbench_compaction import WorkbenchSummarizingCompaction
+
 WORKBENCH_UNKNOWN_WINDOW_INPUT_BUDGET = 8_000
 
 
@@ -41,6 +43,23 @@ def build_compaction_capability(
             input_budget = min(input_budget, context_window_tokens - max_tokens)
     if input_budget <= 0:
         raise ValueError("Model max_tokens must leave a positive input context budget.")
+
+    if workbench:
+        # Summarize intact evidence before discarding it. Clearing old tool
+        # results first can erase the only source of a verified fact.
+        return TieredCompaction(
+            tiers=[
+                WorkbenchSummarizingCompaction(
+                    max_tokens=1,
+                    keep_messages=20,
+                    keep_tokens=input_budget // 3,
+                    source_budget_tokens=input_budget,
+                    preserve_first_user_message=True,
+                    incremental=True,
+                ),
+            ],
+            target_tokens=input_budget,
+        )
 
     return TieredCompaction(
         tiers=[

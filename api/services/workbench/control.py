@@ -99,6 +99,11 @@ def load(session, chat) -> WorkbenchControlState:
         )
     )
     state = WorkbenchControlState.model_validate_json(row.state) if row else WorkbenchControlState()
+    # The original public command always persisted this internal default; no
+    # command exposed a user-selected limit. Lift it for existing goals too.
+    # Do not reactivate blocked/paused goals without a user resume command.
+    if state.goal and state.goal.max_rounds == 256:
+        state.goal.max_rounds = None
     if state.goal and state.goal.started_at is None:
         _restore_goal_clock(session, chat, state.goal)
     return state
@@ -346,7 +351,9 @@ def admit_run(session, chat, run, control):
                 or (goal.id, goal.revision) != (control["goal_id"], control["goal_revision"])
             ):
                 raise Conflict("目标已改变，此轮自动执行已取消")
-            if goal.rounds_started != control["round"] - 1 or goal.rounds_started >= goal.max_rounds:
+            if goal.rounds_started != control["round"] - 1 or (
+                goal.max_rounds is not None and goal.rounds_started >= goal.max_rounds
+            ):
                 raise Conflict("目标执行轮次已改变")
             goal.rounds_started += 1
             goal.last_run_id = run.id
@@ -421,7 +428,7 @@ def drive_goal(tenant_id, account_id, chat_id):
             return None
         if session.scalar(select(WorkbenchRun.id).where(WorkbenchRun.chat_id == chat.id, pending_condition())):
             return None
-        if goal.rounds_started >= goal.max_rounds:
+        if goal.max_rounds is not None and goal.rounds_started >= goal.max_rounds:
             goal.phase, goal.reason = "blocked", f"已达到 {goal.max_rounds} 轮自动执行上限"
             goal.revision += 1
             state.revision += 1

@@ -85,15 +85,64 @@ null. Compaction phases share `compaction_id` and include `before_tokens`.
 The existing tiered compactor remains responsible for rewriting history. These
 events are non-terminal; consumers that do not display context can ignore them.
 
-Compaction first clamps oversized completed message parts, then clears older
-tool results, then summarizes history while keeping a suffix selected by token
-budget. Keeping a fixed number of recent messages alone cannot bound a short
-history containing large tool arguments. The input target uses 80 percent of the
+Workbench automatic and manual compaction share an incremental summarizer. Old
+tool results reach the summary model in full, including facts after the first
+500 characters; they are not cleared before summarization. Oversized source text
+is processed in bounded segments with the previous summary anchored in each
+request. The summary preserves requirements, corrections, authorization, exact
+artifact references, verified outcomes, uncertain side effects and next actions.
+Native tool-pair boundaries and recent history are retained. Reused provider call
+IDs are normalized on a copy. If one recent tool pair exceeds the input target,
+its complete text is summarized too. Model summaries remain lossy and may require
+re-reading source files or the original transcript, especially for binary media.
+Non-Workbench compaction retains its clamp, clear and summarize tiers.
+
+Keeping a fixed number of recent messages alone cannot bound a short history
+containing large tool arguments. The input target uses 80 percent of the
 reported model window and reserves the configured output allowance. When a
 Workbench model reports no valid window, an explicit 8,000-token history budget
 still enables compaction; it is a policy threshold, not a claimed model capacity.
 Context events keep `window_tokens=null` and report estimated current usage.
 Non-Workbench callers retain the existing unknown-window behavior.
+Post-compaction counts subtract reclaimed text from the pre-compaction estimate;
+they do not reuse a retained response's old provider count as the new size. A new
+provider response replaces the estimate. No reclaimed text is reported as a
+failed compaction attempt rather than a completed reduction. Manual compaction
+saves a durable checkpoint before publishing success; errors retain the previous
+history. Incremental summaries add model requests and consume model usage.
+
+### Workbench planning and goals
+
+Plan mode guides information gathering, analysis, requirements clarification,
+discussion of material choices, a complete reviewable plan, and revisions based
+on feedback. `exit_plan_mode` pauses for an explicit review action; keep-planning
+feedback leaves the mode active and requires another complete plan. Approval
+exits planning and resumes execution. This is model guidance and a persisted
+approval workflow, not an OS-level read-only sandbox.
+
+Goals are persisted control state independent of an assistant's final response.
+While active, the server schedules another round after the previous run and
+queued user messages finish. Client disconnection or a worker restart does not
+complete the goal. Default goals have no fixed round cap. The former internal
+256-round default is lifted when loading existing goals; paused and blocked
+goals still need explicit resumption. Finite non-default limits remain readable.
+Human edits, pause/stop, plan review, recovery and completed-goal fencing retain
+their existing behavior. Completion requires the current goal revision and a
+finished task list; the model is instructed to audit every original requirement
+against actual verification and delivery. The semantic truth of completion still
+depends on model judgment and the evidence available to it.
+
+`get_goal` exposes the goal's `goal_id` and `revision` directly, avoiding ambiguity
+with the collaboration state's separate revision. A rejected update returns the
+fresh goal for reevaluation; it never silently substitutes a newer revision.
+Plan and active-goal business tools require a task marked in progress. Once a
+task list exists it must have an active step before business work. Four business
+tool executions trigger a progress checkpoint even when no list was created:
+the next business tool waits for `todo_write`. Control, clarification and resource
+tools remain available. The model can keep the same step in progress when it is
+still working, and must only complete steps backed by evidence. Already-running
+parallel calls finish; the next admission observes the checkpoint. This bounds
+silent task-list staleness without treating tool counts as proof of completion.
 
 Workbench runs with a conversation shell also apply the SDK's `ToolOutputLimits`.
 Oversized tool results are stored under that conversation's

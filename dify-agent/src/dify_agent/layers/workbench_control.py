@@ -199,8 +199,18 @@ class WorkbenchControlLayer(PydanticAILayer[WorkbenchControlDeps, object, LayerC
         return {key: skill[key] for key in ("name", "scope", "path", "content", "readonly")}
 
     async def get_goal(self) -> dict[str, Any]:
-        """Read the current user-created goal and its exact revision before updating it."""
-        return await self.request()
+        """Read the goal's exact goal_id and revision to copy into update_goal.
+
+        This revision belongs to the goal, not the conversation's control state.
+        """
+        await self.request()
+        state = self.runtime_state.state
+        if state.goal is None:
+            return {"goal_id": None, "goal": None}
+        value = state.goal.model_dump(mode="json")
+        value["goal_id"] = value.pop("id")
+        value["todos"] = [item.model_dump(mode="json") for item in state.todos]
+        return value
 
     async def update_goal(
         self,
@@ -214,17 +224,31 @@ class WorkbenchControlLayer(PydanticAILayer[WorkbenchControlDeps, object, LayerC
 
         Finish the task list before completing the goal. Never mark complete
         merely because this model turn ends or resources are nearly exhausted.
+        Audit every requirement in the objective against observed evidence,
+        including verification and delivery. Partial results or a proposed plan
+        do not finish an execution goal. A blocker must be a specific external
+        prerequisite after available authorized approaches have been tried.
         """
-        return await self.request(
-            "update_goal",
-            {
-                "goal_id": goal_id,
-                "revision": revision,
-                "phase": phase,
-                "reason": reason,
-            },
-            request_key=call_key(ctx),
-        )
+        try:
+            return await self.request(
+                "update_goal",
+                {
+                    "goal_id": goal_id,
+                    "revision": revision,
+                    "phase": phase,
+                    "reason": reason,
+                },
+                request_key=call_key(ctx),
+            )
+        except ModelRetry as error:
+            # Do not silently replace stale arguments: the human may have edited
+            # or paused the goal. Return an unambiguous fresh goal for reevaluation.
+            latest = await self.get_goal()
+            raise ModelRetry(
+                str(error)
+                + "。当前目标（revision 是目标版本；请重新核对完成条件）：\n"
+                + json.dumps(latest, ensure_ascii=False)
+            ) from error
 
     async def todo_write(self, ctx: RunContext[object], todos: list[TodoItem]) -> dict[str, Any]:
         """Replace the complete task list; keep at most one step in progress.
@@ -350,19 +374,33 @@ class WorkbenchControlLayer(PydanticAILayer[WorkbenchControlDeps, object, LayerC
             )
         if state.plan.active:
             sections.append(
-                "PLAN MODE: investigate and design. Do not implement changes, modify user files or run side-effecting "
-                "business tools. Read files and research as needed. Ask concise questions when critical information is "
-                "missing. Present the complete Markdown plan through exit_plan_mode for explicit user review. "
-                "Wait for approval before implementation. User feedback revises this plan; a missing answer is not approval."
+                "PLAN MODE: build an evidence-based, reviewable implementation plan. First read relevant files and "
+                "collect facts about the current behavior, constraints and dependencies. Analyze causes and practical "
+                "options, including material tradeoffs and compatibility. Distinguish facts from assumptions. "
+                "Clarify requirements and success criteria with concise questions only when the answer changes the "
+                "solution; keep investigating independent questions while waiting. Discuss unresolved choices and "
+                "incorporate the user's answers and corrections. Use todo_write to track planning progress. "
+                "Do not implement changes, modify user files or run side-effecting business tools. "
+                "Once ready, submit the COMPLETE Markdown plan through exit_plan_mode: confirmed requirements, "
+                "relevant findings, chosen approach, concrete steps, verification and any unresolved dependencies. "
+                "If the user requests changes, investigate as needed and submit a revised complete plan for review. "
+                "Wait for explicit approval of that plan before implementation; a missing answer is not approval. "
+                "After approval, execute the approved steps, update the task list at each boundary and verify the result."
             )
         if state.goal:
             goal = state.goal
             sections.append(
                 f"User goal ({goal.phase}): {goal.objective}\nGoal id: {goal.id}; revision: {goal.revision}; "
-                f"round {goal.rounds_started}/{goal.max_rounds}. "
-                "Preserve this objective across follow-ups and context summaries. Continue meaningful authorized work. "
-                "Use update_goal with this exact id/revision only after all work and verification finish, or when a "
-                "specific blocker needs the user. A final text response alone does not complete the goal. "
+                f"round {goal.rounds_started}; round limit: {goal.max_rounds or 'none'}. "
+                "Preserve this entire objective across follow-ups and summaries. Break complex goals into a task list "
+                "covering EVERY requirement, execute meaningful authorized work and verify each result. "
+                "User follow-ups steer the current goal unless they explicitly replace or cancel it. Before completing, "
+                "audit the original requirements, remaining tasks and delivery against actual evidence. Continue if any "
+                "required work is outstanding; partial progress, a plan, elapsed time or turn limits are not completion. "
+                "Use update_goal with this exact id/revision only after all work and verification finish, or after "
+                "available authorized approaches are exhausted and a specific external prerequisite blocks progress. "
+                "A final text response alone does not complete the goal: the server will start another round while "
+                "it remains active, even after this response or a client disconnect. "
                 "If the goal is paused, finish the current safe stopping point and await the user."
             )
         if state.todos:

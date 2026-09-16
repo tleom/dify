@@ -7,7 +7,13 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import RunContext
-from pydantic_ai_harness.compaction import ContextUsage, ReportContextUsage, TieredCompaction, estimate_context_tokens
+from pydantic_ai_harness.compaction import (
+    ContextUsage,
+    ReportContextUsage,
+    TieredCompaction,
+    estimate_context_tokens,
+    estimate_token_count,
+)
 
 from dify_agent.protocol.schemas import ContextStatusData, ContextStatusRunEvent
 from dify_agent.runtime.event_sink import RunEventSink
@@ -50,14 +56,21 @@ class WorkbenchContextStatus(AbstractCapability[None]):
             return request_context
 
         identifier = str(uuid4())
+        original_text_tokens = estimate_token_count(request_context.messages)
         await self.emit(phase="compacting", used_tokens=before, before_tokens=before, compaction_id=identifier)
         try:
             result = await self.compaction.before_model_request(ctx, request_context)
         except Exception:
             await self.emit(phase="failed", used_tokens=before, before_tokens=before, compaction_id=identifier)
             raise
+        # A retained response's provider usage describes the OLD request. Use
+        # reclaimed text, as TieredCompaction does, until a new response arrives.
+        reclaimed = original_text_tokens - estimate_token_count(result.messages)
         await self.emit(
-            phase="compacted", used_tokens=await used_tokens(result), before_tokens=before, compaction_id=identifier
+            phase="compacted" if reclaimed > 0 else "failed",
+            used_tokens=max(0, before - max(0, reclaimed)),
+            before_tokens=before,
+            compaction_id=identifier,
         )
         return result
 

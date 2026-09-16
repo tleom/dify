@@ -20,7 +20,40 @@ from pydantic_ai_harness.compaction import (
 from dify_agent.runtime.compaction import build_compaction_capability
 
 
-def test_oversized_completed_tool_arguments_do_not_poison_the_next_request() -> None:
+def test_workbench_summary_reads_old_tool_evidence_beyond_the_first_500_characters() -> None:
+    from pydantic_ai.models.function import FunctionModel
+
+    evidence = "VERIFIED_EXPORT=/workspace/reports/final-946.csv; rows=946; approval=review_only"
+    history = [ModelRequest(parts=[UserPromptPart("Verify the export, preserve exact evidence and authorization")])]
+    for index in range(8):
+        history.extend(
+            [
+                ModelResponse(parts=[ToolCallPart("read", {"path": f"report-{index}"}, "reused-id")]),
+                ModelRequest(
+                    parts=[
+                        ToolReturnPart(
+                            "read", "prefix " * 500 + (evidence if index == 0 else "data") + " tail" * 700, "reused-id"
+                        )
+                    ]
+                ),
+            ]
+        )
+    observed = []
+
+    def respond(messages, _info):
+        text = "\n".join(str(getattr(part, "content", "")) for msg in messages for part in msg.parts)
+        observed.append(text)
+        return ModelResponse(parts=[TextPart(evidence if evidence in text else "Evidence absent")])
+
+    capability = build_compaction_capability(context_window_tokens=8_000, model_settings=None, workbench=True)
+    result = Agent(FunctionModel(respond)).run_sync("Continue", message_history=history, capabilities=[capability])
+    assert any(evidence in text for text in observed), "The summarizer must see the complete old tool evidence"
+    assert evidence in result.output
+    assert history[1].parts[0].tool_call_id == "reused-id"
+
+
+@pytest.mark.parametrize("workbench", [False, True])
+def test_oversized_completed_tool_arguments_do_not_poison_the_next_request(workbench: bool) -> None:
     from pydantic_ai_harness.compaction import estimate_token_count
 
     history = [
@@ -28,15 +61,24 @@ def test_oversized_completed_tool_arguments_do_not_poison_the_next_request() -> 
         ModelResponse(parts=[ToolCallPart("write", {"script": "x" * 100_000}, "done")]),
         ModelRequest(parts=[ToolReturnPart("write", {"saved": True}, "done")]),
     ]
-    capability = build_compaction_capability(context_window_tokens=10_000, model_settings=None)
-    result = Agent(TestModel(call_tools=[])).run_sync("continue", message_history=history, capabilities=[capability])
+    capability = build_compaction_capability(context_window_tokens=10_000, model_settings=None, workbench=workbench)
+    result = Agent(TestModel(call_tools=[], custom_output_text="write saved=True; do not repeat it")).run_sync(
+        "continue", message_history=history, capabilities=[capability]
+    )
     assert estimate_token_count(result.all_messages()) < 8_000
     assert history[1].parts[0].args == {"script": "x" * 100_000}
-    assert any(
-        isinstance(part, ToolReturnPart) and part.content == {"saved": True}
-        for message in result.all_messages()
-        for part in message.parts
-    )
+    if workbench:
+        assert any(
+            isinstance(part, SystemPromptPart) and "saved=True" in part.content
+            for message in result.all_messages()
+            for part in message.parts
+        )
+    else:
+        assert any(
+            isinstance(part, ToolReturnPart) and part.content == {"saved": True}
+            for message in result.all_messages()
+            for part in message.parts
+        )
 
 
 def test_fewer_than_twenty_large_messages_still_compact_to_a_token_budget() -> None:

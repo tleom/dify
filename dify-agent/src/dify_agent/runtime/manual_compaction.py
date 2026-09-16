@@ -2,12 +2,9 @@
 
 import asyncio
 import copy
-import hashlib
 
-from pydantic_ai.messages import ModelMessage, RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.compaction import (
-    SummarizingCompaction,
     compact_now,
     estimate_context_tokens,
     estimate_token_count,
@@ -15,33 +12,7 @@ from pydantic_ai_harness.compaction import (
 
 from dify_agent.protocol.schemas import ContextStatusData, ContextStatusRunEvent
 from dify_agent.runtime.history import replace_run_history
-
-
-def _unique_tool_pairs(messages: list[ModelMessage]) -> list[ModelMessage]:
-    """Give repeated provider call IDs distinct names on the compaction copy.
-
-    Some providers restart numbering at every model response. The harness checks
-    IDs across the entire history, so an old call otherwise appears paired with
-    every later return having the same ID and prevents a safe cut.
-    """
-    result = copy.deepcopy(messages)
-    seen: set[str] = set()
-    pairs: dict[tuple[str, str | None], str] = {}
-    for index, message in enumerate(result):
-        for part in message.parts:
-            if isinstance(part, ToolCallPart):
-                original = part.tool_call_id
-                identifier = original
-                if identifier in seen:
-                    identifier = (
-                        "call_" + hashlib.sha256(f"{index}:{original}:{part.tool_name}".encode()).hexdigest()[:32]
-                    )
-                seen.add(identifier)
-                pairs[(original, part.tool_name)] = identifier
-                part.tool_call_id = identifier
-            elif isinstance(part, (ToolReturnPart, RetryPromptPart)) and part.tool_call_id:
-                part.tool_call_id = pairs.get((part.tool_call_id, part.tool_name), part.tool_call_id)
-    return result
+from dify_agent.runtime.workbench_compaction import WorkbenchSummarizingCompaction
 
 
 async def compact_history(*, layer, model, history, checkpoint, sink, run_id, window_tokens):
@@ -83,13 +54,13 @@ async def compact_history(*, layer, model, history, checkpoint, sink, run_id, wi
         # Directly run the summarizing tier: the normal automatic trigger would
         # deliberately do nothing below the context-pressure threshold.
         result = await compact_now(
-            SummarizingCompaction(
+            WorkbenchSummarizingCompaction(
                 max_tokens=1,
                 keep_messages=4,
                 preserve_first_user_message=True,
                 incremental=True,
             ),
-            _unique_tool_pairs(original),
+            original,
             model=model,
             focus=command.get("focus") or None,
             usage=usage,

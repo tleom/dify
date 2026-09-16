@@ -13,6 +13,31 @@ from dify_agent.runtime.manual_compaction import compact_history
 
 
 @pytest.mark.anyio
+async def test_segmented_manual_summary_has_no_unrelated_fifty_request_cap():
+    from pydantic_ai.models.function import FunctionModel
+    from pydantic_ai_harness.compaction import compact_now
+    from dify_agent.runtime.workbench_compaction import WorkbenchSummarizingCompaction
+
+    calls = []
+
+    def summarize(messages, info):
+        calls.append(messages)
+        return ModelResponse(parts=[TextPart("Keep verified task evidence")])
+
+    history = [
+        ModelRequest(parts=[UserPromptPart("Preserve the task")]),
+        ModelResponse(parts=[TextPart("verified data " * 5_000)]),
+    ]
+    result = await compact_now(
+        WorkbenchSummarizingCompaction(max_tokens=1, keep_messages=0, source_budget_tokens=500),
+        history,
+        model=FunctionModel(summarize),
+    )
+    assert len(calls) > 50
+    assert len(str(result)) < len(str(history))
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("checkpoint_failure", [False, True])
 @pytest.mark.parametrize("repeated_call_ids", [False, True])
 @pytest.mark.parametrize("provider_usage", [False, True])

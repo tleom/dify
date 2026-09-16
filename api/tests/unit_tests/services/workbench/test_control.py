@@ -74,7 +74,9 @@ def test_compact_instruction_is_the_following_task_and_empty_compact_only_summar
 
 
 def test_plan_tag_is_persisted_and_legacy_tag_comes_from_its_own_command(queue: SimpleNamespace) -> None:
-    result = control.issue(queue.owner[0], queue.owner[1], queue.chat_id, command="/plan 设计处理方案", request_key="plan-tag")
+    result = control.issue(
+        queue.owner[0], queue.owner[1], queue.chat_id, command="/plan 设计处理方案", request_key="plan-tag"
+    )
     run = queue.get(result["run"]["id"])
     assert service.run_dto(run)["command"] == "plan"
     payload = json.loads(run.payload)
@@ -91,6 +93,33 @@ def test_plan_tag_is_persisted_and_legacy_tag_comes_from_its_own_command(queue: 
 def command(queue: SimpleNamespace, text: str, key: str | None = None) -> control.WorkbenchControlState:
     result = control.issue(queue.owner[0], queue.owner[1], queue.chat_id, command=text, request_key=key or str(uuid4()))
     return control.WorkbenchControlState.model_validate(result["state"])
+
+
+@pytest.mark.parametrize("legacy_limit", [None, 256])
+def test_goal_continues_after_256_final_responses_until_explicit_pause(
+    queue: SimpleNamespace, legacy_limit: int | None
+) -> None:
+    state = command(queue, "/goal 全面核验所有文件")
+    assert state.goal is not None
+    queue.finish(state.goal.last_run_id)
+    with queue.factory.begin() as session:
+        chat = service._chat(session, queue.owner[0], queue.owner[1], queue.chat_id, lock=True)
+        current = control.load(session, chat)
+        assert current.goal is not None
+        current.goal.rounds_started = 256
+        current.goal.max_rounds = legacy_limit
+        control.save(session, chat, current)
+    following = control.drive_goal(queue.owner[0], queue.owner[1], queue.chat_id)
+    assert following is not None
+    saved = control.read(queue.owner[0], queue.owner[1], queue.chat_id)["goal"]
+    assert saved["rounds_started"] == 257
+    assert saved["max_rounds"] is None
+    queue.finish(following["id"])
+    command(queue, "/goal pause")
+    assert control.drive_goal(queue.owner[0], queue.owner[1], queue.chat_id) is None
+    resumed = command(queue, "/goal resume")
+    assert resumed.goal is not None
+    assert resumed.goal.rounds_started == 258
 
 
 def test_goal_clock_survives_read_pause_resume_and_completion(
