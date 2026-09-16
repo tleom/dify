@@ -22,6 +22,12 @@ class WorkbenchFileLinksResponse(ResponseModel):
 
 
 class AgentWorkbenchFilesResponse(ResponseModel):
+    cwd: str | None = None
     directory: str
     entries: list[WorkbenchFileResponse]
     complete: bool
+
+
+class WorkbenchFilePreviewResponse(ResponseModel):
+    accepted: bool
+    file: WorkbenchFileResponse

@@ -10,6 +10,8 @@ from pydantic_ai import ModelRetry
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelResponse
 
+from dify_agent.runtime.workbench_completion import CLARIFICATION_RETRY, unfinished_clarification
+
 from dify_agent.layers.shell.layer import DifyShellLayer
 from dify_agent.layers.workbench_files import WorkbenchFilesLayer
 from dify_agent.protocol.schemas import WorkbenchToolData
@@ -20,6 +22,8 @@ import json, os, stat, sys
 from pathlib import Path
 root = Path.cwd().resolve()
 prefix = sys.argv[1] if len(sys.argv) > 1 else ''
+if len(sys.argv) > 2:
+    root = Path(sys.argv[2]).resolve()
 files = {}
 # TMPDIR points at the conversation directory. Browser and Office profiles are
 # runtime housekeeping, not generated deliverables or report-building scripts.
@@ -42,7 +46,12 @@ def visible(name, directory=False):
     )
 for directory, names, filenames in os.walk(root, followlinks=False):
     names[:] = sorted(name for name in names if visible(name, directory=True) and not (Path(directory) / name).is_symlink())
+    if Path(directory) == root:
+        # Personal configuration is loaded through its own resource channel.
+        names[:] = [name for name in names if name not in {'skills', '.skill-backups'} and not name.startswith('.skill-import-')]
     for name in sorted(filenames):
+        if Path(directory) == root and (name in {'memory.md', '.skills-settings.json'} or name.startswith('.resource-')):
+            continue
         if not visible(name):
             continue
         path = Path(directory) / name
@@ -53,7 +62,7 @@ for directory, names, filenames in os.walk(root, followlinks=False):
         if not stat.S_ISREG(value.st_mode):
             continue
         if len(files) >= 10000:
-            raise RuntimeError('Conversation file inventory exceeds 10000 files')
+            raise RuntimeError('Workspace file inventory exceeds 10000 files')
         files[prefix + path.relative_to(root).as_posix()] = [value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_ino]
 print(json.dumps(files, ensure_ascii=False))
 """
@@ -69,16 +78,19 @@ class WorkbenchFileChanges:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def snapshot(self) -> dict[str, list[int]]:
+        # Tools may write anywhere in this owner's workspace, including a
+        # different conversation directory. Keep every inventory key relative
+        # to the same workspace root used by the file API.
         root = self.shell._require_workspace_cwd().rstrip("/")
-        prefix = root.removeprefix("/workspace/") + "/" if root.startswith("/workspace/") else ""
+        arguments = " '' /workspace" if root == "/workspace" or root.startswith("/workspace/") else ""
         result = await self.shell.run_remote_script_complete(
-            "python3 -c " + shlex.quote(SNAPSHOT_SCRIPT) + " " + shlex.quote(prefix),
+            "python3 -c " + shlex.quote(SNAPSHOT_SCRIPT) + arguments,
             timeout=15,
             max_output_bytes=4 * 1024 * 1024,
         )
         value = json.loads(result.output)
         if not isinstance(value, dict) or any(not isinstance(item, list) or len(item) != 4 for item in value.values()):
-            raise ValueError("无法读取当前会话的文件变更记录")
+            raise ValueError("无法读取个人文件空间的文件变更记录")
         return value
 
     async def start(self) -> None:
@@ -142,6 +154,8 @@ class WorkbenchFileDeliveryCapability(AbstractCapability[None]):
             await self.changes.collect()
         text = response.text or ""
         if text:
+            if not response.tool_calls and unfinished_clarification(text):
+                raise ModelRetry(CLARIFICATION_RETRY)
             error = self.files.delivery_error(text, final=not response.tool_calls)
             if error:
                 raise ModelRetry(error)

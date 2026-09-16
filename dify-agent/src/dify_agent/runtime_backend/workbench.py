@@ -12,6 +12,7 @@ from uuid import UUID
 import httpx
 
 from dify_agent.adapters.shell.shellctl import ShellctlCommands
+from dify_agent.runtime_backend.errors import BindingLostError
 from dify_agent.runtime_backend.local import LocalExecutionBindingBackend, _parse_local_binding_ref
 from dify_agent.runtime_backend.protocols import (
     ExecutionBindingAllocation,
@@ -103,7 +104,10 @@ class WorkbenchExecutionBindingBackend:
         raw_ref = binding_ref[3:]
         binding, workspace = _parse_local_binding_ref(raw_ref)
         backend = await self._backend(workspace)
-        lease = await backend.acquire(raw_ref)
+        # Workbench directories live at /workspace/conversations/<binding>.
+        # The Local backend's /workspace/<account> is an unused legacy folder
+        # that users can remove while organizing their shared file space.
+        lease = backend._lease(raw_ref)
         lease.layout = RuntimeLayout(
             home_dir=lease.layout.home_dir, workspace_dir="/workspace/conversations/" + binding
         )
@@ -113,10 +117,20 @@ class WorkbenchExecutionBindingBackend:
         temporary = lease.layout.home_dir + "/tmp"
         try:
             result = await run_shellctl_control_command(
-                control.commands, "mkdir -p " + shlex.quote(temporary) + " " + shlex.quote(lease.layout.workspace_dir)
+                control.commands,
+                "\n".join(
+                    [
+                        "set -eu",
+                        "test -d " + shlex.quote(lease.layout.home_dir),
+                        "mkdir -p " + shlex.quote(temporary) + " " + shlex.quote(lease.layout.workspace_dir),
+                    ]
+                ),
             )
             if result.exit_code:
-                raise RuntimeError("Failed to prepare the conversation directory")
+                raise BindingLostError("Workbench Home is unavailable or its conversation directory cannot be prepared")
+        except BaseException:
+            await lease.close()
+            raise
         finally:
             await control.close()
         lease.commands = ShellctlCommands(

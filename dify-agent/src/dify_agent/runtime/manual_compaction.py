@@ -1,12 +1,10 @@
 """Manual context summary using the installed harness's native compaction API."""
 
+import asyncio
 import copy
-import hashlib
 
-from pydantic_ai.messages import ModelMessage, RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.compaction import (
-    SummarizingCompaction,
     compact_now,
     estimate_context_tokens,
     estimate_token_count,
@@ -14,33 +12,7 @@ from pydantic_ai_harness.compaction import (
 
 from dify_agent.protocol.schemas import ContextStatusData, ContextStatusRunEvent
 from dify_agent.runtime.history import replace_run_history
-
-
-def _unique_tool_pairs(messages: list[ModelMessage]) -> list[ModelMessage]:
-    """Give repeated provider call IDs distinct names on the compaction copy.
-
-    Some providers restart numbering at every model response. The harness checks
-    IDs across the entire history, so an old call otherwise appears paired with
-    every later return having the same ID and prevents a safe cut.
-    """
-    result = copy.deepcopy(messages)
-    seen: set[str] = set()
-    pairs: dict[tuple[str, str | None], str] = {}
-    for index, message in enumerate(result):
-        for part in message.parts:
-            if isinstance(part, ToolCallPart):
-                original = part.tool_call_id
-                identifier = original
-                if identifier in seen:
-                    identifier = (
-                        "call_" + hashlib.sha256(f"{index}:{original}:{part.tool_name}".encode()).hexdigest()[:32]
-                    )
-                seen.add(identifier)
-                pairs[(original, part.tool_name)] = identifier
-                part.tool_call_id = identifier
-            elif isinstance(part, (ToolReturnPart, RetryPromptPart)) and part.tool_call_id:
-                part.tool_call_id = pairs.get((part.tool_call_id, part.tool_name), part.tool_call_id)
-    return result
+from dify_agent.runtime.workbench_compaction import WorkbenchSummarizingCompaction
 
 
 async def compact_history(*, layer, model, history, checkpoint, sink, run_id, window_tokens):
@@ -82,13 +54,13 @@ async def compact_history(*, layer, model, history, checkpoint, sink, run_id, wi
         # Directly run the summarizing tier: the normal automatic trigger would
         # deliberately do nothing below the context-pressure threshold.
         result = await compact_now(
-            SummarizingCompaction(
+            WorkbenchSummarizingCompaction(
                 max_tokens=1,
                 keep_messages=4,
                 preserve_first_user_message=True,
                 incremental=True,
             ),
-            _unique_tool_pairs(original),
+            original,
             model=model,
             focus=command.get("focus") or None,
             usage=usage,
@@ -104,10 +76,22 @@ async def compact_history(*, layer, model, history, checkpoint, sink, run_id, wi
             if checkpoint is None:
                 raise RuntimeError("Manual compaction requires durable history checkpointing")
             await checkpoint.save(result)
-            replace_run_history(history, result)
-        message = f"上下文已压缩，估算用量从 {before} 降至 {after}" if changed else "当前上下文无需进一步压缩"
-        await publish("compacted" if changed else "unchanged", after=after if changed else before, message=message)
-        return message, usage
     except Exception:
         await publish("failed", message="上下文压缩未完成，原始记录已保留")
         raise
+
+    if changed:
+        replace_run_history(history, result)
+    # History is already committed. A failed notification must never change the
+    # outcome to "failed / original retained". The stable key makes retries safe
+    # when the API committed its state but the event transport lost its response.
+    message = f"上下文已压缩，估算用量从 {before} 降至 {after}" if changed else "当前上下文无需进一步压缩"
+    for attempt in range(3):
+        try:
+            await publish("compacted" if changed else "unchanged", after=after if changed else before, message=message)
+            break
+        except Exception as error:
+            if attempt == 2:
+                raise RuntimeError(message + "；完成状态同步失败，请刷新后核对") from error
+            await asyncio.sleep(0.2 * (attempt + 1))
+    return message, usage

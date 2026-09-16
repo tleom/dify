@@ -146,7 +146,17 @@ def test_executor_requires_terminal_frame(
     monkeypatch.setattr(tasks, "notify", Mock())
     monkeypatch.setattr(tasks.threading, "Thread", Mock())
     monkeypatch.setattr(tasks.scheduler, "heartbeat", Mock(return_value=True))
-    monkeypatch.setattr(tasks, "AgentAppGenerator", Mock(return_value=Mock(generate=Mock(return_value=iter(frames)))))
+    read_after_error = Mock()
+
+    def stream() -> Iterator[dict[str, str]]:
+        yield from frames
+        if frames[-1].get("event") == "error":
+            # A real provider can keep this iterator open indefinitely. Reading
+            # again would postpone terminal status and keep renewing the lease.
+            read_after_error()
+            yield {"event": "ping"}
+
+    monkeypatch.setattr(tasks, "AgentAppGenerator", Mock(return_value=Mock(generate=Mock(return_value=stream()))))
     wake_recovery, dispatch = Mock(), Mock()
     monkeypatch.setattr(tasks.recover_run, "apply_async", wake_recovery)
     wake_followups = Mock()
@@ -167,6 +177,7 @@ def test_executor_requires_terminal_frame(
     assert wake_recovery.called is should_recover
     assert wake_followups.called is (expected_status == "completed")
     assert fence.called is should_recover
+    read_after_error.assert_not_called()
     dispatch.assert_called_once()
 
 
@@ -480,6 +491,224 @@ def test_input_actions_enforce_owner_and_current_request(database: RecoveryDatab
         recovery.interact(tenant, account, run_id, "stale")
     assert not recovery.expire_input(run_id, owner=(tenant, account), request_id="stale", manual=True)
     publish.assert_not_called()
+
+
+def skipped_question(database: RecoveryDatabase) -> str:
+    factory, tenant, account, _, run_id, _, _ = database
+    state = ask(factory, run_id)
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        payload = json.loads(run.payload)
+        payload["followup_protocol"] = 1
+        payload["input_history"] = {"messages": list[object]()}
+        payload["pending"]["args"] = {
+            "question": "请选择地区",
+            "fields": [
+                {
+                    "name": "region",
+                    "type": "select",
+                    "label": "地区",
+                    "required": True,
+                    "options": [{"value": "sh", "label": "上海"}, {"value": "bj", "label": "北京"}],
+                }
+            ],
+        }
+        run.payload = json.dumps(payload)
+    assert recovery.expire_input(run_id, owner=(tenant, account), request_id=state["request_id"], manual=True)
+    with factory() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        return next(iter(json.loads(run.payload)["human_input_history"]))
+
+
+def test_late_answer_steers_once_without_resuming_the_original_pause(database: RecoveryDatabase) -> None:
+    from services.workbench.human_input import supplement
+
+    request_id = skipped_question(database)
+    factory, tenant, account, _, run_id, publish, _ = database
+    publish.reset_mock()
+    first = supplement(tenant, account, run_id, request_id, {"region": "sh"}, None)
+    second = supplement(tenant, account, run_id, request_id, {"region": "sh"}, None)
+    assert first["id"] == second["id"]
+    assert first["status"] == "steered"
+    assert first["steer_target_run_id"] == run_id
+    assert "地区：上海" in first["query"]
+    assert len(first["human_input_history"]) == 0
+    with factory() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        payload = json.loads(run.payload)
+        assert len(payload["steering_messages"]) == 1
+        assert payload["attempt"] == 1
+        assert payload["continuation"]["calls"]["human-call"]["status"] == "cancelled"
+        assert payload["human_input_history"][request_id]["status"] == "submitted"
+        assert payload["input_history"] == {"messages": []}
+        assert service.run_dto(run)["human_input_history"][0]["values"] == {"region": "sh"}
+        assert len(list(session.scalars(select(WorkbenchRun)))) == 2
+    publish.assert_not_called()
+    with pytest.raises(Conflict, match="已经提交"):
+        supplement(tenant, account, run_id, request_id, {"region": "bj"}, None)
+
+
+def test_late_answer_does_not_answer_a_new_pending_question(database: RecoveryDatabase) -> None:
+    from services.workbench.human_input import supplement
+
+    request_id = skipped_question(database)
+    factory, tenant, account, _, run_id, _, _ = database
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        payload = json.loads(run.payload)
+        payload["pending"] = {"tool_call_id": "later", "tool_name": "ask_human", "args": {"question": "新问题"}}
+        run.status, run.payload = "waiting_input", json.dumps(payload)
+        recovery.mark_input_wait(run)
+    result = supplement(tenant, account, run_id, request_id, {"region": "sh"}, None)
+    assert result["status"] == "steered"
+    with factory() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        assert run.status == "waiting_input"
+        assert json.loads(run.payload)["pending"]["tool_call_id"] == "later"
+
+
+@pytest.mark.parametrize("completed", [True, False])
+def test_late_answer_queues_when_task_has_finished_or_closed_steering(
+    database: RecoveryDatabase, completed: bool
+) -> None:
+    from services.workbench.human_input import supplement
+
+    request_id = skipped_question(database)
+    factory, tenant, account, _, run_id, publish, _ = database
+    publish.reset_mock()
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        run.status = "completed" if completed else "running"
+        payload = json.loads(run.payload)
+        run.backend_run_id = str(uuid4())
+        payload["steering_closed_ticket"] = run.backend_run_id
+        run.payload = json.dumps(payload)
+    result = supplement(tenant, account, run_id, request_id, {"region": "sh"}, None)
+    assert result["status"] == ("queued" if completed else "waiting_turn")
+    assert result["parent_run_id"] == run_id
+    if completed:
+        publish.assert_called_once_with(tenant, account, result["id"])
+    else:
+        publish.assert_not_called()
+    with factory() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        assert run.status == ("completed" if completed else "running")
+        assert not json.loads(run.payload).get("steering_messages")
+
+
+def test_late_answer_checks_owner_request_and_original_schema(database: RecoveryDatabase) -> None:
+    from services.workbench.human_input import supplement
+
+    request_id = skipped_question(database)
+    factory, tenant, account, _, run_id, publish, _ = database
+    publish.reset_mock()
+    with pytest.raises(NotFound):
+        supplement(tenant, str(uuid4()), run_id, request_id, {"region": "sh"}, None)
+    with pytest.raises(NotFound):
+        supplement(tenant, account, run_id, "invented", {"region": "sh"}, None)
+    for values in (dict[str, str](), {"region": "invalid"}, {"region": "sh", "unrequested": "yes"}):
+        with pytest.raises(ValueError):
+            supplement(tenant, account, run_id, request_id, values, None)
+    publish.assert_not_called()
+    with factory() as session:
+        assert len(list(session.scalars(select(WorkbenchRun)))) == 1
+
+
+def test_legacy_skipped_question_is_recovered_from_owned_journal(database: RecoveryDatabase) -> None:
+    from services.workbench.event_log import append_locked
+    from services.workbench.human_input import history, supplement
+
+    factory, tenant, account, _, run_id, _, _ = database
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        for stage, key, value in (
+            (
+                "started",
+                "input",
+                {"question": "请补充说明", "fields": [{"name": "note", "type": "paragraph", "label": "说明"}]},
+            ),
+            ("returned", "output", {"status": "timeout", "values": dict[str, str]()}),
+        ):
+            append_locked(
+                session,
+                run,
+                {
+                    "event": "workbench_activity",
+                    "data": {
+                        "kind": "tool",
+                        "tool_name": "ask_human",
+                        "tool_call_id": "old-question",
+                        "call_id": "old-call",
+                        "stage": stage,
+                        key: json.dumps(value),
+                    },
+                },
+            )
+        run.status = "completed"
+        records = history(run)
+        assert len(records) == 1
+        assert records[0]["status"] == "skipped"
+        request_id = records[0]["request_id"]
+    answer = supplement(tenant, account, run_id, request_id, {"note": "真实补充"}, None)
+    assert answer["status"] == "queued"
+    assert "说明：真实补充" in answer["query"]
+
+
+def test_human_history_merges_raw_nullable_defaults_with_archived_question(database: RecoveryDatabase) -> None:
+    from services.workbench.human_input import history, question_record
+
+    factory, _, _, _, run_id, _, _ = database
+    args = {
+        "question": "请选择方式",
+        "fields": [{"name": "note", "type": "paragraph", "label": "说明"}],
+        "actions": None,
+    }
+    raw = {"tool_call_id": "ask_human", "args": args, "backend_run_id": "native-one"}
+    normalized = question_record(run_id, raw, {"status": "timeout"})
+    events = [
+        {
+            "event": "workbench_activity",
+            "backend_run_id": "native-one",
+            "data": {
+                "tool_name": "ask_human",
+                "tool_call_id": "ask_human",
+                "call_id": "native-one:call:1",
+                "stage": "started",
+                "input": args,
+            },
+        },
+        {
+            "event": "workbench_activity",
+            "backend_run_id": "native-one",
+            "data": {
+                "tool_name": "ask_human",
+                "tool_call_id": "ask_human",
+                "call_id": "native-one:call:1",
+                "stage": "returned",
+                "output": {"status": "timeout"},
+            },
+        },
+    ]
+    with factory() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        payload = json.loads(run.payload)
+        # Older durable records retain their original public request ID.
+        normalized.pop("backend_run_id")
+        normalized["request_id"] = "legacy-stable-request"
+        payload["human_input_history"] = {"legacy-stable-request": normalized}
+        run.payload = json.dumps(payload)
+        assert history(run, events) == [normalized]
+    second = question_record(run_id, {**raw, "backend_run_id": "native-two"}, {"status": "timeout"})
+    assert second["request_id"] != question_record(run_id, raw, {"status": "timeout"})["request_id"]
 
 
 def test_restart_scan_recovers_only_due_intent_and_reports_active_chat(

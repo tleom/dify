@@ -24,9 +24,13 @@ class GoalState(ControlModel):
     objective: str = Field(min_length=1, max_length=20000)
     phase: Literal["active", "paused", "blocked", "complete"] = "active"
     rounds_started: int = Field(default=0, ge=0)
-    max_rounds: int = Field(default=256, ge=1, le=10000)
+    max_rounds: int | None = Field(default=None, ge=1, le=10000)
     reason: str | None = Field(default=None, max_length=4000)
     last_run_id: str | None = None
+    resource_mentions: dict[str, list[str]] = Field(default_factory=dict)
+    started_at: float | None = Field(default=None, ge=0)
+    elapsed_seconds: float = Field(default=0, ge=0)
+    active_since: float | None = Field(default=None, ge=0)
 
 
 class TodoItem(ControlModel):
@@ -134,7 +138,7 @@ def change_goal(state: WorkbenchControlState, command: SlashCommand) -> Workbenc
         elif command.action == "resume":
             if goal.phase == "complete":
                 raise ValueError("目标已完成，请创建新的目标")
-            if goal.rounds_started >= goal.max_rounds:
+            if goal.max_rounds is not None and goal.rounds_started >= goal.max_rounds:
                 raise ValueError("目标已达到自动执行轮次上限，请创建新目标")
             goal.phase, goal.reason = "active", None
         else:

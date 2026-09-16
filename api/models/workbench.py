@@ -93,3 +93,21 @@ class WorkbenchCommand(DefaultFieldsMixin, Base):
     request_key: Mapped[str] = mapped_column(String(128))
     command: Mapped[str] = mapped_column(Text)
     result: Mapped[str] = mapped_column(Text)
+
+
+class WorkbenchFileShare(DefaultFieldsMixin, Base):
+    """Revocable capability for exactly one owned file, independent of API credentials."""
+
+    __tablename__ = "workbench_file_shares"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "account_id", "path_hash", name="wb_share_owner_path"),
+        UniqueConstraint("token", name="wb_share_token"),
+    )
+    tenant_id: Mapped[str] = mapped_column(StringUUID)
+    account_id: Mapped[str] = mapped_column(StringUUID)
+    workspace_id: Mapped[str] = mapped_column(StringUUID)
+    path: Mapped[str] = mapped_column(Text)
+    path_hash: Mapped[str] = mapped_column(String(64))
+    token: Mapped[str] = mapped_column(String(32))
+    expires_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())

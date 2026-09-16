@@ -13,6 +13,31 @@ from dify_agent.runtime.manual_compaction import compact_history
 
 
 @pytest.mark.anyio
+async def test_segmented_manual_summary_has_no_unrelated_fifty_request_cap():
+    from pydantic_ai.models.function import FunctionModel
+    from pydantic_ai_harness.compaction import compact_now
+    from dify_agent.runtime.workbench_compaction import WorkbenchSummarizingCompaction
+
+    calls = []
+
+    def summarize(messages, info):
+        calls.append(messages)
+        return ModelResponse(parts=[TextPart("Keep verified task evidence")])
+
+    history = [
+        ModelRequest(parts=[UserPromptPart("Preserve the task")]),
+        ModelResponse(parts=[TextPart("verified data " * 5_000)]),
+    ]
+    result = await compact_now(
+        WorkbenchSummarizingCompaction(max_tokens=1, keep_messages=0, source_budget_tokens=500),
+        history,
+        model=FunctionModel(summarize),
+    )
+    assert len(calls) > 50
+    assert len(str(result)) < len(str(history))
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("checkpoint_failure", [False, True])
 @pytest.mark.parametrize("repeated_call_ids", [False, True])
 @pytest.mark.parametrize("provider_usage", [False, True])
@@ -80,3 +105,60 @@ async def test_manual_summary_preserves_original_task_and_paired_tail(
         assert phases == ["compacting", "compacted"]
         checkpoint.save.assert_awaited_once_with(history.message_history)
     assert messages == original
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["event_once", "event_always", "control_once", "control_always"])
+async def test_committed_summary_retries_completion_without_reporting_original_history(failure):
+    original = [ModelRequest(parts=[UserPromptPart("核验全部资料")])]
+    for index in range(12):
+        original.extend(
+            [
+                ModelResponse(parts=[TextPart(f"步骤 {index}：" + "材料。" * 1000)]),
+                ModelRequest(parts=[UserPromptPart("继续")]),
+            ]
+        )
+    history = SimpleNamespace(message_history=copy.deepcopy(original))
+    history.replace_messages = lambda value: setattr(history, "message_history", value)
+    phases, events, keys = [], [], []
+    failures = 0
+
+    def fail(channel):
+        nonlocal failures
+        if failure.startswith(channel) and (failure.endswith("always") or failures == 0):
+            failures += 1
+            raise OSError("completion unavailable")
+
+    async def publish(_action, data, **kwargs):
+        phases.append(data["phase"])
+        if data["phase"] == "compacted":
+            keys.append(kwargs["request_key"])
+            fail("control")
+
+    async def event(value):
+        events.append(value.data.phase)
+        if value.data.phase == "compacted":
+            fail("event")
+
+    checkpoint = SimpleNamespace(save=AsyncMock())
+    params = dict(
+        layer=SimpleNamespace(
+            runtime_state=SimpleNamespace(control={"kind": "compact", "id": "summary"}), request=publish
+        ),
+        model=TestModel(call_tools=[], custom_output_text="已核验前期材料，继续完成原目标。"),
+        history=history,
+        checkpoint=checkpoint,
+        sink=SimpleNamespace(append_event=event),
+        run_id="run",
+        window_tokens=128000,
+    )
+    if failure.endswith("always"):
+        with pytest.raises(RuntimeError, match="上下文已压缩.*完成状态同步失败"):
+            await compact_history(**params)
+    else:
+        message, _ = await compact_history(**params)
+        assert "上下文已压缩" in message
+    checkpoint.save.assert_awaited_once_with(history.message_history)
+    assert len(history.message_history) < len(original)
+    assert "failed" not in phases and "failed" not in events
+    assert len(keys) >= 2 and len(set(keys)) == 1

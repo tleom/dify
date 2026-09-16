@@ -19,6 +19,9 @@ STATE.mkdir(parents=True, exist_ok=True)
 LOCKS = {}
 LOCKS_GUARD = threading.Lock()
 MAX_BODY = 30 * 1024 * 1024
+# Manager-owned scripts never inherit a user's interpreter, import path or
+# site initialization. User tasks keep their personal-environment-first PATH.
+MANAGER_PYTHON = ("/usr/local/bin/python", "-I", "-S")
 
 
 def docker(*args, stdin=None, timeout=90, check=True):
@@ -62,20 +65,24 @@ def ensure(key):
         info = docker("inspect", name, check=False)
         if not info.returncode:
             existing = json.loads(info.stdout)[0]
-            if existing["Config"]["Image"] != IMAGE and not existing["State"]["Running"]:
+            if existing["Config"]["Image"] != IMAGE:
+                if existing["State"]["Running"]:
+                    # Do not execute privileged helpers in a previous image.
+                    # Deployment drains its runs before stopping/recreating it.
+                    raise RuntimeError("个人沙箱需要更新，请等待当前任务结束后由管理员重建运行容器")
                 # Keep the stopped container as a rollback reference and reuse all owner volumes.
                 docker("rename", name, name + "-previous-" + existing["Id"][:12])
                 info = docker("inspect", name, check=False)
         if info.returncode:
             for suffix in ("home", "files", "env"):
                 docker("volume", "create", "--label", "workbench=" + PREFIX, name + "-" + suffix)
-            docker("run", "--rm", "--user", "0", "--network", "none", "--entrypoint", "python",
+            docker("run", "--rm", "--user", "0", "--network", "none", "--entrypoint", MANAGER_PYTHON[0],
                    "-v", name + "-home:/home/dify", "-v", name + "-files:/workspace", "-v", name + "-env:/opt/user-env",
-                   IMAGE, "-c", "import os; paths=['/home/dify','/workspace','/workspace/conversations','/workspace/" + key + "','/opt/user-env']; "
+                   IMAGE, *MANAGER_PYTHON[1:], "-c", "import os; paths=['/home/dify','/workspace','/workspace/conversations','/workspace/" + key + "','/opt/user-env']; "
                    "[(os.makedirs(p,exist_ok=True),os.chown(p,1000,1000)) for p in paths]")
             # Existing personal venvs gain the immutable office fallback without replacing their packages.
-            docker("run", "--rm", "--user", "1000", "--network", "none", "--entrypoint", "/usr/local/bin/python",
-                   "-v", name + "-env:/opt/user-env", IMAGE, "-c",
+            docker("run", "--rm", "--user", "1000", "--network", "none", "--entrypoint", MANAGER_PYTHON[0],
+                   "-v", name + "-env:/opt/user-env", IMAGE, *MANAGER_PYTHON[1:], "-c",
                    "from pathlib import Path; site=Path('/opt/user-env/current/python/lib/python3.12/site-packages'); "
                    "base=Path('/opt/office/python/lib/python3.12/site-packages'); "
                    "(site/'workbench_office.pth').write_text(str(base)+'\\n') if site.exists() and base.exists() else None")
@@ -89,7 +96,7 @@ def ensure(key):
                    "-e", "PATH=/opt/user-env/current/python/bin:/opt/office/python/bin:/opt/user-env/current/node/node_modules/.bin:/opt/office/node/node_modules/.bin:/usr/local/bin:/usr/bin:/bin",
                    "-e", "NODE_PATH=/opt/user-env/current/node/node_modules:/opt/office/node/node_modules", IMAGE)
         docker("start", name)
-        docker("exec", "--user", "0", name, "python", "-c",
+        docker("exec", "--user", "0", name, *MANAGER_PYTHON, "-c",
                "import os; os.makedirs('/opt/workbench-global', mode=0o755, exist_ok=True)")
         touch(key)
         return {"endpoint": "http://" + name + ":5004", "auth_token": token}
@@ -110,7 +117,7 @@ def stop_binding(key, binding):
     if info.returncode or not json.loads(info.stdout)[0]["State"]["Running"]:
         return {"stopped": 0}
     script = Path(__file__).with_name("stop_jobs.py").read_text()
-    result = docker("exec", "--user", "1000", "-i", name, "python", "-c", script,
+    result = docker("exec", "--user", "1000", "-i", name, *MANAGER_PYTHON, "-c", script,
                     stdin=json.dumps({"binding_id": binding}))
     return json.loads(result.stdout)
 
@@ -135,11 +142,31 @@ def operation(key, action, payload):
     if action == "touch":
         touch(key)
         return {"ok": True}
+    if action == "office-preview":
+        # No owner volumes, credentials, network or writable image are exposed.
+        preview_name = PREFIX + "-preview-" + uuid.uuid4().hex
+        with lock(key):
+            try:
+                script = Path(__file__).with_name("office_preview.py").read_text()
+                result = docker("run", "--rm", "--name", preview_name, "--network", "none",
+                                "--read-only", "--tmpfs", "/tmp:rw,nosuid,noexec,size=256m",
+                                "--user", "1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+                                "--memory", "1g", "--cpus", "1", "--pids-limit", "128", "-e", "HOME=/tmp",
+                                "--entrypoint", MANAGER_PYTHON[0], "-i", IMAGE, *MANAGER_PYTHON[1:], "-c", script,
+                                stdin=json.dumps(payload), timeout=55, check=False)
+                output = json.loads(result.stdout or "{}")
+                if result.returncode or not output.get("data"):
+                    raise ValueError(output.get("error", "文档排版失败"))
+                return output
+            except subprocess.TimeoutExpired as error:
+                raise ValueError("文档排版超时，请下载原文件查看") from error
+            finally:
+                docker("rm", "-f", preview_name, check=False)
     if action == "files":
         with lock(key):
             ensure(key)
             script = Path(__file__).with_name("file_ops.py").read_text()
-            result = docker("exec", "--user", "1000", "-i", name, "python", "-c", script,
+            result = docker("exec", "--user", "1000", "-i", name, *MANAGER_PYTHON, "-c", script,
                             stdin=json.dumps(payload), check=False)
             output = json.loads(result.stdout or "{}")
             if result.returncode and not output.get("conflict"):
@@ -159,7 +186,7 @@ def operation(key, action, payload):
                 + ",helper.__dict__); sys.modules['file_ops']=helper; exec(" + repr(script) + ")"
             )
             result = docker("exec", "--user", "0" if action == "global-resources" else "1000", "-i",
-                            name, "python", "-c", source, stdin=json.dumps(payload), check=False)
+                            name, *MANAGER_PYTHON, "-c", source, stdin=json.dumps(payload), check=False)
             output = json.loads(result.stdout or "{}")
             if result.returncode and not output.get("conflict"):
                 raise ValueError(output.get("error", "Resource operation failed"))
@@ -178,8 +205,8 @@ def operation(key, action, payload):
             # No Home, files, Docker socket or credentials are mounted into the installer.
             try:
                 result = docker("run", "--rm", "--name", installer, "--user", "1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
-                    "--memory", "2g", "--cpus", "2", "--pids-limit", "256", "--entrypoint", "python",
-                    "-v", name + "-env:/opt/user-env", "-i", IMAGE, "-c", script,
+                    "--memory", "2g", "--cpus", "2", "--pids-limit", "256", "--entrypoint", MANAGER_PYTHON[0],
+                    "-v", name + "-env:/opt/user-env", "-i", IMAGE, *MANAGER_PYTHON[1:], "-c", script,
                     stdin=json.dumps(payload), timeout=900)
                 output = json.loads(result.stdout)
             except subprocess.TimeoutExpired:
@@ -202,7 +229,7 @@ def operation(key, action, payload):
         if result.returncode == 0 and result.stdout.strip() == "true":
             return value
         # Recover a switch that completed just before a manager restart.
-        current = docker("exec", "--user", "1000", name, "python", "-c",
+        current = docker("exec", "--user", "1000", name, *MANAGER_PYTHON, "-c",
                          "from pathlib import Path; p=Path('/opt/user-env/current/request.json'); print(p.read_text() if p.exists() else '{}')", check=False)
         try:
             applied = json.loads(current.stdout).get("request_id") == payload.get("request_id")
@@ -215,7 +242,7 @@ def operation(key, action, payload):
         binding = str(uuid.UUID(payload["binding_id"]))
         with lock(key):
             ensure(key)
-            docker("exec", "--user", "1000", name, "python", "-c",
+            docker("exec", "--user", "1000", name, *MANAGER_PYTHON, "-c",
                    "import shutil; shutil.rmtree('/home/dify/" + binding + "',ignore_errors=True); "
                    "shutil.rmtree('/workspace/conversations/" + binding + "',ignore_errors=True)")
             return {"ok": True}

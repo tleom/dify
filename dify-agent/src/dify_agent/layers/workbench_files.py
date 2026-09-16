@@ -12,6 +12,7 @@ from pydantic_ai import RunContext, Tool
 
 from agenton.layers import LayerConfig, LayerDeps, PlainLayer
 from dify_agent.layers.execution_context.layer import DifyExecutionContextLayer
+from dify_agent.layers.workbench_control import call_key
 
 
 class WorkbenchFilesDeps(LayerDeps):
@@ -22,6 +23,7 @@ class WorkbenchFilesState(BaseModel):
     workbench_run_id: str | None = None
     changed_paths: set[str] = Field(default_factory=set)
     path_protocol: int = 0
+    opened_paths: set[str] = Field(default_factory=set)
 
 
 @dataclass
@@ -33,6 +35,7 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
     _verified: dict[str, dict[str, str]] = field(default_factory=dict, init=False, repr=False)
     _lookup_failed: bool = field(default=False, init=False, repr=False)
     _directory: str = field(default="", init=False, repr=False)
+    run_id: str = field(default="", init=False)
 
     async def on_context_create(self) -> None:
         self.runtime_state = WorkbenchFilesState(
@@ -59,8 +62,18 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
     def record_changes(self, paths: list[str], removed: list[str] | None = None) -> None:
         self.runtime_state.changed_paths.update(paths)
         self.runtime_state.changed_paths.difference_update(removed or [])
-        # Fixed URLs survive edits, but delivery must confirm the current file exists.
-        self._verified.clear()
+        self.runtime_state.opened_paths.difference_update([*paths, *(removed or [])])
+        # Other conversations may write concurrently in this owner's workspace.
+        # Only a changed file (or its containing directory archive) loses proof;
+        # unrelated writes must not invalidate already verified delivery links.
+        affected = [*paths, *(removed or [])]
+        for verified_path, entry in list(self._verified.items()):
+            if any(
+                changed == verified_path
+                or (entry.get("kind") == "directory" and changed.startswith(verified_path.rstrip("/") + "/"))
+                for changed in affected
+            ):
+                self._verified.pop(verified_path)
         self._lookup_failed = False
 
     def covers_changed_path(self, path: str, *, directory: bool) -> bool:
@@ -116,10 +129,11 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
             and self.covers_changed_path(path, directory=item.get("kind") == "directory")
             for path, item in self._verified.items()
         )
-        if final and self.runtime_state.changed_paths and not supplied_changed and not blocked:
-            return "请查询并提供本次生成或修改文件对应的实际 download_url，不能用其他已有文件的链接代替。"
-        if delivered and not supplied and not blocked:
-            return "交付前先查询文件空间确认产物可见，并提供实际 download_url；如查询失败，请明确说明交付受阻。"
+        opened_changed = bool(self.runtime_state.changed_paths & self.runtime_state.opened_paths)
+        if final and self.runtime_state.changed_paths and not (opened_changed or supplied_changed or blocked):
+            return "请调用 open_file_preview 打开本次生成或修改的主要交付文件，然后说明结果；无需提供下载链接。"
+        if delivered and not (supplied or self.runtime_state.opened_paths or blocked):
+            return "交付前调用 open_file_preview 确认文件可见并打开侧栏预览；如查询失败，请明确说明交付受阻。"
         return None
 
     @classmethod
@@ -129,8 +143,10 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
     @property
     def prefix_prompts(self) -> list[str]:
         return [
-            "默认将生成文件保存到当前会话目录；用户明确指定时可访问个人 /workspace 下的其他目录。交付文件前调用 workbench_files 查询实际文件，"
-            "确认文件已在文件空间可见，告知用户可打开查看，并逐字使用工具返回的 download_url 提供下载链接。"
+            "默认将生成文件保存到当前会话目录；用户明确指定时可访问个人 /workspace 下的其他目录。"
+            "open_file_preview(path) 会校验文件并请求前端在当前会话侧栏打开预览。新文件交付时调用该工具打开主要产物，"
+            "随后简要说明结果，默认不附下载链接。工具 accepted 表示预览请求已发送，不代表前端渲染已完成。"
+            "workbench_files 可用于查询文件目录；用户明确要求下载链接时可逐字使用它返回的 download_url。"
             "在对话中展示图片时使用 ![图片说明](preview_url)，其中 preview_url 必须逐字取自该文件查询结果。"
             "不要猜测或拼接地址，不要用本地路径、sandbox: 地址、临时上传链接替代文件空间链接。"
             "查询失败时如实说明，不能声称文件已可下载。path 默认 . 列出当前会话文件，"
@@ -200,7 +216,37 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
                 )
                 return '{"error":"文件空间查询失败，尚未确认文件可见和下载链接，请重试或说明阻塞"}'
 
-        return [Tool(workbench_files)]
+        async def open_file_preview(ctx: RunContext[object], path: str) -> dict:
+            """Verify one workspace file and open it in the current conversation's sidebar.
+
+            Use this to deliver generated files or show an existing file. Accepts
+            current-chat relative paths or /workspace/... paths. Successful
+            acceptance means the UI request was recorded, not that rendering has
+            finished. The preview toolbar provides downloading when needed.
+            """
+            if not path or len(path) > 1024 or not self.run_id:
+                return {"error": "文件路径无效或预览工具未绑定当前执行"}
+            try:
+                response = await http_client.post(
+                    self.inner_api_url.rstrip("/") + "/inner/api/agent/workbench/files/preview",
+                    headers={"X-Inner-Api-Key": self.inner_api_key},
+                    json={**identity, "path": path, "backend_run_id": self.run_id, "request_key": call_key(ctx)},
+                    timeout=90,
+                )
+                response.raise_for_status()
+                result = response.json()
+                if result.get("accepted") is not True or not isinstance(result.get("file", {}).get("path"), str):
+                    raise ValueError("Invalid preview response")
+                self.runtime_state.opened_paths.add(result["file"]["path"])
+                self._lookup_failed = False
+                return result
+            except (httpx.HTTPError, ValueError):
+                self._lookup_failed = not self.runtime_state.changed_paths or self.covers_changed_path(
+                    self.canonical_path(path), directory=True
+                )
+                return {"error": "文件预览请求失败，尚未确认文件可见，请重试或说明交付受阻"}
+
+        return [Tool(workbench_files), Tool(open_file_preview, sequential=True)]
 
 
 def _relative_path(path: str) -> str:

@@ -85,15 +85,64 @@ null. Compaction phases share `compaction_id` and include `before_tokens`.
 The existing tiered compactor remains responsible for rewriting history. These
 events are non-terminal; consumers that do not display context can ignore them.
 
-Compaction first clamps oversized completed message parts, then clears older
-tool results, then summarizes history while keeping a suffix selected by token
-budget. Keeping a fixed number of recent messages alone cannot bound a short
-history containing large tool arguments. The input target uses 80 percent of the
+Workbench automatic and manual compaction share an incremental summarizer. Old
+tool results reach the summary model in full, including facts after the first
+500 characters; they are not cleared before summarization. Oversized source text
+is processed in bounded segments with the previous summary anchored in each
+request. The summary preserves requirements, corrections, authorization, exact
+artifact references, verified outcomes, uncertain side effects and next actions.
+Native tool-pair boundaries and recent history are retained. Reused provider call
+IDs are normalized on a copy. If one recent tool pair exceeds the input target,
+its complete text is summarized too. Model summaries remain lossy and may require
+re-reading source files or the original transcript, especially for binary media.
+Non-Workbench compaction retains its clamp, clear and summarize tiers.
+
+Keeping a fixed number of recent messages alone cannot bound a short history
+containing large tool arguments. The input target uses 80 percent of the
 reported model window and reserves the configured output allowance. When a
 Workbench model reports no valid window, an explicit 8,000-token history budget
 still enables compaction; it is a policy threshold, not a claimed model capacity.
 Context events keep `window_tokens=null` and report estimated current usage.
 Non-Workbench callers retain the existing unknown-window behavior.
+Post-compaction counts subtract reclaimed text from the pre-compaction estimate;
+they do not reuse a retained response's old provider count as the new size. A new
+provider response replaces the estimate. No reclaimed text is reported as a
+failed compaction attempt rather than a completed reduction. Manual compaction
+saves a durable checkpoint before publishing success; errors retain the previous
+history. Incremental summaries add model requests and consume model usage.
+
+### Workbench planning and goals
+
+Plan mode guides information gathering, analysis, requirements clarification,
+discussion of material choices, a complete reviewable plan, and revisions based
+on feedback. `exit_plan_mode` pauses for an explicit review action; keep-planning
+feedback leaves the mode active and requires another complete plan. Approval
+exits planning and resumes execution. This is model guidance and a persisted
+approval workflow, not an OS-level read-only sandbox.
+
+Goals are persisted control state independent of an assistant's final response.
+While active, the server schedules another round after the previous run and
+queued user messages finish. Client disconnection or a worker restart does not
+complete the goal. Default goals have no fixed round cap. The former internal
+256-round default is lifted when loading existing goals; paused and blocked
+goals still need explicit resumption. Finite non-default limits remain readable.
+Human edits, pause/stop, plan review, recovery and completed-goal fencing retain
+their existing behavior. Completion requires the current goal revision and a
+finished task list; the model is instructed to audit every original requirement
+against actual verification and delivery. The semantic truth of completion still
+depends on model judgment and the evidence available to it.
+
+`get_goal` exposes the goal's `goal_id` and `revision` directly, avoiding ambiguity
+with the collaboration state's separate revision. A rejected update returns the
+fresh goal for reevaluation; it never silently substitutes a newer revision.
+Plan and active-goal business tools require a task marked in progress. Once a
+task list exists it must have an active step before business work. Four business
+tool executions trigger a progress checkpoint even when no list was created:
+the next business tool waits for `todo_write`. Control, clarification and resource
+tools remain available. The model can keep the same step in progress when it is
+still working, and must only complete steps backed by evidence. Already-running
+parallel calls finish; the next admission observes the checkpoint. This bounds
+silent task-list staleness without treating tool counts as proof of completion.
 
 Workbench runs with a conversation shell also apply the SDK's `ToolOutputLimits`.
 Oversized tool results are stored under that conversation's
@@ -174,6 +223,51 @@ Workbench compositions include `dify.workbench_files`, which binds the trusted e
 The config layer selects file-delivery guidance from the trusted `workbench_run_id` on every invocation, including resumed sessions. Workbench replies use the file-space URLs; ordinary Agent replies retain the upload CLI's `public_download_url` guidance. The upload, public-url, and download CLI commands remain available for structured ToolFile references and incoming files.
 
 Pending generated paths persist in the session snapshot across deferred continuations of the same workbench run. URL verification resets on resume, and a new logical run clears the pending paths. Entries with `downloadable=false` remain visible but receive no URLs; the model must split unsupported artifacts or explain that delivery is blocked. File downloads are limited to 20 MiB, and directory archives to 50 MiB of supported file contents.
+
+Workbench file-change inventories cover the owned `/workspace`, including writes
+outside the current conversation directory. Personal memory, skills and resource
+staging paths are excluded from generated-file delivery. Inventories remain bounded
+by file count, output size and execution time. Acquiring a conversation binding
+prepares its current directory from `/workspace` and verifies the persistent home;
+it does not require the obsolete account-named working directory to exist.
+
+Personal memory is refreshed before each model request. The control layer exposes
+`read_memory` and `update_memory(content, version)` for proactive consolidation of
+stable user preferences, explicit corrections, verified reusable lessons and durable
+project context. Temporary task progress and unverified inferences are excluded;
+explicit forget/do-not-retain requests take precedence. Updates use the exact version
+read from the owner's workspace, share the editor's account lock and file CAS, and
+require the current app/run/execution identity. On conflict the model receives the
+latest memory and merges again. Transport retries retain the original payload; an
+already-applied identical value is a no-op. External file IO runs outside database
+transactions. Unreadable memory cannot be silently replaced by the Agent.
+
+For multi-step work, `todo_write` marks each step active before execution and completed
+after verification, before the next step starts. The current list is injected at every
+model boundary. Failures keep the step unfinished; completion is a model decision
+based on task evidence, not an inference from tool-call counts.
+
+The resource catalog lists published global skills first and enabled, valid personal
+skills second. Personal skill IDs use `personal:<name>`; they belong to explicit
+resource mentions, not the global archive selection. The API resolves them against
+the authenticated owner's workspace at submission and dispatch. The model reads
+the chosen content through `read_skill(scope="personal", name=...)`.
+
+The command endpoint advertises `command_resources_protocol=1` in the catalog and
+accepts `resource_mentions` with `/goal`, `/plan` and `/compact`. Goal state preserves
+these mentions for subsequent automatic rounds. `/plan <direction>` starts planning
+that direction. `/compact <instruction>` durably compacts history and then executes
+the instruction in the same run; bare `/compact` only compacts history. Completion
+notification retries cannot turn a committed summary into an "original retained"
+failure. Human-input submissions carry the current pending `request_id`; replies to
+a superseded request are rejected even if the logical run ID has not changed.
+
+Sandbox manager helpers use `/usr/local/bin/python -I -S`, while normal user commands
+retain their personal-environment-first PATH. The office image makes `/usr/local`
+root-owned and removes group/other write permissions. A running container on a
+previous image is rejected before management helpers execute. Deployments drain
+active runs, stop old containers, and recreate them with the configured hardened
+image while preserving home, workspace and personal-environment volumes.
 
 Final delivery requires a download URL for at least one changed path or a directory archive containing it. Each query refreshes verification for its requested path; file changes invalidate previous query results and failures. Unrelated files do not establish delivery or explain a failure to deliver the current artifacts.
 
@@ -267,6 +361,20 @@ expired request; `input-skip` explicitly skips the matching question. Both retur
 the current run state and resume the same logical run without submitting defaults
 or partially entered answers. A missing answer does not grant new permissions or
 establish facts. All three endpoints enforce account, tenant and question identity.
+
+The API stops consuming immediately after a terminal error frame, even if the
+upstream connection remains open or continues sending keepalives. Workbench
+model requests have a 180-second idle deadline that resets on actual text,
+reasoning or tool-argument output. Tool execution and deferred human input do
+not consume that idle deadline. A silent model ends the attempt through the
+existing checkpoint, remote fencing and bounded automatic recovery path;
+manual cancellation remains cancellation and is never converted into recovery.
+
+File delivery proof is invalidated only when that file changes or is removed.
+A directory archive also loses proof when one of its members changes. Writes in
+another conversation or unrelated build/preview files retain verified links,
+so simultaneous work in one personal workspace does not force repeated delivery
+retries for unchanged artifacts.
 
 The API treats a stream without a terminal frame as a failure and tolerates brief
 Redis heartbeat outages until the last confirmed execution lease expires. Recovery

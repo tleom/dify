@@ -17,6 +17,17 @@ from services.workbench.files import ensure_workspace, manager
 MAX_PACKAGE = 20 * 1024 * 1024
 
 
+class AgentMemoryPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tenant_id: str
+    account_id: str
+    app_id: str
+    workbench_run_id: str
+    backend_run_id: str
+    content: str = Field(max_length=65536)
+    version: str | None = Field(max_length=128)
+
+
 class ResourceFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     path: str = Field(min_length=1, max_length=512)
@@ -105,6 +116,16 @@ def personal_snapshot(identifier):
     return result
 
 
+def personal_skill_catalog(tenant_id: str, account_id: str) -> list[dict[str, str]]:
+    """List usable skills from this account's workspace with distinct public IDs."""
+    snapshot = personal_snapshot(ensure_workspace(tenant_id, account_id))
+    return [
+        {"id": f"personal:{item['id']}", "name": item["name"], "description": item["description"], "scope": "personal"}
+        for item in snapshot["skills"]
+        if item.get("enabled") and not item.get("error")
+    ]
+
+
 def mutate(tenant_id, account_id, payload):
     identifier = ensure_workspace(tenant_id, account_id)
     if payload["operation"] == "skill_inspect":
@@ -164,21 +185,52 @@ def listing(tenant_id, account_id):
     identifier = ensure_workspace(tenant_id, account_id)
     personal = personal_snapshot(identifier)
     global_items = _global_resources(tenant_id, identifier, template(tenant_id, account_id)["soul"])
-    visible = catalog(tenant_id, account_id)
+    visible = catalog(tenant_id, account_id, include_personal=False)
     return {**personal, "global": {**global_items, "tools": visible["tools"], "knowledge": visible["knowledge"]}}
 
 
-def agent_snapshot(payload, *, initialize=False):
-    """Resolve only the currently leased run; never accept a client workspace ID."""
+def _agent_soul(payload):
+    """Fence resource access to this owner's current execution before external IO."""
     from services.workbench.recovery import locked_run
 
     with session_factory.get_session_maker().begin() as session:
         chat, run = locked_run(session, payload.tenant_id, payload.account_id, payload.workbench_run_id)
         if chat.app_id != payload.app_id or run.status != "running" or run.backend_run_id != payload.backend_run_id:
             raise Forbidden()
-        soul = json.loads(run.payload)["effective_soul"]
+        return json.loads(run.payload)["effective_soul"]
+
+
+def agent_snapshot(payload, *, initialize=False):
+    """Resolve only the currently leased run; never accept a client workspace ID."""
+    soul = _agent_soul(payload)
     identifier = ensure_workspace(payload.tenant_id, payload.account_id)
     result = personal_snapshot(identifier)
     if initialize:
         result["global"] = _global_resources(payload.tenant_id, identifier, soul)
+    return result
+
+
+def agent_memory_update(payload: AgentMemoryPayload):
+    """Use the same account lock and file CAS as editor writes, outside DB locks."""
+    _agent_soul(payload)
+    if len(payload.content.encode("utf-8")) > 65536:
+        raise BadRequest("记忆内容不能超过 64 KiB，请先合并重复内容、压缩过时记录")
+    identifier = ensure_workspace(payload.tenant_id, payload.account_id)
+    with redis_client.lock(f"workbench:resources:{identifier}", timeout=90, blocking_timeout=30):
+        # Waiting for another conversation must not authorize a superseded run.
+        _agent_soul(payload)
+        current = personal_snapshot(identifier)
+        if any("memory.md" in warning for warning in current.get("warnings", [])):
+            raise Conflict("现有记忆无法完整读取，请先修复 memory.md，不能用不完整内容覆盖")
+        if current["memory"]["content"] == payload.content:
+            # A response may be lost after a successful write. An exact no-op is
+            # safe even with the old revision; never adopt a newer revision to write.
+            return current["memory"]
+        result = manager(
+            identifier,
+            "personal-resources",
+            {"operation": "memory_update", "content": payload.content, "version": payload.version},
+        )
+    if result.get("conflict"):
+        raise Conflict("其他会话已更新记忆，请重新读取并合并后使用新版本保存")
     return result

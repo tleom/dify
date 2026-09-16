@@ -1,0 +1,55 @@
+# 文件侧栏预览
+
+## 实现与来源
+
+工作台通过已有的账号鉴权文件接口读取文件，在当前文件侧栏中预览。文件不需要上传到公共 Office 查看服务。各类预览器按需加载，同一会话可以保留多个文件标签。
+
+| 文件 | 当前实现 | 说明 |
+| --- | --- | --- |
+| Word：DOC、DOCX、DOCM、DOTX、DOTM、ODT、RTF | 服务端 LibreOffice 排版，前端 PDF.js 6.3.289 分页显示 | 在无网络的临时容器中转换；连续页面、页码、翻页和缩放，支持选择文字；下载仍为原文件 |
+| Excel：XLSX、XLS、XLSB、XLSM、XLTX、XLTM | `@arcships/vue-xlsx` 0.6.0 | 只读模式、独立 Worker/WASM 解析、多工作表、公式、合并单元格和图表 |
+| PowerPoint：PPTX、PPTM、PPSX、PPSM、POTX、POTM | `@arcships/vue-pptx` 0.6.0 | 连续浏览、翻页和缩放；禁止外部媒体，默认不自动播放 |
+| PDF、图片、文本、Markdown、HTML、音视频 | 原有预览体系 | 共用文件标签、下载、重新加载、宽度调整和全屏 |
+
+Word 使用服务器安装的字体进行自动分页。明确设置固定行距的 OOXML 段落在转换副本中关闭网格吸附，保留 Word 的固定行距语义；原文件不作修改。缺少字体、复杂域、浮动对象等仍可能与桌面 Word 有细微差异。Excel 高级图表与公式、PowerPoint 特殊效果也可能存在兼容性差异。宏不会执行。旧版二进制 PPT 需要下载，或先转换为 PPTX、PDF。
+
+Word 预览限制为单个文档 20 MiB。转换容器以普通用户运行，使用只读镜像、无网络和独立临时目录，不挂载个人文件空间，也不注入业务凭据。转换超时会返回提示。相同账号、相同文件内容的小型 PDF 结果缓存 10 分钟；跨账号不共享缓存。
+
+研究依据：
+
+- [Codex 文件预览说明](https://learn.chatgpt.com/docs/artifacts-viewer)：桌面侧栏预览文档、电子表格、演示文稿和 PDF。
+- 本机 Codex `26.901.6511.0` 的安装包资源包含按需加载的 `docx-preview` 及专用表格、演示预览模块。这里只核对组件结构，没有复制产品内部实现；其专用表格和演示模块不能当作公开可复用的库。
+- [Suna Word 预览](https://github.com/kortix-ai/suna/blob/main/apps/web/src/features/file-renderers/docx/docx-viewer.tsx)、[Excel 预览](https://github.com/kortix-ai/suna/blob/main/apps/web/src/features/file-renderers/xlsx/xlsx-viewer.tsx)：使用浏览器专用渲染器，表格采用 WASM/Worker。
+- [DeepSeek Harness 文件预览](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-sidebar-documentpreview/README.md)：采用可扩展预览器和标签页，所核对的版本没有原生 Office 渲染器。
+- [LibreOffice](https://www.libreoffice.org/)、[Agentic Office UI](https://github.com/arcships/agentic-office-ui)：分别用于 Word 排版、表格及演示文稿预览。Office 前端组件的依赖版本在锁文件中固定。
+- [OOXML 固定行距与文档网格规则](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.docgrid.linepitch?view=openxml-3.0.1)：固定行距优先于文档行网格。
+
+Word、PowerPoint 的顶部工具栏统一居中显示上一页、当前页/总页数、下一页及缩放；Excel 只显示居中的缩放控件。加载提示统一为“正在加载文件”。Word 文件读取与预览组件加载并行进行；当前工作台状态按文件路径和版本缓存最多 8 份、合计 32 MiB 的 PDF，手动刷新绕过缓存，切换账号不共用缓存。
+
+## 文件刷新、编辑和分享
+
+文件夹行提供与文件一致的预览按钮，点击后直接切换到该目录，并保留已打开的文件预览标签。“上一级目录”用于返回父目录；点击文件夹名称仍展开或收起树节点。
+
+Agent 创建、修改文件，任务结束以及用户上传或保存文件后，前端刷新当前文件夹和仍可见的展开目录，保持当前位置与展开状态。拖动侧栏宽度后，指针抬起、取消或窗口失去焦点都会结束拖动，恢复文件预览交互。
+
+UTF-8 文本文件（例如 PY、MD、TXT、HTML）可点击侧栏工具栏的编辑图标，直接修改文本，通过“保存”或 `Ctrl/Cmd+S` 提交。自动换行开关同时作用于编辑区；退出编辑回到代码或网页预览时保留草稿。单个文件限制为 2 MiB，保留原有 CRLF/LF 换行。保存使用读取时的文件版本；Agent 或其他页面已修改文件时，返回冲突并保留草稿。关闭标签或离开页面前提示处理未保存的修改。文件预览标签支持拖动排序。
+
+“分享文件”生成单文件短链接 `/files/s/<随机标识>`，默认长期有效，也可选择 1、7、30 天。拥有链接的人可直接打开，HTML 直接作为网页显示。链接绑定原账号的文件路径，文件保存后读取最新内容；撤销、到期、删除所属会话或停用所属文件空间后失效。重新生成链接会使旧链接失效。HTML 使用浏览器沙箱隔离，不继承文件服务的认证上下文。相对路径引用的其他文件不会自动公开，独立网页应内嵌所需资源或使用可访问的资源地址。
+
+## Agent 工具契约
+
+`open_file_preview(path)` 校验单个文件并向当前任务的事件流追加 `workbench_preview`。路径可以是当前会话相对路径，也可以是个人文件空间中的 `/workspace/...` 绝对路径。服务端核对租户、账号、应用、会话和当前执行编号；停止或替换执行后，旧调用无法继续打开侧栏。
+
+`accepted: true` 表示预览请求已经持久化，不能证明浏览器已经完成渲染。相同调用编号的重试复用同一事件。前端只响应当前会话的新事件，历史重放和重复事件不会重新打开用户关闭的侧栏。已打开文件再次变化后，Agent 需要重新发起预览请求，前端按文件版本更新内容。
+
+现有 `workbench_files` 继续用于查询文件和获取用户明确需要的下载地址。交付校验接受本次改动文件的预览请求，默认交付流程不再强制附带下载链接。下载入口保留在侧栏工具条。
+
+## 待管理员手动采用的系统提示词
+
+下面是独立建议稿。本次没有写入管理员发布的系统提示词。
+
+> 生成、修改并验证文件后，调用 `open_file_preview` 打开主要交付文件，让用户在侧栏直接查看。多个主要产物可分别打开。默认只简要说明文件用途和完成结果，不再附下载链接；用户可以通过预览工具条下载，用户明确要求链接时再查询并提供实际下载地址。
+>
+> 工具返回 `accepted: true` 只代表预览请求已发送，请勿声称已确认用户端渲染成功。调用失败时重试或准确说明无法打开的原因，不要假装已经展示。不要猜测文件路径或拼接链接。
+>
+> Office 文件优先生成 DOCX、XLSX、PPTX。若用户明确要求旧格式，保留其要求，并按需要同时生成适合预览的版本。制作完成后先检查内容、排版和实际文件，再打开主要结果；预览能力不能代替文件质量检查。

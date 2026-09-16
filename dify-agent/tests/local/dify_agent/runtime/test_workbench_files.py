@@ -26,7 +26,7 @@ from dify_agent.layers.workbench_files import WorkbenchFilesLayer
 from dify_agent.protocol import DeferredToolResultsPayload, RunLayerSpec, RunSucceededEvent, WorkbenchActivityRunEvent
 from dify_agent.runtime.compositor_factory import create_default_layer_providers
 from dify_agent.runtime.runner import AgentRunRunner
-from dify_agent.runtime.workbench_files import SNAPSHOT_SCRIPT
+from dify_agent.runtime.workbench_files import SNAPSHOT_SCRIPT, WorkbenchFileChanges
 from dify_agent.runtime_backend import HomeSnapshotBackend, RuntimeBackendProfile
 from .test_runner import FakeRunnerExecutionBindingBackend, FakeRunnerShellctlClient
 from .test_workbench_activity import _setup, _progress, _call
@@ -84,6 +84,52 @@ def test_inventory_keeps_documents_and_scripts_without_browser_office_or_cache_n
     assert all((tmp_path / name).is_file() for name in noise)
 
 
+def test_cross_directory_outputs_are_tracked_without_personal_configuration(tmp_path):
+    cwd = tmp_path / "conversations/current"
+    cwd.mkdir(parents=True)
+    other = tmp_path / "conversations/other"
+    other.mkdir()
+    commands = []
+
+    async def execute(script, **_kwargs):
+        commands.append(script)
+        arguments = shlex.split(script)
+        assert arguments[-2:] == ["", "/workspace"]
+        result = subprocess.run(
+            [sys.executable, *arguments[1:-1], str(tmp_path)],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        return SimpleNamespace(output=result.stdout)
+
+    layer = WorkbenchFilesLayer(config=LayerConfig(), inner_api_url="", inner_api_key="")
+    shell = SimpleNamespace(
+        _require_workspace_cwd=lambda: "/workspace/conversations/current", run_remote_script_complete=execute
+    )
+    changes = WorkbenchFileChanges(shell=cast(DifyShellLayer, shell), activity=None, files=layer)
+
+    async def scenario():
+        await changes.start()
+        (other / "报告.md").write_text("report", encoding="utf-8")
+        (tmp_path / "memory.md").write_text("preferences", encoding="utf-8")
+        (tmp_path / "skills").mkdir()
+        (tmp_path / "skills/SKILL.md").write_text("skill", encoding="utf-8")
+        await changes.collect(explicit_path="/workspace/conversations/other/报告.md")
+        assert layer.runtime_state.changed_paths == {"conversations/other/报告.md"}
+        assert layer.delivery_error("完成。", final=True)
+        layer._verified["conversations/other/报告.md"] = {"download_url": DOWNLOAD, "preview_url": PREVIEW}
+        assert layer.delivery_error(f"[下载]({DOWNLOAD})", final=True) is None
+        (other / "报告.md").unlink()
+        await changes.collect()
+        assert not layer.runtime_state.changed_paths
+
+    asyncio.run(scenario())
+    assert len(commands) == 3
+
+
 def add_files(request):
     context = next(layer.config for layer in request.composition.layers if layer.name == "execution_context")
     context.workbench_run_id, context.user_id, context.app_id = "turn-1", "owner-1", "app-1"
@@ -95,6 +141,85 @@ def add_files(request):
             config={},
         )
     )
+
+
+def test_agent_requests_sidebar_preview_then_delivers_without_a_download_link(monkeypatch):
+    calls = 0
+
+    async def stream(messages, info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield {0: _call("open_file_preview", {"path": "报告.docx"}, "preview-call")}
+        else:
+            yield "文件已生成，已请求打开侧栏预览。"
+
+    request, sink, _ = _setup(monkeypatch, stream)
+    add_files(request)
+    requests = []
+
+    def transport(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        assert str(request.url).endswith("/agent/workbench/files/preview")
+        assert body["backend_run_id"] == "preview-native" and body["request_key"]
+        return httpx.Response(
+            200, json={"accepted": True, "file": {"path": "conversations/chat/报告.docx", "kind": "file"}}
+        )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            await AgentRunRunner(
+                run_id="preview-native",
+                request=request,
+                sink=sink,
+                plugin_daemon_http_client=client,
+                dify_api_http_client=client,
+            ).run()
+
+    asyncio.run(scenario())
+    events = sink.events["preview-native"]
+    assert isinstance(events[-1], RunSucceededEvent)
+    assert calls == 2 and len(requests) == 1
+    text = "".join(item.text for item in _progress(events, "text"))
+    assert text == "文件已生成，已请求打开侧栏预览。"
+
+
+def test_concurrent_workspace_writes_preserve_unmodified_delivery_links():
+    layer = WorkbenchFilesLayer(config=LayerConfig(), inner_api_url="", inner_api_key="")
+    path = "conversations/current/报告.docx"
+    layer.record_changes([path])
+    layer._verified[path] = {"download_url": DOWNLOAD, "preview_url": PREVIEW, "kind": "file"}
+    layer.record_changes(["conversations/other/预览.pdf", "conversations/current/build.py"])
+    assert layer.delivery_error(f"[报告.docx]({DOWNLOAD})", final=True) is None
+    layer.record_changes([], ["conversations/other/预览.pdf"])
+    assert layer.delivery_error(f"[报告.docx]({DOWNLOAD})", final=True) is None
+    layer.record_changes([path])
+    assert layer.delivery_error(f"[报告.docx]({DOWNLOAD})", final=True) is not None
+
+
+@pytest.mark.parametrize("removed", [False, True])
+def test_changed_archive_member_invalidates_only_its_containing_directory(removed):
+    layer = WorkbenchFilesLayer(config=LayerConfig(), inner_api_url="", inner_api_key="")
+    layer._verified["conversations/current"] = {"download_url": DOWNLOAD, "preview_url": PREVIEW, "kind": "directory"}
+    layer._verified["conversations/current2"] = {
+        "download_url": DOWNLOAD + "2",
+        "preview_url": PREVIEW + "2",
+        "kind": "directory",
+    }
+    changed = ["conversations/current/报告.docx"]
+    layer.record_changes([] if removed else changed, changed if removed else None)
+    assert "conversations/current" not in layer._verified
+    assert "conversations/current2" in layer._verified
+
+
+def test_modifying_a_previewed_file_requires_a_new_delivery_request():
+    layer = WorkbenchFilesLayer(config=LayerConfig(), inner_api_url="", inner_api_key="")
+    layer.record_changes(["conversations/chat/报告.docx"])
+    layer.runtime_state.opened_paths.add("conversations/chat/报告.docx")
+    assert layer.delivery_error("文件已生成。", final=True) is None
+    layer.record_changes(["conversations/chat/报告.docx"])
+    assert layer.delivery_error("文件已生成。", final=True) is not None
 
 
 def test_invented_split_stream_is_withheld_then_model_queries_and_corrects(monkeypatch):
@@ -305,7 +430,9 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(
 ):
     calls = 0
     old_url = "https://files.example.test/files/workbench/signed/old.txt?mode=download"
-    (tmp_path / "old.txt").write_text("already existed", encoding="utf-8")
+    conversation = tmp_path / "conversations/chat"
+    conversation.mkdir(parents=True)
+    (conversation / "old.txt").write_text("already existed", encoding="utf-8")
 
     async def stream(messages, info):
         nonlocal calls
@@ -348,9 +475,10 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(
     async def remote(self, script, **kwargs):
         args = shlex.split(script)
         assert args[:2] == ["python3", "-c"]
+        assert args[-2:] == ["", "/workspace"]
         result = subprocess.run(
-            [sys.executable, "-c", args[2], *args[3:]],
-            cwd=tmp_path,
+            [sys.executable, "-c", args[2], "", str(tmp_path)],
+            cwd=conversation,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -363,7 +491,7 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(
             code = "from pathlib import Path; import zipfile, base64; z=zipfile.ZipFile('报告.docx','w'); z.writestr('word/document.xml','<document/>'); z.close(); Path('chart.png').write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6ZpAAAAAASUVORK5CYII=')); p=Path('playwright_chromiumdev_profile-test/Default'); p.mkdir(parents=True); (p/'History').write_text('browser cache'); p=Path('workbench-office-test/user'); p.mkdir(parents=True); (p/'registrymodifications.xcu').write_text('office settings')"
         else:
             code = "import zipfile; z=zipfile.ZipFile('报告.docx','a'); z.writestr('word/styles.xml','<styles/>'); z.close()"
-        subprocess.run([sys.executable, "-c", code], cwd=tmp_path, check=True)
+        subprocess.run([sys.executable, "-c", code], cwd=conversation, check=True)
         return {"done": True, "exit_code": 0}
 
     monkeypatch.setattr(DifyShellLayer, "run_remote_script_complete", remote)
