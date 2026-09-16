@@ -246,7 +246,10 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
                 )
                 return {"error": "文件预览请求失败，尚未确认文件可见，请重试或说明交付受阻"}
 
-        return [Tool(workbench_files), Tool(open_file_preview, sequential=True)]
+        return [
+            Tool(workbench_files, metadata={"workbench_plan": "read"}),
+            Tool(open_file_preview, sequential=True, metadata={"workbench_plan": "read"}),
+        ]
 
 
 def _relative_path(path: str) -> str:

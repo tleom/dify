@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -11,7 +12,7 @@ from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel, Field
-from pydantic_ai import ModelRetry, RunContext, Tool
+from pydantic_ai import BinaryContent, ModelRetry, RunContext, Tool, ToolReturn
 from pydantic_ai.tools import ArgsValidatorFunc, DeferredToolRequests, ToolDefinition
 
 from agenton.layers import LayerConfig, LayerDeps, PydanticAILayer
@@ -85,18 +86,20 @@ class WorkbenchControlLayer(PydanticAILayer[WorkbenchControlDeps, object, LayerC
     @property
     def tools(self):
         return [
-            Tool(self.read_skill, takes_ctx=False),
-            Tool(self.read_memory, takes_ctx=False),
+            Tool(self.read_skill, takes_ctx=False, metadata={"workbench_plan": "read"}),
+            Tool(self.read_memory, takes_ctx=False, metadata={"workbench_plan": "read"}),
             Tool(self.update_memory, takes_ctx=False, sequential=True),
-            Tool(self.get_goal, takes_ctx=False),
+            Tool(self.get_goal, takes_ctx=False, metadata={"workbench_plan": "read"}),
             Tool(self.update_goal, takes_ctx=True, sequential=True),
             Tool(self.todo_write, takes_ctx=True, sequential=True),
+            Tool(self.plan_inspect, takes_ctx=True, sequential=True, metadata={"workbench_plan": "planning_only"}),
             Tool(
                 self.exit_plan_mode,
                 takes_ctx=True,
                 sequential=True,
                 prepare=self._prepare_exit,
                 args_validator=cast(ArgsValidatorFunc[object, ...], self._validate_exit),
+                metadata={"workbench_plan": "planning_only"},
             ),
         ]
 
@@ -222,7 +225,7 @@ class WorkbenchControlLayer(PydanticAILayer[WorkbenchControlDeps, object, LayerC
     ) -> dict[str, Any]:
         """Mark a verified goal complete, or explain a concrete blocker requiring user action.
 
-        Finish the task list before completing the goal. Never mark complete
+        If using an execution list, finish its remaining work before completing the goal. Never mark complete
         merely because this model turn ends or resources are nearly exhausted.
         Audit every requirement in the objective against observed evidence,
         including verification and delivery. Partial results or a proposed plan
@@ -253,19 +256,71 @@ class WorkbenchControlLayer(PydanticAILayer[WorkbenchControlDeps, object, LayerC
     async def todo_write(self, ctx: RunContext[object], todos: list[TodoItem]) -> dict[str, Any]:
         """Replace the complete task list; keep at most one step in progress.
 
-        Use this for multi-step work. Send the ENTIRE list on every call.
-        Before starting a step, mark it in_progress. As soon as its result is
-        verified, mark it completed and the next step in_progress BEFORE doing
-        that next step. Do not leave the first step active throughout the work,
-        and do not batch all completions at the end. Keep exactly one active
-        step while progressing; pause or revise honestly when work is blocked.
-        Preserve useful completed steps while revising the remaining plan.
+        Optional for complex execution or when the user asks for a checklist.
+        Skip simple tasks. This tool is unavailable in plan mode; submit the
+        complete proposal with exit_plan_mode instead. Send the ENTIRE list when
+        a milestone, next action or blocker changes. Do not repeat an unchanged
+        list or update after a fixed number of tool calls. Mark only verified
+        results completed and preserve useful completed steps when revising.
         """
         try:
             values = TodoWrite(todos=todos)
         except ValueError as error:
             raise ModelRetry(str(error)) from error
         return await self.request("todo_write", values.model_dump(mode="json"), request_key=call_key(ctx))
+
+    async def plan_inspect(
+        self,
+        ctx: RunContext[object],
+        script: str,
+        timeout: int = 30,
+        preview_paths: list[str] | None = None,
+    ) -> ToolReturn:
+        """Investigate files with a shell command in plan mode's read-only environment.
+
+        Workspace, personal resources and global skills are read-only; network
+        access and credentials are unavailable. The current directory is the
+        conversation directory. Write parsing scripts, caches and rendered
+        previews under /tmp, which persists between this conversation's
+        inspections. Each command finishes or is stopped within timeout (1-60
+        seconds); no background job survives. Request up to four PNG/JPEG paths
+        under /tmp to inspect their images. Submit the actual plan through
+        exit_plan_mode; files created here are temporary investigation material.
+        """
+        if not self.runtime_state.state.plan.active:
+            raise ModelRetry("plan_inspect 仅用于计划阶段；实施阶段请使用普通工具")
+        if self.http_client is None or not self.run_id:
+            raise RuntimeError("Workbench inspection is not bound to this execution")
+        context = self.deps.execution_context.config
+        response = await self.http_client.post(
+            self.inner_api_url.rstrip("/") + "/inner/api/agent/workbench/plan/inspect",
+            headers={"X-Inner-Api-Key": self.inner_api_key},
+            timeout=100,
+            json={
+                "tenant_id": context.tenant_id,
+                "account_id": context.user_id,
+                "app_id": context.app_id,
+                "workbench_run_id": context.workbench_run_id,
+                "backend_run_id": self.run_id,
+                "request_key": call_key(ctx),
+                "script": script,
+                "timeout": timeout,
+                "preview_paths": preview_paths or [],
+            },
+        )
+        if response.status_code in {400, 403, 409, 422}:
+            raise ModelRetry(str(response.json().get("message", "计划调查请求无效或执行状态已改变")))
+        response.raise_for_status()
+        result = response.json()
+        images = result.pop("previews", [])
+        return ToolReturn(
+            return_value=result,
+            content=[
+                BinaryContent(data=base64.b64decode(item["data"], validate=True), media_type=item["media_type"])
+                for item in images
+            ]
+            or None,
+        )
 
     def _prepare_exit(self, _ctx: RunContext[object], definition: ToolDefinition):
         return ToolDefinition(
@@ -274,6 +329,7 @@ class WorkbenchControlLayer(PydanticAILayer[WorkbenchControlDeps, object, LayerC
             parameters_json_schema=definition.parameters_json_schema,
             sequential=True,
             kind="external",
+            metadata=definition.metadata,
         )
 
     def _validate_exit(self, _ctx: RunContext[object], *, plan: str) -> None:
@@ -307,21 +363,22 @@ class WorkbenchControlLayer(PydanticAILayer[WorkbenchControlDeps, object, LayerC
             tool_call_id=call.tool_call_id,
             tool_name="exit_plan_mode",
             args={
-                "title": "计划已准备好",
+                "title": f"计划方案 · 第 {self.runtime_state.state.plan.version} 版",
                 "question": "是否按此计划开始执行？",
                 "markdown": plan,
                 "fields": [{"name": "feedback", "label": "修改意见", "type": "paragraph", "required": False}],
                 "actions": [{"id": "approve", "label": "开始执行"}, {"id": "keep_planning", "label": "继续规划"}],
             },
+            metadata={"plan_version": self.runtime_state.state.plan.version},
         )
 
     def guidance(self) -> str:
         state = self.runtime_state.state
         sections = [
-            "For complex work use todo_write to maintain a concrete task list. Before starting a step mark it "
-            "in_progress. As soon as a step is verified, call todo_write to mark it completed and the next step "
-            "in_progress BEFORE performing the next step. Do not batch completions at the end. Keep status "
-            "factual: do not mark a task completed merely to advance the progress display.",
+            "TODO is an optional execution progress list, separate from a planning proposal or durable goal. "
+            "Use todo_write only for complex execution or an explicit user request; skip simple tasks. "
+            "Update when actual progress, a blocker or the next action changes, never after a fixed number of calls. "
+            "Do not resubmit an unchanged list or mark unverified work completed. TODO is unavailable in plan mode.",
         ]
         memory = self.resources.get("memory", {}).get("content", "")
         if memory:
@@ -379,21 +436,32 @@ class WorkbenchControlLayer(PydanticAILayer[WorkbenchControlDeps, object, LayerC
                 "options, including material tradeoffs and compatibility. Distinguish facts from assumptions. "
                 "Clarify requirements and success criteria with concise questions only when the answer changes the "
                 "solution; keep investigating independent questions while waiting. Discuss unresolved choices and "
-                "incorporate the user's answers and corrections. Use todo_write to track planning progress. "
-                "Do not implement changes, modify user files or run side-effecting business tools. "
+                "incorporate the user's answers and corrections. Use brief activity reports for investigation progress. "
+                "Do not use todo_write: an execution checklist is not the reviewable plan. "
+                "Use plan_inspect to read files, run analysis and render temporary previews under /tmp. "
+                "That environment has read-only workspace/resources and no network or credentials. "
+                "Do not create deliverables, modify user files, update memory or invoke external operation tools. "
                 "Once ready, submit the COMPLETE Markdown plan through exit_plan_mode: confirmed requirements, "
                 "relevant findings, chosen approach, concrete steps, verification and any unresolved dependencies. "
                 "If the user requests changes, investigate as needed and submit a revised complete plan for review. "
                 "Wait for explicit approval of that plan before implementation; a missing answer is not approval. "
-                "After approval, execute the approved steps, update the task list at each boundary and verify the result."
+                "A clarification answer, cancellation, skip or timeout is never plan approval. "
+                "After approval, execute the approved plan and verify the result; use an execution list only if useful."
+            )
+        elif state.plan.approved:
+            sections.append(
+                f"Approved plan, version {state.plan.approved_version} (user-reviewed task context; "
+                "current user instructions still apply):\n" + state.plan.approved
             )
         if state.goal:
             goal = state.goal
             sections.append(
                 f"User goal ({goal.phase}): {goal.objective}\nGoal id: {goal.id}; revision: {goal.revision}; "
                 f"round {goal.rounds_started}; round limit: {goal.max_rounds or 'none'}. "
-                "Preserve this entire objective across follow-ups and summaries. Break complex goals into a task list "
-                "covering EVERY requirement, execute meaningful authorized work and verify each result. "
+                "Preserve this entire objective across follow-ups and summaries. Cover EVERY requirement, "
+                "execute meaningful authorized work and verify each result. An execution list is optional; "
+                "goal continuation and completion do not require creating one. If planning is active, investigate "
+                "and obtain approval before implementation; the goal does not override that boundary. "
                 "User follow-ups steer the current goal unless they explicitly replace or cancel it. Before completing, "
                 "audit the original requirements, remaining tasks and delivery against actual evidence. Continue if any "
                 "required work is outstanding; partial progress, a plan, elapsed time or turn limits are not completion. "
@@ -403,7 +471,7 @@ class WorkbenchControlLayer(PydanticAILayer[WorkbenchControlDeps, object, LayerC
                 "it remains active, even after this response or a client disconnect. "
                 "If the goal is paused, finish the current safe stopping point and await the user."
             )
-        if state.todos:
+        if state.todos and not state.plan.active:
             sections.append(
                 "Current task list (keep this synchronized with the work at each step boundary):\n"
                 + "\n".join(f"- [{item.status}] {item.content}" for item in state.todos)

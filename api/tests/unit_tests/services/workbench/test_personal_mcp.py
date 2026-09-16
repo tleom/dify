@@ -14,7 +14,7 @@ from models.agent import AgentConfigVersionKind, AgentWorkspaceBinding
 from models.enums import ConversationFromSource
 from models.model import AppMode, Conversation
 from models.workbench import WorkbenchChat, WorkbenchRun
-from services.workbench import mentions, personal_mcp, resources, runtime
+from services.workbench import control, mentions, personal_mcp, resources, runtime
 from services.workbench.mentions import resolve_mentions
 from tests.unit_tests.services.workbench.test_followups import Queue, queue_fixture
 
@@ -150,7 +150,7 @@ def test_disabled_or_changed_tools_cannot_run_with_stale_schema(
     transport.assert_not_called()
 
 
-@pytest.mark.parametrize("change", ["cancelled", "execution_replaced"])
+@pytest.mark.parametrize("change", ["cancelled", "execution_replaced", "planning"])
 def test_fence_is_rechecked_after_catalog_io(
     queue: Queue, execution: Execution, monkeypatch: pytest.MonkeyPatch, change: str
 ) -> None:
@@ -162,6 +162,12 @@ def test_fence_is_rechecked_after_catalog_io(
             assert run is not None
             if change == "cancelled":
                 run.status = "cancelled"
+            elif change == "planning":
+                chat = session.get(WorkbenchChat, queue.chat_id)
+                assert chat is not None
+                state = control.load(session, chat)
+                state.plan.active = True
+                control.save(session, chat, state)
             else:
                 run.backend_run_id = str(uuid4())
         return current
@@ -174,7 +180,7 @@ def test_fence_is_rechecked_after_catalog_io(
 
 @pytest.mark.parametrize(
     "change",
-    ["cancelled", "execution_replaced", "workspace_id", "binding_id", "version"],
+    ["cancelled", "execution_replaced", "workspace_id", "binding_id", "version", "planning"],
 )
 def test_manager_authorization_rechecks_execution_and_owned_binding(
     queue: Queue, execution: Execution, change: str
@@ -189,6 +195,12 @@ def test_manager_authorization_rechecks_execution_and_owned_binding(
             run.status = "cancelled"
         elif change == "execution_replaced":
             run.backend_run_id = str(uuid4())
+        elif change == "planning":
+            chat = session.get(WorkbenchChat, queue.chat_id)
+            assert chat is not None
+            state = control.load(session, chat)
+            state.plan.active = True
+            control.save(session, chat, state)
         else:
             value[change] = str(uuid4())
     with pytest.raises(Forbidden):

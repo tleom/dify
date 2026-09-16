@@ -111,10 +111,17 @@ def advance(tenant_id, account_id, chat_id):
         from services.workbench.message_actions import message_ids
 
         payload["parent_message_id"] = (message_ids(parent) or [None])[-1] if parent else None
+        queued_control = payload.pop("queued_control", None)
         run.payload, run.status = json.dumps(payload), "queued"
         from services.workbench.control import admit_run
 
-        admit_run(session, chat, run, None)
+        try:
+            admit_run(session, chat, run, queued_control)
+        except Conflict as error:
+            if not queued_control or queued_control.get("kind") != "goal_input":
+                raise
+            run.status, run.error = "cancelled", error.description
+            return None
         chat.updated_at = naive_utc_now()
         run_id = run.id
     from services.workbench.scheduler import publish
@@ -308,6 +315,9 @@ def remove(tenant_id, account_id, run_id):
             raise Conflict("这条消息已开始执行或已调整方向，请刷新队列")
         _unlink(session, chat, run)
         run.status = "discarded"
+        from services.workbench.control import detach_goal_input
+
+        detach_goal_input(session, chat, run)
         dto = run_dto(run)
     advance(tenant_id, account_id, chat.id)
     return dto
@@ -374,6 +384,9 @@ def _steer_locked(session, chat, message, target):
     _unlink(session, chat, message)
     incoming["steer_target_run_id"] = target.id
     message.payload, message.status = json.dumps(incoming), "steered"
+    from services.workbench.control import detach_goal_input
+
+    detach_goal_input(session, chat, message, target)
 
 
 class AgentFollowupsPayload(BaseModel):

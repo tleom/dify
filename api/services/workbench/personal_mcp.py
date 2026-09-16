@@ -47,12 +47,15 @@ class MCPAuthorizationPayload(AgentMCPPayload):
 
 def execution_context(payload: AgentMCPPayload, workspace_id: str):
     """Read the current execution and its server-owned binding in one short transaction."""
+    from services.workbench import control
     from services.workbench.recovery import locked_run
 
     with session_factory.get_session_maker().begin() as session:
         chat, run = locked_run(session, payload.tenant_id, payload.account_id, payload.workbench_run_id)
         if chat.app_id != payload.app_id or run.status != "running" or run.backend_run_id != payload.backend_run_id:
             raise Forbidden()
+        if control.load(session, chat).plan.active:
+            raise Forbidden("计划阶段不能执行个人 MCP 工具，请先提交完整计划并取得批准")
         conversation = session.get(Conversation, chat.conversation_id) if chat.conversation_id else None
         if (
             conversation is None

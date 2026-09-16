@@ -50,6 +50,9 @@ def manager(tmp_path, monkeypatch):
             self.closed.set()
 
     def docker(*args, stdin=None, **kwargs):
+        if args[0] == "ps":
+            # This fixture has MCP workers but no planning containers.
+            return SimpleNamespace(returncode=0, stdout="")
         if args[0] == "inspect":
             return SimpleNamespace(
                 returncode=0, stdout=json.dumps([{"State": {"Running": True}}])

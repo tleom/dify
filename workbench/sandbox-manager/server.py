@@ -117,15 +117,21 @@ def runtime_epoch():
 
 
 def stop_binding(key, binding):
+    from planning import InspectionAdmission, stop_inspections
+
     binding = str(uuid.UUID(binding))
+    inspection_count = stop_inspections(key, binding, docker=docker, prefix=PREFIX,
+                                        admission=InspectionAdmission(STATE, lock))
     name, _ = identity(key)
     info = docker("inspect", name, check=False)
     if info.returncode or not json.loads(info.stdout)[0]["State"]["Running"]:
-        return {"stopped": 0}
+        return {"stopped": inspection_count}
     script = Path(__file__).with_name("stop_jobs.py").read_text()
     result = docker("exec", "--user", "1000", "-i", name, *MANAGER_PYTHON, "-c", script,
                     stdin=json.dumps({"binding_id": binding}))
-    return json.loads(result.stdout)
+    output = json.loads(result.stdout)
+    output["stopped"] = output.get("stopped", 0) + inspection_count
+    return output
 
 
 def authorize_mcp(payload):
@@ -165,6 +171,16 @@ def operation(key, action, payload):
     if action == "touch":
         touch(key)
         return {"ok": True}
+    if action in ("plan-admission", "plan-inspect"):
+        from planning import InspectionAdmission, inspect_plan
+
+        admission = InspectionAdmission(STATE, lock)
+        if action == "plan-admission":
+            return {"ticket": admission.ticket(key, payload["binding_id"])}
+        return inspect_plan(
+            key, payload, docker=docker, ensure=ensure, identity=identity,
+            image=IMAGE, prefix=PREFIX, manager_python=MANAGER_PYTHON, admission=admission,
+        )
     if action == "personal-mcp":
         from mcp_runtime import invalidate, invoke, module_source
 
@@ -288,12 +304,16 @@ def operation(key, action, payload):
         save_operation(record, value)
         return value
     if action == "clean-binding":
+        from planning import scratch_name
+
         binding = str(uuid.UUID(payload["binding_id"]))
         with lock(key):
+            stop_binding(key, binding)
             ensure(key)
             docker("exec", "--user", "1000", name, *MANAGER_PYTHON, "-c",
                    "import shutil; shutil.rmtree('/home/dify/" + binding + "',ignore_errors=True); "
                    "shutil.rmtree('/workspace/conversations/" + binding + "',ignore_errors=True)")
+            docker("volume", "rm", scratch_name(name, binding), check=False)
             return {"ok": True}
     raise ValueError("Unsupported operation")
 

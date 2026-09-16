@@ -677,6 +677,9 @@ def enqueue(
             event_log="[]",
         )
         session.add(run)
+        if defer and control is not None:
+            payload["queued_control"] = control
+            run.payload = json.dumps(payload)
         if not defer:
             from services.workbench.control import admit_run
 
@@ -913,7 +916,9 @@ def resume(tenant_id, account_id, run_id, values, action, request_id=None):
         if pending.get("tool_name") == "exit_plan_mode":
             from services.workbench.control import review_answer
 
-            review_answer(session, chat, run, action)
+            if action == "approve" and any(value.strip() for value in values.values()):
+                raise Conflict("请先提交修改意见，待方案更新后再批准执行")
+            review_answer(session, chat, run, action, pending)
         payload["continuation"] = {"calls": {pending["tool_call_id"]: result.model_dump(mode="json")}}
         remember(run, payload, pending, result.model_dump(mode="json"))
         payload["submitted_input"] = {"values": values, "action": action, "request_id": request_id}
