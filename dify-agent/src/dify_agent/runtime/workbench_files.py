@@ -10,6 +10,8 @@ from pydantic_ai import ModelRetry
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelResponse
 
+from dify_agent.runtime.workbench_completion import CLARIFICATION_RETRY, unfinished_clarification
+
 from dify_agent.layers.shell.layer import DifyShellLayer
 from dify_agent.layers.workbench_files import WorkbenchFilesLayer
 from dify_agent.protocol.schemas import WorkbenchToolData
@@ -152,6 +154,8 @@ class WorkbenchFileDeliveryCapability(AbstractCapability[None]):
             await self.changes.collect()
         text = response.text or ""
         if text:
+            if not response.tool_calls and unfinished_clarification(text):
+                raise ModelRetry(CLARIFICATION_RETRY)
             error = self.files.delivery_error(text, final=not response.tool_calls)
             if error:
                 raise ModelRetry(error)
