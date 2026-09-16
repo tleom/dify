@@ -4,11 +4,15 @@ import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import sqlite3
 from pathlib import Path
 import subprocess
 import threading
 import time
 import uuid
+from urllib.request import ProxyHandler, Request, build_opener
+
+from mcp_journal import Journal
 
 TOKEN = os.environ["WORKBENCH_SANDBOX_MANAGER_TOKEN"]
 IMAGE = os.environ.get("WORKBENCH_SANDBOX_IMAGE", "langgenius/dify-agent-local-sandbox:1.17.1")
@@ -19,6 +23,8 @@ STATE.mkdir(parents=True, exist_ok=True)
 LOCKS = {}
 LOCKS_GUARD = threading.Lock()
 MAX_BODY = 30 * 1024 * 1024
+MCP_JOURNAL = Journal(STATE)
+MCP_API_URL = os.environ.get("WORKBENCH_MCP_API_URL", "http://wb-api:5001").rstrip("/")
 # Manager-owned scripts never inherit a user's interpreter, import path or
 # site initialization. User tasks keep their personal-environment-first PATH.
 MANAGER_PYTHON = ("/usr/local/bin/python", "-I", "-S")
@@ -128,19 +134,36 @@ def stop_binding(key, binding):
     return output
 
 
+def authorize_mcp(payload):
+    """Only the configured API can confirm a currently owned execution."""
+    request = Request(MCP_API_URL + "/inner/api/agent/workbench/mcp/authorize",
+                      data=json.dumps(payload).encode(), method="POST",
+                      headers={"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"})
+    try:
+        with build_opener(ProxyHandler({})).open(request, timeout=5) as response:
+            return json.loads(response.read(1024)).get("authorized") is True
+    except Exception:
+        return False
+
+
 def operation(key, action, payload):
     name, _ = identity(key)
     if action == "runtime-epoch":
         return runtime_epoch()
     if action in ("stop-binding", "fence-binding"):
+        # MCP cancellation never waits for a workspace operation or tool call.
+        # The epoch check still owns permission to fence an apparently live run.
+        if action == "fence-binding":
+            previous = payload.get("epoch", "")
+            if len(previous) != 64 or any(ch not in "0123456789abcdef" for ch in previous):
+                raise ValueError("Invalid runtime epoch")
+            current = runtime_epoch()
+            if current["running"] and current["epoch"] == previous:
+                return {"fenced": False}
+        from mcp_runtime import invalidate
+
+        invalidate(key, binding=str(uuid.UUID(payload["binding_id"])))
         with lock(key):
-            if action == "fence-binding":
-                previous = payload.get("epoch", "")
-                if len(previous) != 64 or any(ch not in "0123456789abcdef" for ch in previous):
-                    raise ValueError("Invalid runtime epoch")
-                current = runtime_epoch()
-                if current["running"] and current["epoch"] == previous:
-                    return {"fenced": False}
             result = stop_binding(key, payload["binding_id"])
             return {**result, "fenced": True}
     if action == "ensure":
@@ -158,6 +181,32 @@ def operation(key, action, payload):
             key, payload, docker=docker, ensure=ensure, identity=identity,
             image=IMAGE, prefix=PREFIX, manager_python=MANAGER_PYTHON, admission=admission,
         )
+    if action == "personal-mcp":
+        from mcp_runtime import invalidate, invoke, module_source
+
+        allowed = {"mcp_list", "mcp_read", "mcp_save", "mcp_delete", "mcp_toggle", "mcp_pin", "mcp_test", "mcp_call"}
+        if payload.get("operation") not in allowed:
+            raise ValueError("Unsupported MCP operation")
+        with lock(key):
+            ensure(key)
+            request = payload
+            if payload["operation"] in {"mcp_test", "mcp_call"}:
+                request = {"operation": "mcp_probe", "name": payload.get("name")}
+            source = module_source("file_ops", "resource_ops", "mcp_ops")
+            source += "import json; print(json.dumps(sys.modules['mcp_ops'].personal_mcp(json.load(sys.stdin))))"
+            result = docker("exec", "--user", "1000", "-i", name, *MANAGER_PYTHON, "-c", source,
+                            stdin=json.dumps(request), check=False)
+            if result.returncode:
+                # Parse errors and tracebacks may include user-supplied secrets.
+                raise ValueError("MCP 配置操作失败，请检查 JSON、路径和版本")
+            output = json.loads(result.stdout)
+            touch(key)
+        if payload["operation"] in {"mcp_save", "mcp_delete", "mcp_toggle"} and not output.get("conflict"):
+            invalidate(key, payload["name"])
+        if payload["operation"] in {"mcp_test", "mcp_call"}:
+            output = invoke(key, name, payload, output, authorize=authorize_mcp, journal=MCP_JOURNAL)
+        touch(key)
+        return output
     if action == "office-preview":
         # No owner volumes, credentials, network or writable image are exposed.
         preview_name = PREFIX + "-preview-" + uuid.uuid4().hex
@@ -305,11 +354,18 @@ class Handler(BaseHTTPRequestHandler):
 def reap():
     while True:
         time.sleep(30)
+        try:
+            MCP_JOURNAL.prune()
+        except (ValueError, OSError, sqlite3.Error):
+            pass
         for item in STATE.iterdir():
             try:
                 key = str(uuid.UUID(item.name))
                 with lock(key):
                     if time.time() - item.stat().st_mtime > 1800:
+                        from mcp_runtime import invalidate
+
+                        invalidate(key)
                         name, _ = identity(key)
                         docker("stop", "--time", "10", name, check=False)
             except (ValueError, OSError):

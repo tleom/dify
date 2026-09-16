@@ -17,6 +17,24 @@ dependencies through the shared-environment owner. Environment declarations keep
 normal variables and account-host secret references, excluding the publisher's
 inline secret values.
 
+Workbench runs also include `dify.workbench_mcp`, dependent on
+`dify.execution_context`. The API freezes the owner's enabled, verified personal
+MCP tool declarations when queuing a task; blank continuation preserves that
+snapshot. The layer obtains JSON schemas and sends calls through the authenticated
+inner API using the current backend execution ID. The API rechecks the complete
+owner chain, execution fence, enable state, configuration and manifest versions
+before routing to that owner's sandbox. Personal declarations remain separate
+from the published Agent's global plugin selection.
+
+The sandbox worker supports stdio, Streamable HTTP and legacy SSE, preserves
+`isError` and `structuredContent`, and never automatically replays failed business
+calls. The manager journals execution-scoped request IDs before dispatch. Unknown
+outcomes require checking external state. Tool errors carry `is_error` metadata
+through the existing workbench activity and output limits. Connection settings
+and credentials remain in the owner's `mcp/<id>/mcp.json`; they are omitted from
+tool schemas and catalog metadata. Same-owner file and Shell access can read the
+configuration. MCP protocol dependencies live in the immutable sandbox image.
+
 Workbench knowledge selection requires an access attempt before a final answer,
 while preparation tools and deferred human/environment requests remain available.
 Answer text is withheld until the required knowledge attempts have been made,

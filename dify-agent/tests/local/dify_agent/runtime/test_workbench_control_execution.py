@@ -477,6 +477,81 @@ def test_external_environment_tool_obeys_plan_boundary(monkeypatch, planning):
     assert calls == (2 if planning else 1)
 
 
+@pytest.mark.parametrize("planning", [False, True])
+def test_personal_mcp_tools_obey_plan_boundary_in_real_runner(monkeypatch, planning):
+    state = WorkbenchControlState()
+    state.plan.active = planning
+    invoked = []
+    calls = 0
+    tool = {
+        "id": "personal:mcp:demo:write",
+        "runtime_name": "personal_mcp_demo_write",
+        "provider_name": "个人 MCP",
+        "tool_name": "write",
+        "description": "写入业务记录",
+        "input_schema": {"type": "object", "properties": {}},
+    }
+
+    async def stream(messages, info):
+        nonlocal calls
+        calls += 1
+        assert (tool["runtime_name"] in {item.name for item in info.function_tools}) is (not planning)
+        if calls == 1:
+            yield {0: _call(tool["runtime_name"], {}, "mcp-write")}
+        elif planning:
+            assert any(
+                isinstance(part, RetryPromptPart) and part.tool_name == tool["runtime_name"]
+                for message in messages
+                for part in message.parts
+            )
+            yield {0: _call("exit_plan_mode", {"plan": "# 写入方案\n批准后调用个人 MCP 并核对记录。"}, "review")}
+        else:
+            yield "业务记录已写入。"
+
+    request, sink, _ = _setup(monkeypatch, stream)
+    add_control(request)
+    request.composition.layers.append(
+        RunLayerSpec(
+            name="workbench_mcp",
+            type="dify.workbench_mcp",
+            deps={"execution_context": "execution_context"},
+            config={},
+        )
+    )
+
+    def transport(request):
+        value = json.loads(request.content)
+        if request.url.path.endswith("/resources"):
+            return httpx.Response(200, json={"memory": {}, "skills": [], "global_resources": {}})
+        if request.url.path.endswith("/mcp"):
+            if value["operation"] == "list":
+                return httpx.Response(200, json={"tools": [tool]})
+            invoked.append(value)
+            return httpx.Response(200, json={"result": {"content": [], "isError": False}})
+        if value["action"] == "review_plan":
+            state.plan.submit(value["data"]["plan"], "turn-1")
+        return httpx.Response(200, json={"state": state.model_dump(mode="json"), "control": None})
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            await AgentRunRunner(
+                run_id="personal-mcp-plan",
+                request=request,
+                sink=sink,
+                plugin_daemon_http_client=client,
+                dify_api_http_client=client,
+            ).run()
+
+    asyncio.run(scenario())
+    terminal = sink.events["personal-mcp-plan"][-1]
+    assert isinstance(terminal, RunSucceededEvent), terminal
+    assert calls == 2 and len(invoked) == (0 if planning else 1)
+    if planning:
+        assert terminal.data.deferred_tool_call.tool_name == "exit_plan_mode"
+    else:
+        assert terminal.data.output == "业务记录已写入。"
+
+
 def test_structured_output_cannot_complete_an_unreviewed_plan(monkeypatch):
     from pydantic_ai.exceptions import UnexpectedModelBehavior
     from dify_agent.layers.dify_plugin.llm_layer import DifyPluginLLMLayer

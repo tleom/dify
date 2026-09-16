@@ -37,6 +37,14 @@ RUN /usr/local/bin/python -m venv /opt/office/python \
     && /opt/office/python/bin/python -m pip check \
     && /opt/office/python/bin/python -m pip freeze --all > /opt/office/requirements.lock.txt
 
+# The personal MCP broker has an immutable interpreter separate from user packages.
+COPY mcp-requirements.lock.txt /opt/workbench-mcp-requirements.lock.txt
+RUN /usr/local/bin/python -m venv /opt/workbench-mcp \
+    && /opt/workbench-mcp/bin/python -m pip install --no-cache-dir -r /opt/workbench-mcp-requirements.lock.txt \
+    && /opt/workbench-mcp/bin/python -m pip check \
+    && chown 0:0 /opt && chmod 755 /opt \
+    && chown -R 0:0 /opt/workbench-mcp && chmod -R go-w /opt/workbench-mcp
+
 COPY package.json package-lock.json /opt/office/node/
 RUN npm ci --prefix /opt/office/node --no-fund --no-audit \
     && npm ls --prefix /opt/office/node --all \

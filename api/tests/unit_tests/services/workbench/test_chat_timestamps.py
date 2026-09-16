@@ -273,7 +273,7 @@ def test_history_limit_selects_recent_chats_before_favorites(
 def test_new_message_refreshes_history_time_but_idempotent_retry_does_not(
     history: tuple[sessionmaker[Session], str, str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from services.workbench import branches, mentions, scheduler
+    from services.workbench import branches, mentions, personal_mcp, scheduler
 
     factory, tenant, account, chat_id = history
     with factory() as session:
@@ -287,6 +287,7 @@ def test_new_message_refreshes_history_time_but_idempotent_retry_does_not(
         }
     monkeypatch.setattr(service, "template", Mock(return_value=base))
     monkeypatch.setattr(service, "compile_config", Mock(return_value={}))
+    monkeypatch.setattr(personal_mcp, "catalog", Mock(return_value=[]))
     monkeypatch.setattr(mentions, "default_capabilities", lambda _soul, selection: selection)
     monkeypatch.setattr(
         mentions,

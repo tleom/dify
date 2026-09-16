@@ -218,6 +218,7 @@ def issue(
 
     refs = ResourceMentions.model_validate(resource_mentions or {}).model_dump()
     if any(refs.values()):
+        from services.workbench.personal_mcp import catalog as personal_mcp_catalog
         from services.workbench.resources import personal_skill_catalog
         from services.workbench.service import template
 
@@ -226,7 +227,14 @@ def issue(
             if any(name.startswith("personal:") for name in refs["skills"])
             else []
         )
-        resolve_mentions(template(tenant_id, account_id)["soul"], refs, personal_skills=personal)
+        personal_mcp = (
+            personal_mcp_catalog(tenant_id, account_id)
+            if any(name.startswith("personal:mcp:") for name in refs["tools"])
+            else []
+        )
+        resolve_mentions(
+            template(tenant_id, account_id)["soul"], refs, personal_skills=personal, personal_mcp=personal_mcp
+        )
     fingerprint = json.dumps({"command": command, "files": files, "resource_mentions": refs}, sort_keys=True)
     result: dict[str, Any]
     with session_factory.get_session_maker().begin() as session:

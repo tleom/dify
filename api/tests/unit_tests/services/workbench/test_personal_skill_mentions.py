@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from services.workbench import mentions, resources, runtime, service
+from services.workbench import mentions, personal_mcp, resources, runtime, service
 
 
 def test_personal_catalog_uses_owner_and_excludes_disabled_or_invalid_skills(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -43,6 +43,7 @@ def test_catalog_places_personal_skills_after_global_without_default_config_chan
     )
     personal = Mock(return_value=[{"id": "personal:write", "name": "write", "scope": "personal"}])
     monkeypatch.setattr(resources, "personal_skill_catalog", personal)
+    monkeypatch.setattr(personal_mcp, "catalog", Mock(return_value=[]))
     result = service.catalog("tenant", "owner")
     assert [item["id"] for item in result["skills"]] == ["write", "personal:write"]
     assert result["skills"][0]["scope"] == "global"

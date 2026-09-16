@@ -32,14 +32,27 @@ def default_capabilities(soul, selection, *, new_chat=False):
     )
 
 
-def resolve_mentions(soul, value, *, provider_names=None, skill_names=None, personal_skills=None) -> ResolvedMentions:
+def resolve_mentions(
+    soul, value, *, provider_names=None, skill_names=None, personal_skills=None, personal_mcp=None
+) -> ResolvedMentions:
     refs = ResourceMentions.model_validate(value or {}).model_dump()
     resources = template_resources(soul)
     personal = {item["id"]: item for item in personal_skills or []}
+    mcp = {item["id"]: item for item in personal_mcp or []}
     badges, tokens, seen = [], [], set()
     for kind in ("skills", "tools", "knowledge"):
         refs[kind] = list(dict.fromkeys(refs[kind]))
         for key in refs[kind]:
+            if kind == "tools" and key.startswith("personal:mcp:"):
+                item = mcp.get(key)
+                if item is None:
+                    raise ValueError("点名的个人 MCP 已不可用，请重新选择")
+                badge_id = "plugin:mcp:" + item["plugin_id"]
+                if (kind, badge_id) not in seen:
+                    badges.append({"kind": kind, "id": badge_id, "name": item["provider_name"]})
+                    seen.add((kind, badge_id))
+                tokens.append({"kind": kind, "scope": "personal", "resource": item["runtime_name"]})
+                continue
             if kind == "skills" and key.startswith("personal:"):
                 item = personal.get(key)
                 if item is None:
