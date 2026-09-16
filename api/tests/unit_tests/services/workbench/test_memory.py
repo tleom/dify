@@ -1,39 +1,54 @@
 """Owned execution, concurrent editor writes and lost responses for personal memory."""
 
+from collections.abc import Generator
 from contextlib import contextmanager
 from hashlib import sha256
+from typing import TypedDict
 from uuid import uuid4
 
 import pytest
 from werkzeug.exceptions import BadRequest, Conflict, Forbidden, NotFound
 
 from services.workbench import resources
-from tests.unit_tests.services.workbench.test_followups import queue_fixture
+from tests.unit_tests.services.workbench.test_followups import Queue, queue_fixture
 
 queue = pytest.fixture(queue_fixture)
 
 
+class MemoryStore(TypedDict):
+    content: str
+    version: str | None
+    writes: list[dict[str, str | None]]
+    warnings: list[str]
+    locked: bool
+
+
+MemoryFixture = tuple[resources.AgentMemoryPayload, MemoryStore]
+
+
 @pytest.fixture
-def memory(queue, monkeypatch):
+def memory(queue: Queue, monkeypatch: pytest.MonkeyPatch) -> MemoryFixture:
     run = queue.send("整理用户偏好")
     queue.running(run["id"])
+    backend_run_id = queue.get(run["id"]).backend_run_id
+    assert backend_run_id is not None
     payload = resources.AgentMemoryPayload(
         tenant_id=queue.owner[0],
         account_id=queue.owner[1],
         app_id=queue.app_id,
         workbench_run_id=run["id"],
-        backend_run_id=queue.get(run["id"]).backend_run_id,
+        backend_run_id=backend_run_id,
         content="用中文回答",
         version=None,
     )
-    store = {"content": "", "version": None, "writes": [], "warnings": [], "locked": False}
+    store: MemoryStore = {"content": "", "version": None, "writes": [], "warnings": [], "locked": False}
 
-    def workspace(tenant, account):
+    def workspace(tenant: str, account: str) -> str:
         assert (tenant, account) == queue.owner
         return "owned-workspace"
 
     @contextmanager
-    def lock(name, **_kwargs):
+    def lock(name: str, **_kwargs: object) -> Generator[None]:
         assert name == "workbench:resources:owned-workspace"
         store["locked"] = True
         try:
@@ -41,7 +56,7 @@ def memory(queue, monkeypatch):
         finally:
             store["locked"] = False
 
-    def manager(identifier, operation, data):
+    def manager(identifier: str, operation: str, data: dict[str, str | None]) -> dict[str, object]:
         assert identifier == "owned-workspace"
         assert operation == "personal-resources"
         if data["operation"] == "list":
@@ -53,8 +68,10 @@ def memory(queue, monkeypatch):
         assert store["locked"]
         if data["version"] != store["version"]:
             return {"conflict": True}
-        store["content"] = data["content"]
-        store["version"] = sha256(data["content"].encode()).hexdigest()
+        content = data["content"]
+        assert isinstance(content, str)
+        store["content"] = content
+        store["version"] = sha256(content.encode()).hexdigest()
         store["writes"].append(data.copy())
         return {k: store[k] for k in ("content", "version")}
 
@@ -64,7 +81,7 @@ def memory(queue, monkeypatch):
     return payload, store
 
 
-def test_memory_retry_is_noop_and_concurrent_editor_change_requires_merge(memory):
+def test_memory_retry_is_noop_and_concurrent_editor_change_requires_merge(memory: MemoryFixture) -> None:
     payload, store = memory
     first = resources.agent_memory_update(payload)
     assert resources.agent_memory_update(payload) == first
@@ -96,18 +113,20 @@ def test_memory_retry_is_noop_and_concurrent_editor_change_requires_merge(memory
 
 
 @pytest.mark.parametrize("field", ["tenant_id", "account_id", "app_id", "workbench_run_id", "backend_run_id"])
-def test_memory_rejects_other_owner_app_or_execution(memory, field):
+def test_memory_rejects_other_owner_app_or_execution(memory: MemoryFixture, field: str) -> None:
     payload, store = memory
     with pytest.raises((Forbidden, NotFound)):
         resources.agent_memory_update(payload.model_copy(update={field: str(uuid4())}))
     assert store["writes"] == []
 
 
-def test_memory_rechecks_execution_after_waiting_for_account_lock(memory, queue, monkeypatch):
+def test_memory_rechecks_execution_after_waiting_for_account_lock(
+    memory: MemoryFixture, queue: Queue, monkeypatch: pytest.MonkeyPatch
+) -> None:
     payload, store = memory
 
     @contextmanager
-    def lock(*_args, **_kwargs):
+    def lock(*_args: object, **_kwargs: object) -> Generator[None]:
         queue.finish(payload.workbench_run_id)
         yield
 
@@ -117,7 +136,7 @@ def test_memory_rechecks_execution_after_waiting_for_account_lock(memory, queue,
     assert store["writes"] == []
 
 
-def test_memory_rejects_unreadable_snapshot_and_utf8_byte_overflow(memory):
+def test_memory_rejects_unreadable_snapshot_and_utf8_byte_overflow(memory: MemoryFixture) -> None:
     payload, store = memory
     store["warnings"] = ["memory.md 不是有效 UTF-8，未载入模型"]
     with pytest.raises(Conflict, match="无法完整读取"):
