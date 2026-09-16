@@ -314,6 +314,7 @@ def issue(
             "command:" + sha256(request_key.encode()).hexdigest(),
             {**values, "activity_protocol": 1},
             control=private_control,
+            command=parsed.name,
         )
         with session_factory.get_session_maker().begin() as session:
             _chat(session, tenant_id, account_id, chat_id, lock=True)
@@ -353,13 +354,44 @@ def admit_run(session, chat, run, control):
         elif control["kind"] == "compact":
             if not state.compaction or state.compaction.id != control["id"] or state.compaction.phase != "queued":
                 raise Conflict("上下文压缩请求已改变")
-            payload["is_continuation"] = True
+            payload["is_continuation"] = False
         payload["control"] = control
     elif not payload.get("is_continuation") and not payload.get("continue_run_id"):
         state.todos, state.todos_run_id = [], run.id
     state.revision += 1
     save(session, chat, state)
     run.payload = json.dumps(payload)
+
+
+def with_commands(session, runs, values):
+    """Recover display tags for old command runs without rewriting stored history."""
+    pending = {
+        run.request_key: value
+        for run, value in zip(runs, values)
+        if not value.get("command") and run.request_key.startswith("command:")
+    }
+    if not pending or not runs:
+        return values
+    owner = runs[0]
+    records = session.scalars(
+        select(WorkbenchCommand).where(
+            WorkbenchCommand.chat_id == owner.chat_id,
+            WorkbenchCommand.tenant_id == owner.tenant_id,
+            WorkbenchCommand.account_id == owner.account_id,
+        )
+    )
+    for row in records:
+        key = "command:" + sha256(row.request_key.encode()).hexdigest()
+        value = pending.get(key)
+        if value is None:
+            continue
+        try:
+            recorded = json.loads(row.command)
+            command = parse_command(recorded["command"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        value["command"] = command.name
+    return values
 
 
 def drive_goal(tenant_id, account_id, chat_id):

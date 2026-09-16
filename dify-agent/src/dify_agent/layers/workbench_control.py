@@ -165,8 +165,12 @@ class WorkbenchControlLayer(PydanticAILayer[WorkbenchControlDeps, object, LayerC
     async def todo_write(self, ctx: RunContext[object], todos: list[TodoItem]) -> dict[str, Any]:
         """Replace the complete task list; keep at most one step in progress.
 
-        Use this for multi-step work. Write concrete steps, update their status
-        as work proceeds, and mark completed only after verifying the result.
+        Use this for multi-step work. Send the ENTIRE list on every call.
+        Before starting a step, mark it in_progress. As soon as its result is
+        verified, mark it completed and the next step in_progress BEFORE doing
+        that next step. Do not leave the first step active throughout the work,
+        and do not batch all completions at the end. Keep exactly one active
+        step while progressing; pause or revise honestly when work is blocked.
         Preserve useful completed steps while revising the remaining plan.
         """
         try:
@@ -226,7 +230,10 @@ class WorkbenchControlLayer(PydanticAILayer[WorkbenchControlDeps, object, LayerC
     def guidance(self) -> str:
         state = self.runtime_state.state
         sections = [
-            "For complex work use todo_write to maintain a concrete task list. Keep status factual and verify results.",
+            "For complex work use todo_write to maintain a concrete task list. Before starting a step mark it "
+            "in_progress. As soon as a step is verified, call todo_write to mark it completed and the next step "
+            "in_progress BEFORE performing the next step. Do not batch completions at the end. Keep status "
+            "factual: do not mark a task completed merely to advance the progress display.",
         ]
         memory = self.resources.get("memory", {}).get("content", "")
         if memory:
@@ -280,6 +287,7 @@ class WorkbenchControlLayer(PydanticAILayer[WorkbenchControlDeps, object, LayerC
             )
         if state.todos:
             sections.append(
-                "Current task list:\n" + "\n".join(f"- [{item.status}] {item.content}" for item in state.todos)
+                "Current task list (keep this synchronized with the work at each step boundary):\n"
+                + "\n".join(f"- [{item.status}] {item.content}" for item in state.todos)
             )
         return "\n\n".join(sections)

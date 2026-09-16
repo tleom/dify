@@ -184,6 +184,7 @@ class WorkbenchAttachmentResponse(ResponseModel):
 
 
 class WorkbenchRunResponse(ResponseModel):
+    command: Literal["plan", "goal", "compact"] | None = None
     events_cursor: str | None = None
     activity_protocol: int = 0
     followup_protocol: int = 0
@@ -697,13 +698,14 @@ class Download(WorkbenchResource):
 
 
 def owned_run(tenant_id, account_id, run_id):
+    from services.workbench.control import with_commands
     from services.workbench.message_actions import with_feedback
 
     with session_factory.create_session() as session:
         run = session.scalar(owned_statement(tenant_id, account_id, run_id))
         if run is None:
             raise NotFound()
-        return with_feedback(session, [run], [service.run_dto(run)])[0], run.task_id
+        return with_feedback(session, [run], with_commands(session, [run], [service.run_dto(run)]))[0], run.task_id
 
 
 @console_ns.route("/workbench/runs/<uuid:run_id>/feedbacks")

@@ -54,6 +54,9 @@ def test_compact_instruction_is_the_following_task_and_empty_compact_only_summar
     payload = json.loads(queue.get(result["run"]["id"]).payload)
     assert payload["query"] == "继续生成报告"
     assert payload["control"]["continue_after"] is True
+    assert result["run"]["command"] == "compact"
+    assert result["run"]["is_continuation"] is False
+    assert payload["is_continuation"] is False
     assert "focus" not in payload["control"]
     queue.finish(result["run"]["id"])
     result = control.issue(
@@ -62,6 +65,27 @@ def test_compact_instruction_is_the_following_task_and_empty_compact_only_summar
     payload = json.loads(queue.get(result["run"]["id"]).payload)
     assert payload["query"] == "压缩上下文"
     assert payload["control"]["continue_after"] is False
+    assert result["run"]["command"] == "compact"
+    assert result["run"]["is_continuation"] is False
+    old = queue.get(result["run"]["id"])
+    old.payload = json.dumps({**payload, "command": None, "is_continuation": True})
+    assert service.run_dto(old)["is_continuation"] is False
+    assert service.run_dto(old)["command"] == "compact"
+
+
+def test_plan_tag_is_persisted_and_legacy_tag_comes_from_its_own_command(queue: SimpleNamespace) -> None:
+    result = control.issue(queue.owner[0], queue.owner[1], queue.chat_id, command="/plan 设计处理方案", request_key="plan-tag")
+    run = queue.get(result["run"]["id"])
+    assert service.run_dto(run)["command"] == "plan"
+    payload = json.loads(run.payload)
+    assert payload["query"] == "设计处理方案"
+    payload.pop("command")
+    run.payload = json.dumps(payload)
+    with queue.factory() as session:
+        assert control.with_commands(session, [run], [service.run_dto(run)])[0]["command"] == "plan"
+    run.account_id = str(uuid4())
+    with queue.factory() as session:
+        assert control.with_commands(session, [run], [service.run_dto(run)])[0]["command"] is None
 
 
 def command(queue: SimpleNamespace, text: str, key: str | None = None) -> control.WorkbenchControlState:

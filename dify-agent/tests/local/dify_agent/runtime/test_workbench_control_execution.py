@@ -81,6 +81,11 @@ def test_reused_provider_ids_update_distinct_steps_and_retry_the_same_http_opera
         nonlocal calls
         calls += 1
         assert "memory-fixture" in info.instructions
+        assert "Do not batch completions at the end" in info.instructions
+        if calls == 2:
+            assert "[in_progress] 验证步骤" in info.instructions
+        elif calls >= 3:
+            assert "[completed] 验证步骤" in info.instructions
         if calls <= 2:
             yield {
                 0: _call(

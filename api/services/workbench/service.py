@@ -215,6 +215,7 @@ def _chat(session, tenant_id, account_id, chat_id, lock=False):
 
 def read_chat(tenant_id: str, account_id: str, chat_id: str):
     from services.workbench.branches import annotate
+    from services.workbench.control import with_commands
     from services.workbench.directories import chat_directory
     from services.workbench.message_actions import with_feedback
     from services.workbench.recovery import recovery_dto
@@ -257,7 +258,9 @@ def read_chat(tenant_id: str, account_id: str, chat_id: str):
             ),
             "template_snapshot_id": revision.template_snapshot_id or chat.base_snapshot_id,
             "selection": json.loads(revision.selection),
-            "runs": annotate(runs, with_feedback(session, runs, [run_dto(run) for run in runs])),
+            "runs": annotate(
+                runs, with_feedback(session, runs, with_commands(session, runs, [run_dto(run) for run in runs]))
+            ),
         }
 
 
@@ -276,6 +279,8 @@ def run_dto(run, *, include_events=True):
     from services.workbench.message_actions import message_ids
 
     payload = json.loads(run.payload)
+    command = payload.get("command") or payload.get("control", {}).get("kind")
+    command = command if command in {"plan", "goal", "compact"} else None
     from services.workbench.recovery import input_dto, recovery_dto
 
     ids = message_ids(run) if include_events else payload.get("message_ids", [])
@@ -308,7 +313,8 @@ def run_dto(run, *, include_events=True):
         else [*run_knowledge_events(run, payload), *merge_context_events(run, payload)],
         "activity_protocol": 1 if journal else 0,
         "followup_protocol": int(payload.get("followup_protocol") == 1),
-        "is_continuation": bool(payload.get("is_continuation")),
+        "is_continuation": bool(payload.get("is_continuation")) and command != "compact",
+        "command": command,
         "user_paused": bool(payload.get("user_paused")) and run.status == "cancelled",
         "queue_order": payload.get("queue_order"),
         "queue_selection": payload.get("queue_selection"),
@@ -487,7 +493,9 @@ def update_config(tenant_id, account_id, chat_id, version, selection):
     return read_chat(tenant_id, account_id, chat_id)
 
 
-def enqueue(tenant_id, account_id, chat_id, version, request_key, payload: dict[str, Any], *, control=None):
+def enqueue(
+    tenant_id, account_id, chat_id, version, request_key, payload: dict[str, Any], *, control=None, command=None
+):
     from services.workbench.followups import WAITING, pending_runs, queued_parent
     from services.workbench.recovery import pending_condition
 
@@ -636,6 +644,7 @@ def enqueue(tenant_id, account_id, chat_id, version, request_key, payload: dict[
             "activity_protocol": int(dify_config.WORKBENCH_ACTIVITY_ENABLED and payload.get("activity_protocol") == 1),
             "template_snapshot_id": base["snapshot_id"],
             "is_continuation": silent_continue,
+            "command": command,
         }
         if silent_continue:
             # Values come from the owned persisted task, never this request's
