@@ -185,14 +185,18 @@ def test_custom_choice_requires_explicit_marker(pending_run: PendingRun) -> None
         ({"task": " "}, {"custom_fields": ["task"]}),
     ],
 )
-def test_invalid_answer_details_do_not_resume(pending_run: PendingRun, values, details) -> None:
+def test_invalid_answer_details_do_not_resume(
+    pending_run: PendingRun, values: dict[str, str], details: dict[str, list[str]]
+) -> None:
     with pytest.raises(ValueError):
         service.resume("tenant", "account", "run", values, None, pending_run.request_id, **details)
     pending_run.publish.assert_not_called()
 
 
 @pytest.mark.parametrize("details", [{"custom_fields": ["task"]}, {"skipped_fields": ["task"]}])
-def test_plan_cannot_be_approved_through_question_shortcuts(pending_run: PendingRun, details) -> None:
+def test_plan_cannot_be_approved_through_question_shortcuts(
+    pending_run: PendingRun, details: dict[str, list[str]]
+) -> None:
     payload = json.loads(pending_run.run.payload)
     payload["pending"]["tool_name"] = "exit_plan_mode"
     pending_run.run.payload = json.dumps(payload)
