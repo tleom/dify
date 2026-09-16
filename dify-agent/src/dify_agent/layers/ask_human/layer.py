@@ -207,6 +207,7 @@ class DifyAskHumanLayer(PydanticAILayer[NoLayerDeps, object, DifyAskHumanLayerCo
             strict=False,
             sequential=True,
             kind="external",
+            metadata={"workbench_plan": "clarify"},
         )
 
     async def _never_executed_tool(

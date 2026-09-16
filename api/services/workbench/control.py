@@ -200,7 +200,7 @@ def issue(
     tenant_id, account_id, chat_id, *, command, request_key, expected_revision=None, files=None, resource_mentions=None
 ):
     """Execute a slash command without sending command/status text to a model."""
-    from services.workbench.service import _chat, authorize, enqueue
+    from services.workbench.service import _chat, authorize
 
     authorize(tenant_id, account_id)
     try:
@@ -218,6 +218,7 @@ def issue(
 
     refs = ResourceMentions.model_validate(resource_mentions or {}).model_dump()
     if any(refs.values()):
+        from services.workbench.personal_mcp import catalog as personal_mcp_catalog
         from services.workbench.resources import personal_skill_catalog
         from services.workbench.service import template
 
@@ -226,7 +227,14 @@ def issue(
             if any(name.startswith("personal:") for name in refs["skills"])
             else []
         )
-        resolve_mentions(template(tenant_id, account_id)["soul"], refs, personal_skills=personal)
+        personal_mcp = (
+            personal_mcp_catalog(tenant_id, account_id)
+            if any(name.startswith("personal:mcp:") for name in refs["tools"])
+            else []
+        )
+        resolve_mentions(
+            template(tenant_id, account_id)["soul"], refs, personal_skills=personal, personal_mcp=personal_mcp
+        )
     fingerprint = json.dumps({"command": command, "files": files, "resource_mentions": refs}, sort_keys=True)
     result: dict[str, Any]
     with session_factory.get_session_maker().begin() as session:
@@ -254,15 +262,23 @@ def issue(
                     raise Conflict(str(error)) from error
                 if state.goal and parsed.action in {"create", "edit"} and resource_mentions is not None:
                     state.goal.resource_mentions = refs
+                if state.goal and parsed.action == "create":
+                    state.goal.source_request_key = request_key
                 message = "当前没有目标" if state.goal is None else f"目标：{state.goal.objective}"
-                if files:
-                    run_request = {"query": "目标参考附件", "files": files, "queue_when_busy": True}
+                if state.goal and (parsed.action == "create" or files):
+                    run_request = {
+                        "query": parsed.text,
+                        "files": files,
+                        "queue_when_busy": True,
+                        "_control": {"kind": "goal_input", "goal_id": state.goal.id},
+                    }
             elif parsed.name == "plan":
                 if state.plan.review_run_id and active and active.status == "waiting_input":
                     raise Conflict("请先在计划卡片中选择开始执行或继续规划")
                 state.plan = PlanState(
                     active=parsed.action == "on",
                     pending=active is not None,
+                    version=state.plan.version,
                     objective=parsed.text if parsed.action == "on" else "",
                 )
                 state.revision += 1
@@ -313,33 +329,80 @@ def issue(
     # Enqueue has its own durable request-key transaction. Retrying after either
     # commit fills in the same run; a failed publication is scheduler-recoverable.
     if result.get("request") and result.get("run") is None:
-        values = dict(result["request"])
-        private_control = values.pop("_control", None)
-        result["run"] = enqueue(
-            tenant_id,
-            account_id,
-            chat_id,
-            result["version"],
-            "command:" + sha256(request_key.encode()).hexdigest(),
-            {**values, "activity_protocol": 1},
-            control=private_control,
-            command=parsed.name,
-        )
-        with session_factory.get_session_maker().begin() as session:
-            _chat(session, tenant_id, account_id, chat_id, lock=True)
-            row = session.scalar(
-                select(WorkbenchCommand).where(
-                    WorkbenchCommand.chat_id == chat_id,
-                    WorkbenchCommand.request_key == request_key,
-                )
-            )
-            if row is None:
-                raise Conflict("命令记录已改变，请刷新会话后重试")
-            row.result = json.dumps(result, ensure_ascii=False)
+        _enqueue_command_request(tenant_id, account_id, chat_id, request_key, result, parsed.name)
     if parsed.name == "goal" and parsed.action in {"create", "resume"}:
         drive_goal(tenant_id, account_id, chat_id)
     result["state"] = read(tenant_id, account_id, chat_id)
     return {key: result[key] for key in ("state", "message", "run")}
+
+
+def _enqueue_command_request(tenant_id, account_id, chat_id, request_key, result, command):
+    """Fill a committed command's admission gap without recursively driving it.
+
+    Its immutable text/files survive retries. Until a run exists, a goal uses
+    the owner's current authorized configuration; enqueue rechecks that version
+    under the chat lock. Already committed runs retain their frozen selection.
+    """
+    from services.workbench.service import _chat, enqueue
+
+    values = dict(result["request"])
+    private_control = values.pop("_control", None)
+    if private_control and private_control.get("kind") == "goal_input":
+        with session_factory.create_session() as session:
+            result["version"] = _chat(session, tenant_id, account_id, chat_id).version
+    result["run"] = enqueue(
+        tenant_id,
+        account_id,
+        chat_id,
+        result["version"],
+        "command:" + sha256(request_key.encode()).hexdigest(),
+        {**values, "activity_protocol": 1},
+        control=private_control,
+        command=command,
+    )
+    with session_factory.get_session_maker().begin() as session:
+        _chat(session, tenant_id, account_id, chat_id, lock=True)
+        row = session.scalar(
+            select(WorkbenchCommand).where(
+                WorkbenchCommand.chat_id == chat_id,
+                WorkbenchCommand.tenant_id == tenant_id,
+                WorkbenchCommand.account_id == account_id,
+                WorkbenchCommand.request_key == request_key,
+            )
+        )
+        if row is None:
+            raise Conflict("命令记录已改变，请刷新会话后重试")
+        row.result = json.dumps(result, ensure_ascii=False)
+    return result["run"]
+
+
+def detach_goal_input(session, chat, message, target=None):
+    """Resolve the initial goal input when its queued message is removed/steered."""
+    state = load(session, chat)
+    goal = state.goal
+    if not goal or goal.rounds_started or not goal.source_request_key:
+        return
+    if message.request_key != "command:" + sha256(goal.source_request_key.encode()).hexdigest():
+        return
+    if target is None:
+        goal.phase, goal.reason = "paused", "目标首轮消息已移出队列，请调整后继续"
+        goal.source_request_key = None
+        goal.revision += 1
+    else:
+        # This user input now belongs to the active task's steering history.
+        # Bind completion/recovery to that task rather than creating it again.
+        goal.rounds_started, goal.last_run_id = 1, target.id
+        data = json.loads(target.payload)
+        data["control"] = {
+            "kind": "goal",
+            "goal_id": goal.id,
+            "goal_revision": goal.revision,
+            "round": 1,
+            "source": "user",
+        }
+        target.payload = json.dumps(data)
+    state.revision += 1
+    save(session, chat, state)
 
 
 def admit_run(session, chat, run, control):
@@ -347,11 +410,32 @@ def admit_run(session, chat, run, control):
     state = load(session, chat)
     payload = json.loads(run.payload)
     if control:
-        if control["kind"] == "goal":
+        if control["kind"] == "goal_input":
+            goal = state.goal
+            if not goal or goal.id != control["goal_id"] or goal.phase == "complete":
+                raise Conflict("目标已清除或替换，此条目标输入不再执行")
+            if "recovery_revision" in control and (
+                goal.phase != "active" or goal.revision != control["recovery_revision"]
+            ):
+                raise Conflict("目标已改变，此条首轮恢复不再执行")
+            # Human inputs are immutable messages. A later goal edit changes
+            # the current objective, not the submitted message's displayed text.
+            goal.rounds_started += 1
+            goal.last_run_id = run.id
+            control = {
+                "kind": "goal",
+                "goal_id": goal.id,
+                "goal_revision": goal.revision,
+                "round": goal.rounds_started,
+                "source": "user",
+            }
+            payload["is_continuation"] = False
+        elif control["kind"] == "goal":
             goal = state.goal
             if (
                 not goal
                 or goal.phase != "active"
+                or state.plan.active
                 or (goal.id, goal.revision) != (control["goal_id"], control["goal_revision"])
             ):
                 raise Conflict("目标已改变，此轮自动执行已取消")
@@ -375,11 +459,15 @@ def admit_run(session, chat, run, control):
 
 
 def with_commands(session, runs, values):
-    """Recover display tags for old command runs without rewriting stored history."""
+    """Recover immutable command text and tags without rewriting stored history.
+
+    Legacy attached goals stored a placeholder as their run query. Its own
+    command is the source of truth; the current goal may have since been edited.
+    """
     pending = {
         run.request_key: value
         for run, value in zip(runs, values)
-        if not value.get("command") and run.request_key.startswith("command:")
+        if run.request_key.startswith("command:") and (not value.get("command") or value.get("query") == "目标参考附件")
     }
     if not pending or not runs:
         return values
@@ -402,6 +490,8 @@ def with_commands(session, runs, values):
         except (KeyError, TypeError, ValueError):
             continue
         value["command"] = command.name
+        if command.name == "goal" and command.action in {"create", "edit"}:
+            value["query"] = command.text
     return values
 
 
@@ -417,6 +507,7 @@ def drive_goal(tenant_id, account_id, chat_id):
     from services.workbench.recovery import pending_condition
 
     service.authorize(tenant_id, account_id)
+    initial_command = None
     with session_factory.get_session_maker().begin() as session:
         chat = service._chat(session, tenant_id, account_id, chat_id, lock=True)
         state = load(session, chat)
@@ -424,7 +515,7 @@ def drive_goal(tenant_id, account_id, chat_id):
         if (
             not goal
             or goal.phase != "active"
-            or state.plan.active
+            or (state.plan.active and not (goal.rounds_started == 0 and goal.source_request_key))
             or (state.compaction and state.compaction.phase in {"queued", "compacting"})
             or _active(session, chat)
             or pending_runs(session, chat)
@@ -440,6 +531,53 @@ def drive_goal(tenant_id, account_id, chat_id):
             return None
         current = goal.model_copy(deep=True)
         version = chat.version
+        if current.rounds_started == 0 and current.source_request_key:
+            record = session.scalar(
+                select(WorkbenchCommand).where(
+                    WorkbenchCommand.chat_id == chat.id,
+                    WorkbenchCommand.tenant_id == tenant_id,
+                    WorkbenchCommand.account_id == account_id,
+                    WorkbenchCommand.request_key == current.source_request_key,
+                )
+            )
+            if record is None:
+                return None
+            first = session.scalar(
+                select(WorkbenchRun).where(
+                    WorkbenchRun.chat_id == chat.id,
+                    WorkbenchRun.tenant_id == tenant_id,
+                    WorkbenchRun.account_id == account_id,
+                    WorkbenchRun.request_key == "command:" + sha256(current.source_request_key.encode()).hexdigest(),
+                )
+            )
+            if first is not None:
+                # A durable message is never a missing enqueue. Queue actions
+                # normally reconcile the goal atomically; fail closed if an
+                # interrupted transition left an unadmitted terminal record.
+                goal.phase, goal.reason = "paused", "目标首轮消息已结束或移出队列，请核对后继续"
+                goal.source_request_key = None
+                goal.revision += 1
+                state.revision += 1
+                save(session, chat, state)
+                return None
+            initial_command = json.loads(record.result)
+            if not initial_command.get("request"):
+                return None
+            initial_command["request"]["_control"]["recovery_revision"] = current.revision
+    if initial_command is not None:
+        # Recover a crash between saving a goal command and enqueuing its first
+        # message. Never re-enter issue/drive_goal through cached command state.
+        try:
+            return _enqueue_command_request(
+                tenant_id,
+                account_id,
+                chat_id,
+                current.source_request_key,
+                initial_command,
+                "goal",
+            )
+        except Conflict:
+            return None
     number = current.rounds_started + 1
     try:
         return service.enqueue(
@@ -587,9 +725,20 @@ def agent_control(payload: AgentControlPayload):
                     raise Conflict("状态更新编号已用于另一个操作")
                 return json.loads(previous.result)
         if payload.action == "todo_write":
-            state.todos = TodoWrite.model_validate(payload.data).todos
+            if state.plan.active:
+                raise Conflict("计划模式请提交完整方案供用户审阅；任务清单仅用于批准后的实施进度")
+            todos = TodoWrite.model_validate(payload.data).todos
+            if todos == state.todos:
+                # An identical list has no new progress to publish. Retain the
+                # request's idempotency record without a new UI event/revision.
+                result = {"state": state.model_dump(mode="json"), "control": run_data.get("control")}
+                _record(session, chat, identifier, payload.model_dump_json(), result)
+                return result
+            state.todos = todos
             state.todos_run_id = run.id
         elif payload.action == "update_goal":
+            if state.plan.active:
+                raise Conflict("计划尚未批准，请先提交完整方案供用户审阅")
             try:
                 state = finish_goal(state, **GoalUpdate.model_validate(payload.data).model_dump())
             except (ValueError, TypeError) as error:
@@ -600,14 +749,13 @@ def agent_control(payload: AgentControlPayload):
             if payload.data.get("revision") == state.revision:
                 state.plan.pending = False
         elif payload.action == "review_plan":
-            if not state.plan.active:
-                raise Conflict("计划模式已退出")
             plan = payload.data.get("plan", "")
-            if not isinstance(plan, str) or not plan.strip().startswith("#") or len(plan) > 100000:
+            if not isinstance(plan, str):
                 raise BadRequest("请提供以标题开头的完整 Markdown 计划")
-            state.plan.review, state.plan.review_run_id = plan, run.id
-            if not state.plan.objective:
-                state.plan.objective = plan.splitlines()[0].lstrip("# ")[:20000]
+            try:
+                state.plan.submit(plan, run.id)
+            except ValueError as error:
+                raise Conflict(str(error)) from error
         elif payload.action == "compact_result":
             result = CompactionState.model_validate(payload.data)
             if not state.compaction or result.id != state.compaction.id:
@@ -634,20 +782,20 @@ def agent_control(payload: AgentControlPayload):
     return result
 
 
-def review_answer(session, chat, run, action):
+def review_answer(session, chat, run, action, pending):
     """The user approves the exact stored plan; no timer can approve it."""
     state = load(session, chat)
-    if not state.plan.active or state.plan.review_run_id != run.id:
-        raise Conflict("计划已改变，请刷新后重新提交")
     if action not in {"approve", "keep_planning"}:
         raise BadRequest("请选择开始执行或继续规划")
-    state.plan.active = action != "approve"
-    state.plan.completed = action == "approve"
-    if not state.plan.objective and state.plan.review:
-        state.plan.objective = state.plan.review.splitlines()[0].lstrip("# ")[:20000]
-    state.plan.pending = False
-    state.plan.review = None
-    state.plan.review_run_id = None
+    try:
+        state.plan.answer(
+            run_id=run.id,
+            version=pending.get("metadata", {}).get("plan_version", 0),
+            plan=pending["args"].get("markdown", ""),
+            approve=action == "approve",
+        )
+    except ValueError as error:
+        raise Conflict(str(error)) from error
     state.revision += 1
     save(session, chat, state)
 

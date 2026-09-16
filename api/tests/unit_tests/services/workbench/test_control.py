@@ -1,24 +1,23 @@
 """Mode commands use real SQL transactions and the existing run admission path."""
 
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
+from typing import Literal
 from uuid import uuid4
 
 import pytest
 from dify_agent.protocol.workbench_control import GoalState, TodoItem
 from werkzeug.exceptions import BadRequest, Conflict, Forbidden
 
-from models.workbench import WorkbenchCommand, WorkbenchControl, WorkbenchRun
+from models.workbench import WorkbenchCommand, WorkbenchControl, WorkbenchRun, WorkbenchRunEvent
 from services.workbench import control, followups, service
-from tests.unit_tests.services.workbench.test_followups import queue_fixture
+from tests.unit_tests.services.workbench.test_followups import Queue, queue_fixture
 
 queue = pytest.fixture(queue_fixture)
 
 
-def test_goal_carries_personal_skill_mentions_into_each_round(
-    queue: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_goal_carries_personal_skill_mentions_into_each_round(queue: Queue, monkeypatch: pytest.MonkeyPatch) -> None:
     from services.workbench import resources
 
     monkeypatch.setattr(resources, "personal_skill_catalog", lambda *_: [{"id": "personal:case", "name": "case"}])
@@ -42,7 +41,7 @@ def test_goal_carries_personal_skill_mentions_into_each_round(
             identifier = next_run["id"]
 
 
-def test_compact_instruction_is_the_following_task_and_empty_compact_only_summarizes(queue: SimpleNamespace) -> None:
+def test_compact_instruction_is_the_following_task_and_empty_compact_only_summarizes(queue: Queue) -> None:
     first = queue.send("建立上下文")
     queue.finish(first["id"])
     with queue.factory.begin() as session:
@@ -73,7 +72,7 @@ def test_compact_instruction_is_the_following_task_and_empty_compact_only_summar
     assert service.run_dto(old)["command"] == "compact"
 
 
-def test_plan_tag_is_persisted_and_legacy_tag_comes_from_its_own_command(queue: SimpleNamespace) -> None:
+def test_plan_tag_is_persisted_and_legacy_tag_comes_from_its_own_command(queue: Queue) -> None:
     result = control.issue(
         queue.owner[0], queue.owner[1], queue.chat_id, command="/plan 设计处理方案", request_key="plan-tag"
     )
@@ -90,17 +89,16 @@ def test_plan_tag_is_persisted_and_legacy_tag_comes_from_its_own_command(queue: 
         assert control.with_commands(session, [run], [service.run_dto(run)])[0]["command"] is None
 
 
-def command(queue: SimpleNamespace, text: str, key: str | None = None) -> control.WorkbenchControlState:
+def command(queue: Queue, text: str, key: str | None = None) -> control.WorkbenchControlState:
     result = control.issue(queue.owner[0], queue.owner[1], queue.chat_id, command=text, request_key=key or str(uuid4()))
     return control.WorkbenchControlState.model_validate(result["state"])
 
 
 @pytest.mark.parametrize("legacy_limit", [None, 256])
-def test_goal_continues_after_256_final_responses_until_explicit_pause(
-    queue: SimpleNamespace, legacy_limit: int | None
-) -> None:
+def test_goal_continues_after_256_final_responses_until_explicit_pause(queue: Queue, legacy_limit: int | None) -> None:
     state = command(queue, "/goal 全面核验所有文件")
     assert state.goal is not None
+    assert state.goal.last_run_id is not None
     queue.finish(state.goal.last_run_id)
     with queue.factory.begin() as session:
         chat = service._chat(session, queue.owner[0], queue.owner[1], queue.chat_id, lock=True)
@@ -122,9 +120,7 @@ def test_goal_continues_after_256_final_responses_until_explicit_pause(
     assert resumed.goal.rounds_started == 258
 
 
-def test_goal_clock_survives_read_pause_resume_and_completion(
-    queue: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_goal_clock_survives_read_pause_resume_and_completion(queue: Queue, monkeypatch: pytest.MonkeyPatch) -> None:
     start = datetime(2026, 9, 16, 1)
     instant = [start]
     monkeypatch.setattr(control, "naive_utc_now", lambda: instant[0])
@@ -156,7 +152,7 @@ def test_goal_clock_survives_read_pause_resume_and_completion(
     assert complete["active_since"] is None
 
 
-def test_legacy_goal_clock_restores_command_phase_history(queue: SimpleNamespace) -> None:
+def test_legacy_goal_clock_restores_command_phase_history(queue: Queue) -> None:
     start = datetime(2026, 9, 16, 1)
     goal = GoalState(objective="已有目标", phase="complete")
     with queue.factory.begin() as session:
@@ -187,7 +183,7 @@ def test_legacy_goal_clock_restores_command_phase_history(queue: SimpleNamespace
         assert restored["active_since"] is None
 
 
-def test_clear_todos_is_owned_revision_checked_and_retry_safe(queue: SimpleNamespace) -> None:
+def test_clear_todos_is_owned_revision_checked_and_retry_safe(queue: Queue) -> None:
     from werkzeug.exceptions import NotFound
 
     with queue.factory.begin() as session:
@@ -216,7 +212,7 @@ def test_clear_todos_is_owned_revision_checked_and_retry_safe(queue: SimpleNames
     assert retry["todos"][0]["content"] == "后来生成的清单"
 
 
-def test_goal_command_idempotency_and_pause_prevent_duplicate_runs(queue: SimpleNamespace) -> None:
+def test_goal_command_idempotency_and_pause_prevent_duplicate_runs(queue: Queue) -> None:
     first = command(queue, "/goal 校验文件", "same")
     again = command(queue, "/goal 校验文件", "same")
     assert first.goal is not None
@@ -226,16 +222,18 @@ def test_goal_command_idempotency_and_pause_prevent_duplicate_runs(queue: Simple
     assert control.drive_goal(queue.owner[0], queue.owner[1], queue.chat_id) is None
     command(queue, "/goal pause")
     run_id = first.goal.last_run_id
+    assert run_id is not None
     queue.finish(run_id)
     assert control.drive_goal(queue.owner[0], queue.owner[1], queue.chat_id) is None
     with pytest.raises(Conflict):
         command(queue, "/goal another", "same")
 
 
-def test_goal_waits_for_user_messages_and_resets_todos_only_at_admission(queue: SimpleNamespace) -> None:
+def test_goal_waits_for_user_messages_and_resets_todos_only_at_admission(queue: Queue) -> None:
     run = queue.send("原消息")
     queue.running(run["id"])
     ticket = queue.get(run["id"]).backend_run_id
+    assert ticket is not None
     payload = control.AgentControlPayload(
         tenant_id=queue.owner[0],
         account_id=queue.owner[1],
@@ -256,15 +254,18 @@ def test_goal_waits_for_user_messages_and_resets_todos_only_at_admission(queue: 
         control.agent_control(payload)
 
 
-def test_plan_review_requires_explicit_action_and_disables_goal_driver(queue: SimpleNamespace) -> None:
+def test_plan_review_requires_explicit_action_and_disables_goal_driver(queue: Queue) -> None:
     command(queue, "/plan")
     goal = command(queue, "/goal 输出报告")
     assert goal.goal is not None
-    assert goal.goal.rounds_started == 0
-    run = queue.send("请制定计划")
+    assert goal.goal.last_run_id is not None
+    assert goal.goal.rounds_started == 1
+    run = {"id": goal.goal.last_run_id}
+    assert control.drive_goal(*queue.owner, queue.chat_id) is None
     with queue.factory.begin() as session:
         chat = service._chat(session, queue.owner[0], queue.owner[1], queue.chat_id, lock=True)
         row = session.get(WorkbenchRun, run["id"])
+        assert row is not None
         state = control.load(session, chat)
         state.plan.review, state.plan.review_run_id = "# 实施计划\n\n检查后生成。", row.id
         control.save(session, chat, state)
@@ -275,7 +276,7 @@ def test_plan_review_requires_explicit_action_and_disables_goal_driver(queue: Si
             "args": {
                 "title": "计划",
                 "question": "选择下一步",
-                "markdown": "# 实施计划",
+                "markdown": "# 实施计划\n\n检查后生成。",
                 "fields": [{"name": "feedback", "label": "意见", "type": "paragraph", "required": False}],
                 "actions": [{"id": "approve", "label": "开始执行"}, {"id": "keep_planning", "label": "继续规划"}],
             },
@@ -286,20 +287,91 @@ def test_plan_review_requires_explicit_action_and_disables_goal_driver(queue: Si
     with pytest.raises(BadRequest):
         service.resume(queue.owner[0], queue.owner[1], run["id"], {}, None, request_id)
     service.resume(queue.owner[0], queue.owner[1], run["id"], {}, "approve", request_id)
-    plan = control.read(queue.owner[0], queue.owner[1], queue.chat_id)["plan"]
+    plan = control.read(*queue.owner, queue.chat_id)["plan"]
     assert plan["active"] is False
     assert plan["completed"] is True
     assert plan["objective"] == "实施计划"
+    assert plan["approved"] == "# 实施计划\n\n检查后生成。"
+    assert plan["approved_version"] == 1
     assert command(queue, "/plan off").plan.completed is False
     revised = command(queue, "/plan 修改后的计划").plan
     assert revised.active
     assert not revised.completed
     assert revised.objective == "修改后的计划"
+    assert revised.version == 1
 
 
-def test_exhausted_failure_blocks_same_goal_generation(queue: SimpleNamespace) -> None:
+def test_first_goal_message_and_legacy_attachment_placeholder_restore_original_text(
+    queue: Queue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from services.workbench import files as file_service
+
+    text = "请基于附件完成完整报告。\n保留全部原始证据，并核对每一项结果。"
+    files = [{"type": "document", "transfer_method": "local_file", "upload_file_id": str(uuid4())}]
+    # Upload ownership validation has its own tests; this fixture exercises run/command persistence.
+    monkeypatch.setattr(file_service, "validate_attachments", lambda *_args: (["/workspace/source.docx"], []))
+    result = control.issue(*queue.owner, queue.chat_id, command="/goal " + text, files=files, request_key="original")
+    first = queue.get(result["run"]["id"])
+    assert result["run"]["query"] == text
+    assert result["run"]["is_continuation"] is False
+    payload = json.loads(first.payload)
+    assert payload["query"] == text
+    assert payload["control"]["round"] == 1
+    command(queue, "/goal edit 更新后的目标")
+    # A legacy run with an existing tag must still recover its own command text.
+    first.payload = json.dumps({**payload, "query": "目标参考附件", "files": files})
+    with queue.factory() as session:
+        recovered = control.with_commands(session, [first], [service.run_dto(first)])[0]
+    assert recovered["query"] == text
+    assert recovered["command"] == "goal"
+    queue.finish(first.id)
+    following = control.drive_goal(*queue.owner, queue.chat_id)
+    assert following is not None
+    assert following["is_continuation"] is True
+    assert "更新后的目标" in following["query"]
+
+
+def test_initial_goal_request_recovers_after_enqueue_failure_even_in_plan_mode(
+    queue: Queue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command(queue, "/plan")
+    with monkeypatch.context() as patch:
+        patch.setattr(service, "enqueue", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("publish gap")))
+        with pytest.raises(RuntimeError, match="publish gap"):
+            command(queue, "/goal 核对原始长文本和附件", "recover-original")
+    recovered = control.drive_goal(*queue.owner, queue.chat_id)
+    assert recovered is not None
+    assert recovered["query"] == "核对原始长文本和附件"
+    assert recovered["is_continuation"] is False
+    assert control.read(*queue.owner, queue.chat_id)["goal"]["rounds_started"] == 1
+    assert control.drive_goal(*queue.owner, queue.chat_id) is None
+    queue.finish(recovered["id"])
+    assert control.drive_goal(*queue.owner, queue.chat_id) is None
+
+
+def test_queued_goal_retains_control_and_cancelled_goal_input_does_not_execute(queue: Queue) -> None:
+    busy = queue.send("先处理当前任务")
+    result = control.issue(*queue.owner, queue.chat_id, command="/goal 后续目标", request_key="queued-goal")
+    assert result["run"]["status"] == "waiting_turn"
+    assert result["state"]["goal"]["rounds_started"] == 0
+    queue.finish(busy["id"])
+    assert queue.advance() == result["run"]["id"]
+    saved = control.read(*queue.owner, queue.chat_id)["goal"]
+    assert saved["rounds_started"] == 1
+    assert saved["last_run_id"] == result["run"]["id"]
+    assert json.loads(queue.get(saved["last_run_id"]).payload)["control"]["source"] == "user"
+    command(queue, "/goal clear")
+    stale = control.issue(*queue.owner, queue.chat_id, command="/goal 即将清除", request_key="stale-goal")
+    command(queue, "/goal clear")
+    queue.finish(result["run"]["id"])
+    assert queue.advance() is None
+    assert queue.get(stale["run"]["id"]).status == "cancelled"
+
+
+def test_exhausted_failure_blocks_same_goal_generation(queue: Queue) -> None:
     result = command(queue, "/goal 核验")
     assert result.goal is not None
+    assert result.goal.last_run_id is not None
     queue.finish(result.goal.last_run_id, "failed")
     control.settle(queue.owner[0], queue.owner[1], queue.chat_id)
     assert control.read(queue.owner[0], queue.owner[1], queue.chat_id)["goal"]["phase"] == "blocked"
@@ -307,7 +379,96 @@ def test_exhausted_failure_blocks_same_goal_generation(queue: SimpleNamespace) -
     assert control.read(queue.owner[0], queue.owner[1], queue.chat_id)["goal"]["rounds_started"] == 2
 
 
-def test_goal_first_continuing_and_resumed_rounds_accept_steering(queue: SimpleNamespace) -> None:
+def plan_pending(queue: Queue, run_id: str, plan: str, version: int) -> str:
+    with queue.factory.begin() as session:
+        row = session.get(WorkbenchRun, run_id)
+        assert row is not None
+        data = json.loads(row.payload)
+        data["pending"] = {
+            "tool_name": "exit_plan_mode",
+            "tool_call_id": f"plan-{version}",
+            "metadata": {"plan_version": version},
+            "args": {
+                "question": "是否按此方案执行？",
+                "markdown": plan,
+                "fields": [{"name": "feedback", "type": "paragraph", "label": "意见", "required": False}],
+                "actions": [{"id": "approve", "label": "开始执行"}, {"id": "keep_planning", "label": "继续规划"}],
+            },
+        }
+        row.payload, row.status = json.dumps(data), "waiting_input"
+    row = queue.get(run_id)
+    request_id = service.input_request_id(row, json.loads(row.payload))
+    assert request_id is not None
+    return request_id
+
+
+def agent_payload(
+    queue: Queue,
+    run_id: str,
+    action: Literal["review_plan", "todo_write"],
+    data: Mapping[str, object] | None = None,
+    key: str = "operation",
+) -> control.AgentControlPayload:
+    ticket = queue.get(run_id).backend_run_id
+    assert ticket is not None
+    return control.AgentControlPayload(
+        tenant_id=queue.owner[0],
+        account_id=queue.owner[1],
+        app_id=queue.app_id,
+        workbench_run_id=run_id,
+        backend_run_id=ticket,
+        action=action,
+        request_key=key,
+        data=dict(data or {}),
+    )
+
+
+def test_review_feedback_requires_a_new_version_and_stale_card_cannot_approve(queue: Queue) -> None:
+    from services.workbench.recovery import expire_input
+
+    result = control.issue(*queue.owner, queue.chat_id, command="/plan 制定方案", request_key="start-plan")
+    identifier = result["run"]["id"]
+    queue.running(identifier)
+    first = "# 第一版\n核对附件。"
+    payload = agent_payload(queue, identifier, "review_plan", {"plan": first}, "first-review")
+    control.agent_control(payload)
+    request_id = plan_pending(queue, identifier, first, 1)
+    with pytest.raises(Conflict, match="修改意见"):
+        service.resume(*queue.owner, identifier, {"feedback": "增加核验"}, "approve", request_id)
+    assert expire_input(identifier, owner=queue.owner, request_id=request_id, manual=True) is False
+    service.resume(*queue.owner, identifier, {"feedback": "增加核验"}, "keep_planning", request_id)
+    assert control.read(*queue.owner, queue.chat_id)["plan"]["active"]
+    queue.running(identifier)
+    second = "# 第二版\n核对附件和来源。"
+    control.agent_control(agent_payload(queue, identifier, "review_plan", {"plan": second}, "second-review"))
+    stale_id = plan_pending(queue, identifier, first, 1)
+    with pytest.raises(Conflict, match="计划已改变"):
+        service.resume(*queue.owner, identifier, {}, "approve", stale_id)
+    request_id = plan_pending(queue, identifier, second, 2)
+    service.resume(*queue.owner, identifier, {}, "approve", request_id)
+    plan = control.read(*queue.owner, queue.chat_id)["plan"]
+    assert not plan["active"]
+    assert plan["approved"] == second
+    assert plan["approved_version"] == 2
+
+
+def test_identical_todo_has_no_new_progress_event_and_planning_rejects_list(queue: Queue) -> None:
+    run = queue.send("执行一个复杂任务")
+    queue.running(run["id"])
+    data = {"todos": [{"content": "核对", "status": "in_progress"}]}
+    first = control.agent_control(agent_payload(queue, run["id"], "todo_write", data, "list-1"))
+    with queue.factory() as session:
+        cursor = session.query(WorkbenchRunEvent).filter_by(run_id=run["id"]).count()
+    repeated = control.agent_control(agent_payload(queue, run["id"], "todo_write", data, "list-2"))
+    assert repeated["state"]["revision"] == first["state"]["revision"]
+    with queue.factory() as session:
+        assert session.query(WorkbenchRunEvent).filter_by(run_id=run["id"]).count() == cursor
+    command(queue, "/plan")
+    with pytest.raises(Conflict, match="完整方案"):
+        control.agent_control(agent_payload(queue, run["id"], "todo_write", data, "list-3"))
+
+
+def test_goal_first_continuing_and_resumed_rounds_accept_steering(queue: Queue) -> None:
     result = command(queue, "/goal 核验报告")
     for index in range(3):
         run_id = control.read(queue.owner[0], queue.owner[1], queue.chat_id)["goal"]["last_run_id"]
@@ -328,7 +489,7 @@ def test_goal_first_continuing_and_resumed_rounds_accept_steering(queue: SimpleN
     assert result.goal.objective == "核验报告"
 
 
-def test_later_ordinary_run_does_not_hide_failed_compaction(queue: SimpleNamespace) -> None:
+def test_later_ordinary_run_does_not_hide_failed_compaction(queue: Queue) -> None:
     first = queue.send("建立可压缩的对话")
     queue.finish(first["id"])
     with queue.factory.begin() as session:

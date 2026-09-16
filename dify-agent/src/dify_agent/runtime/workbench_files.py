@@ -16,6 +16,7 @@ from dify_agent.layers.shell.layer import DifyShellLayer
 from dify_agent.layers.workbench_files import WorkbenchFilesLayer
 from dify_agent.protocol.schemas import WorkbenchToolData
 from dify_agent.runtime.workbench_activity import WorkbenchActivityCapability
+from dify_agent.runtime.workbench_control import WorkbenchControlCapability
 
 SNAPSHOT_SCRIPT = """
 import json, os, stat, sys
@@ -148,19 +149,28 @@ class WorkbenchFileChanges:
 
 @dataclass
 class WorkbenchFileDeliveryCapability(AbstractCapability[None]):
-    files: WorkbenchFilesLayer
+    files: WorkbenchFilesLayer | None
     publish: Callable[[ModelResponse, int], Awaitable[None]]
     ready: Callable[[], bool]
     changes: WorkbenchFileChanges | None = None
+    control: WorkbenchControlCapability | None = None
+
+    @property
+    def hold_text(self) -> bool:
+        return self.files is not None or bool(self.control and self.control.layer.runtime_state.state.plan.active)
 
     async def after_model_request(self, ctx, *, request_context, response: ModelResponse) -> ModelResponse:
+        if not self.hold_text:
+            return response
+        if self.control is not None:
+            self.control.validate_response(response)
         if self.changes is not None:
             await self.changes.collect()
         text = response.text or ""
         if text:
             if not response.tool_calls and unfinished_clarification(text):
                 raise ModelRetry(CLARIFICATION_RETRY)
-            error = self.files.delivery_error(text, final=not response.tool_calls)
+            error = self.files.delivery_error(text, final=not response.tool_calls) if self.files is not None else None
             if error:
                 raise ModelRetry(error)
             if self.ready():

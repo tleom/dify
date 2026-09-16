@@ -1,6 +1,6 @@
 """Serializable collaboration state shared by the workbench API and Agent.
 
-Goal lifecycle, planning and the standing task list are control state, not
+Goal lifecycle, reviewed plans and optional execution lists are control state, not
 conversation text. They survive a history summary and never derive authority
 from a model's final answer. Inspired by DeepSeek Harness's goal/plan/todo
 contracts; persistence and execution fencing belong to the owning API.
@@ -27,6 +27,7 @@ class GoalState(ControlModel):
     max_rounds: int | None = Field(default=None, ge=1, le=10000)
     reason: str | None = Field(default=None, max_length=4000)
     last_run_id: str | None = None
+    source_request_key: str | None = None
     resource_mentions: dict[str, list[str]] = Field(default_factory=dict)
     started_at: float | None = Field(default=None, ge=0)
     elapsed_seconds: float = Field(default=0, ge=0)
@@ -62,8 +63,39 @@ class PlanState(ControlModel):
     pending: bool = False
     objective: str = Field(default="", max_length=20000)
     completed: bool = False
+    version: int = Field(default=0, ge=0)
     review: str | None = Field(default=None, max_length=100000)
     review_run_id: str | None = None
+    approved: str | None = Field(default=None, max_length=100000)
+    approved_version: int | None = Field(default=None, ge=1)
+
+    def submit(self, plan: str, run_id: str) -> None:
+        """Replace the complete candidate; approval belongs to one version only."""
+        if not self.active:
+            raise ValueError("计划模式已退出")
+        if not plan.strip().startswith("#") or len(plan) > 100000:
+            raise ValueError("请提供以标题开头的完整 Markdown 计划")
+        self.version += 1
+        self.completed = False
+        if not self.objective:
+            self.objective = plan.splitlines()[0].lstrip("# ")[:20000]
+        self.review, self.review_run_id = plan, run_id
+        self.approved, self.approved_version = None, None
+
+    def answer(self, *, run_id: str, version: int, plan: str, approve: bool) -> None:
+        """Accept only the exact candidate shown in the pending review card."""
+        if not self.active or self.review_run_id != run_id or self.version != version or self.review != plan:
+            raise ValueError("计划已改变，请刷新后重新提交")
+        if approve:
+            # A pre-versioning review is adopted as version one on approval.
+            self.version = max(1, self.version)
+            self.approved, self.approved_version = self.review, self.version
+        self.completed = approve
+        if not self.objective and self.review:
+            self.objective = self.review.splitlines()[0].lstrip("# ")[:20000]
+        self.active = not approve
+        self.pending = False
+        self.review, self.review_run_id = None, None
 
 
 class CompactionState(ControlModel):

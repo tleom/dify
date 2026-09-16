@@ -36,18 +36,12 @@ from pydantic_ai.messages import UserContent
 
 from agenton.compositor import Compositor, CompositorConfig, LayerProvider, LayerProviderInput
 from agenton.layers import LayerConfig
-from dify_agent.layers.workbench_files import WorkbenchFilesLayer
-from dify_agent.layers.workbench_followups import WorkbenchFollowupsLayer
-from dify_agent.layers.workbench_control import WorkbenchControlLayer
 from agenton.layers.types import AllPromptTypes, AllToolTypes, AllUserPromptTypes, PydanticAIPrompt, PydanticAITool
-from agenton_collections.layers.pydantic_ai import PydanticAIHistoryLayer
 from agenton_collections.layers.plain.basic import PromptLayer
+from agenton_collections.layers.pydantic_ai import PydanticAIHistoryLayer
 from agenton_collections.transformers.pydantic_ai import PYDANTIC_AI_TRANSFORMERS
 from dify_agent.agent_stub.shell_env import ShellAgentStubTokenFactory
 from dify_agent.layers.ask_human.layer import DifyAskHumanLayer
-from dify_agent.layers.workbench_environment import WorkbenchEnvironmentLayer
-from dify_agent.layers.workbench_mentions import WorkbenchMentionsLayer
-from dify_agent.layers.workbench_activity import WorkbenchActivityLayer
 from dify_agent.layers.config.layer import DifyConfigLayer
 from dify_agent.layers.dify_core_tools.configs import DifyCoreToolsLayerConfig
 from dify_agent.layers.dify_core_tools.layer import DifyCoreToolsLayer
@@ -64,6 +58,13 @@ from dify_agent.layers.runtime.layer import DifyRuntimeLayer
 from dify_agent.layers.shell.configs import DifyShellLayerConfig
 from dify_agent.layers.shell.layer import DifyShellLayer
 from dify_agent.layers.user_prompt.layer import DifyUserPromptLayer
+from dify_agent.layers.workbench_activity import WorkbenchActivityLayer
+from dify_agent.layers.workbench_control import WorkbenchControlLayer
+from dify_agent.layers.workbench_environment import WorkbenchEnvironmentLayer
+from dify_agent.layers.workbench_files import WorkbenchFilesLayer
+from dify_agent.layers.workbench_followups import WorkbenchFollowupsLayer
+from dify_agent.layers.workbench_mcp import WorkbenchMCPLayer
+from dify_agent.layers.workbench_mentions import WorkbenchMentionsLayer
 from dify_agent.runtime_backend import RuntimeBackendProfile
 
 type DifyAgentLayerProvider = LayerProvider[Any]
@@ -90,6 +91,14 @@ def create_default_layer_providers(
         LayerProvider.from_layer_type(WorkbenchEnvironmentLayer),
         LayerProvider.from_layer_type(WorkbenchMentionsLayer),
         LayerProvider.from_layer_type(WorkbenchActivityLayer),
+        LayerProvider.from_factory(
+            layer_type=WorkbenchMCPLayer,
+            create=lambda config: WorkbenchMCPLayer(
+                config=LayerConfig.model_validate(config),
+                inner_api_url=inner_api_url,
+                inner_api_key=inner_api_key,
+            ),
+        ),
         LayerProvider.from_factory(
             layer_type=WorkbenchControlLayer,
             create=lambda config: WorkbenchControlLayer(

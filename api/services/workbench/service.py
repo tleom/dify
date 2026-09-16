@@ -171,9 +171,11 @@ def catalog(tenant_id: str, account_id: str, *, include_personal: bool = True):
     for skill in resources["skills"]:
         skill["scope"] = "global"
     if include_personal:
+        from services.workbench.personal_mcp import catalog as personal_mcp_catalog
         from services.workbench.resources import personal_skill_catalog
 
         resources["skills"].extend(personal_skill_catalog(tenant_id, account_id))
+        resources["tools"].extend(personal_mcp_catalog(tenant_id, account_id))
     return {
         **resources,
         "activity_protocol": 1,
@@ -648,6 +650,7 @@ def enqueue(
             "command": command,
         }
         if silent_continue:
+            payload["personal_mcp_tools"] = previous.get("personal_mcp_tools", [])
             # Values come from the owned persisted task, never this request's
             # draft. Execution still rechecks access to selected knowledge.
             for key in (
@@ -655,6 +658,7 @@ def enqueue(
                 "resource_mentions",
                 "mentioned_resources",
                 "mention_prompt",
+                "personal_mcp_tools",
                 "sandbox_paths",
                 "image_files",
                 "queue_files",
@@ -674,6 +678,9 @@ def enqueue(
             event_log="[]",
         )
         session.add(run)
+        if defer and control is not None:
+            payload["queued_control"] = control
+            run.payload = json.dumps(payload)
         if not defer:
             from services.workbench.control import admit_run
 
@@ -715,12 +722,15 @@ def _prepare_message(tenant_id, account_id, chat_id, base, payload: dict[str, An
     from services.workbench.mentions import ResourceMentions
 
     refs = ResourceMentions.model_validate(payload.get("resource_mentions") or {})
+    from services.workbench.personal_mcp import catalog as personal_mcp_catalog
+
+    personal_mcp = personal_mcp_catalog(tenant_id, account_id)
     personal_skills = []
     if any(name.startswith("personal:") for name in refs.skills):
         from services.workbench.resources import personal_skill_catalog
 
         personal_skills = personal_skill_catalog(tenant_id, account_id)
-    mention_data = resolve_mentions(base["soul"], refs, personal_skills=personal_skills)
+    mention_data = resolve_mentions(base["soul"], refs, personal_skills=personal_skills, personal_mcp=personal_mcp)
     mentioned_tools = mention_data["resource_mentions"]["tools"]
     mentioned_skills = mention_data["resource_mentions"]["skills"]
     provider_names, skill_names = {}, {}
@@ -741,10 +751,11 @@ def _prepare_message(tenant_id, account_id, chat_id, base, payload: dict[str, An
             provider_names=provider_names,
             skill_names=skill_names,
             personal_skills=personal_skills,
+            personal_mcp=personal_mcp,
         )
     selected.knowledge = list(dict.fromkeys([*selected.knowledge, *mention_data["resource_mentions"]["knowledge"]]))
     effective = compile_config(tenant_id, base, selected)
-    payload = {**payload, **mention_data}
+    payload = {**payload, **mention_data, "personal_mcp_tools": personal_mcp}
     if payload.get("files"):
         from services.workbench.files import validate_attachments
 
@@ -911,7 +922,9 @@ def resume(tenant_id, account_id, run_id, values, action, request_id=None, *, cu
         if pending.get("tool_name") == "exit_plan_mode":
             from services.workbench.control import review_answer
 
-            review_answer(session, chat, run, action)
+            if action == "approve" and any(value.strip() for value in values.values()):
+                raise Conflict("请先提交修改意见，待方案更新后再批准执行")
+            review_answer(session, chat, run, action, pending)
         payload["continuation"] = {"calls": {pending["tool_call_id"]: result.model_dump(mode="json")}}
         remember(run, payload, pending, result.model_dump(mode="json"))
         payload["submitted_input"] = answer

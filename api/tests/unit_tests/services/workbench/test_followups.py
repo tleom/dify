@@ -147,6 +147,9 @@ def queue_fixture(
     )
     monkeypatch.setattr(service, "read_chat", lambda *_: {"version": 1, "selection": selection})
     monkeypatch.setattr(service, "compile_config", lambda *_: {"model": "frozen-model"})
+    from services.workbench import personal_mcp
+
+    monkeypatch.setattr(personal_mcp, "catalog", lambda *_: [])
     published: list[str] = []
     monkeypatch.setattr(scheduler, "publish", lambda *args: published.append(args[-1]))
 

@@ -194,11 +194,14 @@ class DifyKnowledgeBaseLayer(
                 name=_KNOWLEDGE_BASE_TOOL_NAME,
                 description=_tool_description(generated_sets),
                 prepare=prepare_tool_definition,
+                metadata={"workbench_plan": "read"},
             )
         ]
         if self.config.workbench_run_id:
             tools.extend(self._document_tools(client, caller, set_by_name))
-            tools.append(Tool(self._read_search_results, name="knowledge_base_read_results"))
+            tools.append(
+                Tool(self._read_search_results, name="knowledge_base_read_results", metadata={"workbench_plan": "read"})
+            )
         return tools
 
     def _document_tools(
@@ -247,7 +250,10 @@ class DifyKnowledgeBaseLayer(
             """
             return await page(set_name, "read", document_id, cursor)
 
-        return [Tool(knowledge_base_list_documents), Tool(knowledge_base_read_document)]
+        return [
+            Tool(knowledge_base_list_documents, metadata={"workbench_plan": "read"}),
+            Tool(knowledge_base_read_document, metadata={"workbench_plan": "read"}),
+        ]
 
     def _record_attempt(self, set_id: str) -> None:
         if set_id not in self.runtime_state.attempted_set_ids:

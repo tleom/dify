@@ -298,7 +298,11 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
             self.runtime_state.presented_paths.update(confirmed)
             return {"status": "presented", "files": list(confirmed.values())}
 
-        return [Tool(workbench_files), Tool(open_file_preview, sequential=True), Tool(present_files, sequential=True)]
+        return [
+            Tool(workbench_files, metadata={"workbench_plan": "read"}),
+            Tool(open_file_preview, sequential=True, metadata={"workbench_plan": "read"}),
+            Tool(present_files, sequential=True, metadata={"workbench_plan": "read"}),
+        ]
 
 
 def _relative_path(path: str) -> str:
