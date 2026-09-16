@@ -14,6 +14,7 @@ from typing import Any, cast
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.messages import (
+    FileUrl,
     ModelMessage,
     RetryPromptPart,
     SystemPromptPart,
@@ -97,7 +98,7 @@ def _source_records(messages: list[ModelMessage], *, skip_summary: bool) -> list
                         else:
                             # Binary media stays in the native transcript. Preserve
                             # external references without expanding inline base64.
-                            url = getattr(item, "url", None)
+                            url = item.url if isinstance(item, FileUrl) else None
                             reference = (
                                 url if isinstance(url, str) and not url.startswith("data:") else "original transcript"
                             )

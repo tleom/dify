@@ -6,6 +6,7 @@ import json
 import httpx
 import pytest
 from pydantic_ai import Tool
+from pydantic_ai.messages import RetryPromptPart, ToolReturnPart
 
 from dify_agent.protocol import DeferredToolResultsPayload, RunLayerSpec, RunSucceededEvent
 from dify_agent.protocol.workbench_control import GoalState, TodoWrite, WorkbenchControlState
@@ -88,7 +89,7 @@ def test_business_work_waits_for_an_initial_and_periodic_truthful_task_checkpoin
         calls += 1
         for message in messages:
             for part in message.parts:
-                if "尚未执行" in str(getattr(part, "content", "")):
+                if isinstance(part, (RetryPromptPart, ToolReturnPart)) and "尚未执行" in str(part.content):
                     rejected_calls.add(part.tool_call_id)
         if calls in checkpoints:
             assert "TASK CHECKPOINT:" in info.instructions

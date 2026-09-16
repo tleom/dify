@@ -41,7 +41,12 @@ def test_workbench_summary_reads_old_tool_evidence_beyond_the_first_500_characte
     observed = []
 
     def respond(messages, _info):
-        text = "\n".join(str(getattr(part, "content", "")) for msg in messages for part in msg.parts)
+        text = "\n".join(
+            str(part.content)
+            for msg in messages
+            for part in msg.parts
+            if isinstance(part, (SystemPromptPart, UserPromptPart, ToolReturnPart, TextPart))
+        )
         observed.append(text)
         return ModelResponse(parts=[TextPart(evidence if evidence in text else "Evidence absent")])
 
