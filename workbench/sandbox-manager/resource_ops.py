@@ -154,22 +154,23 @@ def personal(payload, root="/workspace"):
                 return {"conflict": True}
             atomic_write(rootfd, "memory.md", text)
             return {"content": payload["content"], "version": version(text)}
-        try:
-            raw_settings = read_file(rootfd, SETTINGS)
-            settings = json.loads(raw_settings or b"{}")
-        except (ValueError, OSError) as error:
-            if operation != "list":
-                raise
-            warnings.append("技能开关文件无效，个人技能暂时停用：" + str(error))
-            settings = {}
-            invalid_settings = True
-        else:
-            invalid_settings = not isinstance(settings, dict)
-        if not isinstance(settings, dict):
-            if operation != "list":
-                raise ValueError("个人技能开关文件格式无效")
-            settings = {}
-            warnings.append("技能开关文件无效，个人技能暂时停用")
+        if operation in {"list", "skill_toggle"}:
+            try:
+                raw_settings = read_file(rootfd, SETTINGS)
+                settings = json.loads(raw_settings or b"{}")
+            except (ValueError, OSError) as error:
+                if operation != "list":
+                    raise
+                warnings.append("技能开关文件无效，个人技能暂时停用：" + str(error))
+                settings = {}
+                invalid_settings = True
+            else:
+                invalid_settings = not isinstance(settings, dict)
+            if not isinstance(settings, dict):
+                if operation != "list":
+                    raise ValueError("个人技能开关文件格式无效")
+                settings = {}
+                warnings.append("技能开关文件无效，个人技能暂时停用")
         try:
             pins = json.loads(read_file(rootfd, PINS) or b"{}")
             if not isinstance(pins, dict):

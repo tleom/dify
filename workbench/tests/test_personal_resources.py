@@ -167,6 +167,41 @@ def test_uninstall_requires_version_and_moves_the_whole_package_to_backup(resour
 
 
 @pytest.mark.parametrize("operation", ["skill_pin", "skill_update", "skill_uninstall"])
+@pytest.mark.parametrize("settings_state", ["malformed", "wrong_type", "symlink"])
+def test_skill_mutations_do_not_depend_on_toggle_settings(resources, tmp_path, operation, settings_state):
+    first = resources.personal({"operation": "skill_import", "name": "report", **package()}, str(tmp_path))
+    settings = tmp_path / resources.SETTINGS
+    if settings_state == "symlink":
+        target = tmp_path / "unrelated.json"
+        target.write_text('{"report": true}')
+        settings.symlink_to(target)
+    else:
+        settings.write_text("{" if settings_state == "malformed" else "[]")
+    original_settings = settings.read_bytes()
+    listing = resources.personal({"operation": "list"}, str(tmp_path))
+    assert listing["skills"][0]["enabled"] is False
+    assert listing["warnings"]
+    with pytest.raises((ValueError, OSError)):
+        resources.personal({"operation": "skill_toggle", "name": "report", "enabled": True}, str(tmp_path))
+
+    result = resources.personal({"operation": operation, "name": "report", "pinned": True,
+                                 "version": first["version"], "content": "updated"}, str(tmp_path))
+    if operation == "skill_pin":
+        assert result == {"id": "report", "pinned": True}
+        assert resources.personal({"operation": "list"}, str(tmp_path))["skills"][0]["pinned"] is True
+    elif operation == "skill_update":
+        assert result["version"] != first["version"]
+        assert (tmp_path / "skills/report/SKILL.md").read_text() == "updated"
+        assert next((tmp_path / ".skill-backups").iterdir()).joinpath("SKILL.md").read_text().startswith("---")
+    else:
+        assert result == {"id": "report", "uninstalled": True}
+        assert not (tmp_path / "skills/report").exists()
+        assert next((tmp_path / ".skill-backups").iterdir()).joinpath("SKILL.md").read_text().startswith("---")
+    assert settings.read_bytes() == original_settings
+    assert settings.is_symlink() == (settings_state == "symlink")
+
+
+@pytest.mark.parametrize("operation", ["skill_pin", "skill_update", "skill_uninstall"])
 def test_new_skill_operations_reject_symlink_targets(resources, tmp_path, operation):
     (tmp_path / "skills").mkdir()
     outside = tmp_path / "outside"
