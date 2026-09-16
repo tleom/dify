@@ -22,6 +22,7 @@ MAX_PACKAGE = 20 * 1024 * 1024
 MAX_SKILL_TEXT = 64 * 1024
 MAX_FILES = 200
 SETTINGS = ".skills-settings.json"
+PINS = ".skills-pins.json"
 
 
 def safe_name(name):
@@ -170,6 +171,15 @@ def personal(payload, root="/workspace"):
             settings = {}
             warnings.append("技能开关文件无效，个人技能暂时停用")
         try:
+            pins = json.loads(read_file(rootfd, PINS) or b"{}")
+            if not isinstance(pins, dict):
+                raise ValueError("置顶设置格式无效")
+        except (ValueError, OSError) as error:
+            if operation == "skill_pin":
+                raise
+            pins = {}
+            warnings.append("技能置顶设置无法读取：" + str(error))
+        try:
             skillsfd = directory(rootfd, "skills")
         except OSError as error:
             if operation != "list":
@@ -190,6 +200,7 @@ def personal(payload, root="/workspace"):
                         skills.append({
                             "id": name, "content": source.decode("utf-8-sig"),
                             "enabled": not invalid_settings and settings.get(name, True) is not False,
+                            "pinned": pins.get(name) is True,
                             "path": "/workspace/skills/" + name, "version": tree_version(fd),
                         })
                     except (ValueError, OSError) as error:
@@ -198,6 +209,48 @@ def personal(payload, root="/workspace"):
                         os.close(fd)
                 return {"memory": {"content": memory_text, "version": version(memory)}, "skills": skills, "warnings": warnings}
             name = safe_name(payload["name"])
+            if operation == "skill_pin":
+                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=skillsfd)
+                os.close(fd)
+                if not isinstance(payload.get("pinned"), bool):
+                    raise ValueError("技能置顶值无效")
+                pins[name] = payload["pinned"]
+                atomic_write(rootfd, PINS, json.dumps(pins).encode())
+                return {"id": name, "pinned": pins[name]}
+            if operation in {"skill_update", "skill_uninstall"}:
+                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=skillsfd)
+                try:
+                    if not payload.get("version") or payload["version"] != tree_version(fd):
+                        return {"conflict": True}
+                    text = None
+                    if operation == "skill_update":
+                        if not isinstance(payload.get("content"), str):
+                            raise ValueError("缺少技能内容")
+                        text = payload["content"].encode("utf-8")
+                        if len(text) > MAX_SKILL_TEXT:
+                            raise ValueError("SKILL.md 不能超过 64 KiB")
+                    backups = directory(rootfd, ".skill-backups")
+                    backup_name = name + "-" + uuid.uuid4().hex
+                    try:
+                        if operation == "skill_uninstall":
+                            # Keep the complete package recoverable outside the active catalog.
+                            os.rename(name, backup_name, src_dir_fd=skillsfd, dst_dir_fd=backups)
+                            os.fsync(skillsfd)
+                            os.fsync(backups)
+                            return {"id": name, "uninstalled": True}
+                        backup = directory(backups, backup_name)
+                        try:
+                            previous = read_file(fd, "SKILL.md")
+                            if previous is not None:
+                                atomic_write(backup, "SKILL.md", previous)
+                        finally:
+                            os.close(backup)
+                        atomic_write(fd, "SKILL.md", text)
+                        return {"id": name, "version": tree_version(fd)}
+                    finally:
+                        os.close(backups)
+                finally:
+                    os.close(fd)
             if operation == "skill_toggle":
                 fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=skillsfd)
                 os.close(fd)

@@ -129,3 +129,50 @@ def test_global_package_is_read_only_for_the_sandbox_user(resources, tmp_path):
         check = subprocess.run([sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('bad')", str(skill)], preexec_fn=become_user, capture_output=True)
         assert check.returncode != 0 and b"PermissionError" in check.stderr
     assert skill.read_text().startswith("---")
+
+
+def test_pin_is_persistent_and_isolated_without_changing_enable_state(resources, tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    for root in (a, b):
+        resources.personal({"operation": "skill_import", "name": "report", **package()}, str(root))
+    resources.personal({"operation": "skill_toggle", "name": "report", "enabled": False}, str(a))
+    resources.personal({"operation": "skill_pin", "name": "report", "pinned": True}, str(a))
+    first = resources.personal({"operation": "list"}, str(a))["skills"][0]
+    other = resources.personal({"operation": "list"}, str(b))["skills"][0]
+    assert first["pinned"] is True and first["enabled"] is False
+    assert other["pinned"] is False and other["enabled"] is True
+
+
+def test_edit_preserves_assets_and_keeps_source_backup_with_version_checks(resources, tmp_path):
+    payload = package()
+    payload["files"].append({"path": "scripts/helper.py", "data": base64.b64encode(b"original asset").decode()})
+    first = resources.personal({"operation": "skill_import", "name": "report", **payload}, str(tmp_path))
+    result = resources.personal({"operation": "skill_update", "name": "report", "version": first["version"], "content": "updated"}, str(tmp_path))
+    assert result["version"] != first["version"]
+    assert (tmp_path / "skills/report/SKILL.md").read_text() == "updated"
+    assert (tmp_path / "skills/report/scripts/helper.py").read_text() == "original asset"
+    assert next((tmp_path / ".skill-backups").iterdir()).joinpath("SKILL.md").read_text().startswith("---")
+    assert resources.personal({"operation": "skill_update", "name": "report", "version": first["version"], "content": "stale"}, str(tmp_path)) == {"conflict": True}
+    assert (tmp_path / "skills/report/SKILL.md").read_text() == "updated"
+
+
+def test_uninstall_requires_version_and_moves_the_whole_package_to_backup(resources, tmp_path):
+    first = resources.personal({"operation": "skill_import", "name": "report", **package()}, str(tmp_path))
+    assert resources.personal({"operation": "skill_uninstall", "name": "report", "version": "stale"}, str(tmp_path)) == {"conflict": True}
+    result = resources.personal({"operation": "skill_uninstall", "name": "report", "version": first["version"]}, str(tmp_path))
+    assert result == {"id": "report", "uninstalled": True}
+    assert resources.personal({"operation": "list"}, str(tmp_path))["skills"] == []
+    assert next((tmp_path / ".skill-backups").iterdir()).joinpath("SKILL.md").read_text().startswith("---")
+
+
+@pytest.mark.parametrize("operation", ["skill_pin", "skill_update", "skill_uninstall"])
+def test_new_skill_operations_reject_symlink_targets(resources, tmp_path, operation):
+    (tmp_path / "skills").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("untouched")
+    (tmp_path / "skills/report").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError):
+        resources.personal({"operation": operation, "name": "report", "pinned": True, "version": "stale", "content": "bad"}, str(tmp_path))
+    assert (outside / "SKILL.md").read_text() == "untouched"

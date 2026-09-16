@@ -40,6 +40,7 @@ class ResourceMutation(BaseModel):
     name: str | None = Field(default=None, max_length=64)
     content: str | None = Field(default=None, max_length=65536)
     enabled: bool | None = None
+    pinned: bool | None = None
     version: str | None = Field(default=None, max_length=128)
     archive: str | None = Field(default=None, max_length=28_000_000)
     files: list[ResourceFile] = Field(default_factory=list, max_length=200)
@@ -140,6 +141,19 @@ def mutate(tenant_id, account_id, payload):
     elif payload["operation"] == "skill_toggle":
         if not payload.get("name") or not isinstance(payload.get("enabled"), bool):
             raise BadRequest("缺少技能名称或开关状态")
+    elif payload["operation"] == "skill_pin":
+        if not payload.get("name") or not isinstance(payload.get("pinned"), bool):
+            raise BadRequest("缺少技能名称或置顶状态")
+    elif payload["operation"] in {"skill_update", "skill_uninstall"}:
+        if not payload.get("name") or not payload.get("version"):
+            raise BadRequest("缺少技能名称或版本，请刷新后重试")
+        if payload["operation"] == "skill_update":
+            try:
+                metadata = skill_metadata(payload.get("content"), personal=True)
+                if metadata["name"] != payload["name"]:
+                    raise ValueError("编辑时不能修改技能 name，请保留原名称")
+            except (ValueError, yaml.YAMLError) as error:
+                raise BadRequest(str(error)) from error
     else:
         raise BadRequest("不支持的个人资源操作")
     with redis_client.lock(f"workbench:resources:{identifier}", timeout=90, blocking_timeout=30):
