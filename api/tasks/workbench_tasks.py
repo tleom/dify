@@ -595,32 +595,35 @@ def update_environment(tenant_id, account_id):
                 result = {"status": "failed", "error": "计划尚未批准，未更新共享运行环境，请先提交完整方案供用户审阅"}
             else:
                 workspace = ensure_workspace(tenant_id, account_id)
-            if previous_status == "environment_installing":
-                result = manager(workspace, "environment-status", {"request_id": request_id})
-                if result["status"] == "installing":
-                    return
-            elif result is None:
-                # Startup can wait. Recheck the ticket and the user's latest
-                # mode before dispatch; never hold a DB write lock during IO.
-                with session_factory.get_session_maker().begin() as session:
-                    chat, run = locked_run(session, tenant_id, account_id, run_id)
-                    current_payload = json.loads(run.payload)
-                    if run.status != "environment_installing" or current_payload.get("attempt", 0) != payload.get(
-                        "attempt", 0
-                    ):
-                        return
-                    if control.load(session, chat).plan.active:
-                        result = {
-                            "status": "failed",
-                            "error": "计划尚未批准，未更新共享运行环境，请先提交完整方案供用户审阅",
-                        }
-                if result is None:
-                    event(run_id, {"event": "workbench_status", "status": "environment_installing"})
-                    result = manager(
-                        workspace, "environment", {**payload["pending"]["args"], "request_id": request_id}, timeout=950
-                    )
+                if previous_status == "environment_installing":
+                    result = manager(workspace, "environment-status", {"request_id": request_id})
                     if result["status"] == "installing":
                         return
+                else:
+                    # Startup can wait. Recheck the ticket and the user's latest
+                    # mode before dispatch; never hold a DB write lock during IO.
+                    with session_factory.get_session_maker().begin() as session:
+                        chat, run = locked_run(session, tenant_id, account_id, run_id)
+                        current_payload = json.loads(run.payload)
+                        if run.status != "environment_installing" or current_payload.get("attempt", 0) != payload.get(
+                            "attempt", 0
+                        ):
+                            return
+                        if control.load(session, chat).plan.active:
+                            result = {
+                                "status": "failed",
+                                "error": "计划尚未批准，未更新共享运行环境，请先提交完整方案供用户审阅",
+                            }
+                    if result is None:
+                        event(run_id, {"event": "workbench_status", "status": "environment_installing"})
+                        result = manager(
+                            workspace,
+                            "environment",
+                            {**payload["pending"]["args"], "request_id": request_id},
+                            timeout=950,
+                        )
+                        if result["status"] == "installing":
+                            return
         except Exception:
             logger.exception("Workbench environment update failed")
             # A lost response is not evidence that the installer stopped. Reconcile by request ID.
