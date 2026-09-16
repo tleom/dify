@@ -9,7 +9,7 @@ from urllib.parse import quote
 from flask import Response, request, stream_with_context
 from flask_restx import Resource
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
-from werkzeug.exceptions import Conflict, NotFound
+from werkzeug.exceptions import BadRequest, Conflict, NotFound
 
 from controllers.common.schema import query_params_from_model, register_response_schema_models, register_schema_models
 from controllers.console import console_ns
@@ -343,6 +343,34 @@ class WorkbenchFileLinksQuery(BaseModel):
     path: str = Field(min_length=1, max_length=1024)
 
 
+class WorkbenchDocumentPreviewPayload(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    data: str = Field(min_length=1, max_length=28_000_000)
+
+
+class WorkbenchSharePayload(WorkbenchFileLinksQuery):
+    expires_days: Literal[1, 7, 30] | None = None
+
+
+class WorkbenchShareResponse(ResponseModel):
+    url: str
+    expires_at: int | None
+    active: bool
+
+
+class WorkbenchShareEnvelopeResponse(ResponseModel):
+    data: WorkbenchShareResponse | None
+
+
+class WorkbenchTextResponse(ResponseModel):
+    text: str
+    version: str
+
+
+class WorkbenchTextEnvelopeResponse(ResponseModel):
+    data: WorkbenchTextResponse
+
+
 class WorkbenchEventsQuery(BaseModel):
     cursor: str = Field(default="0-0", pattern=r"^\d+-\d+$")
 
@@ -356,6 +384,8 @@ register_schema_models(
     WorkbenchFollowupsQuery,
     WorkbenchFilePayload,
     WorkbenchFileLinksQuery,
+    WorkbenchDocumentPreviewPayload,
+    WorkbenchSharePayload,
     WorkbenchResumePayload,
     WorkbenchInputInteractionPayload,
     WorkbenchFeedbackPayload,
@@ -377,6 +407,8 @@ register_response_schema_models(
     WorkbenchParameterRulesResponse,
     WorkbenchChatSummaryEnvelopeResponse,
     WorkbenchTranscriptEnvelopeResponse,
+    WorkbenchShareEnvelopeResponse,
+    WorkbenchTextEnvelopeResponse,
 )
 
 
@@ -565,6 +597,83 @@ class FileLinks(WorkbenchResource):
 
         query = WorkbenchFileLinksQuery.model_validate(request.args.to_dict())
         return dump_response(WorkbenchFileLinksResponse, {"data": lookup(*self.owner(), query.path)})
+
+
+@console_ns.route("/workbench/files/preview")
+class DocumentPreview(WorkbenchResource):
+    @console_ns.doc(params=query_params_from_model(WorkbenchFileLinksQuery))
+    @console_ns.response(200, "Paginated PDF preview of an owned Word document")
+    def get(self):
+        from services.workbench.office_preview import preview
+
+        path = WorkbenchFileLinksQuery.model_validate(request.args.to_dict()).path
+        return Response(
+            preview(*self.owner(), path=path),
+            mimetype="application/pdf",
+            headers={"Cache-Control": "private, no-store"},
+        )
+
+    @console_ns.expect(console_ns.models[WorkbenchDocumentPreviewPayload.__name__])
+    @console_ns.response(200, "Paginated PDF preview of a local Word attachment")
+    def post(self):
+        from services.workbench.office_preview import preview
+
+        payload = WorkbenchDocumentPreviewPayload.model_validate(console_ns.payload or {})
+        return Response(
+            preview(*self.owner(), name=payload.name, data=payload.data),
+            mimetype="application/pdf",
+            headers={"Cache-Control": "private, no-store"},
+        )
+
+
+@console_ns.route("/workbench/files/text")
+class FileText(WorkbenchResource):
+    @console_ns.doc(params=query_params_from_model(WorkbenchFileLinksQuery))
+    @console_ns.response(
+        200, "UTF-8 text and matching file version", console_ns.models[WorkbenchTextEnvelopeResponse.__name__]
+    )
+    def get(self):
+        from services.workbench.files import operate
+
+        path = WorkbenchFileLinksQuery.model_validate(request.args.to_dict()).path
+        result = operate(*self.owner(), "get", path)
+        content = base64.b64decode(result["data"], validate=True)
+        if result.get("kind") == "directory" or len(content) > 2 * 1024 * 1024 or b"\0" in content:
+            raise BadRequest("在线编辑支持 2 MiB 以内的 UTF-8 文本文件")
+        try:
+            value = content.decode("utf-8")
+        except UnicodeError as error:
+            raise BadRequest("文件不是 UTF-8 文本，请下载后编辑") from error
+        return dump_response(WorkbenchTextEnvelopeResponse, {"data": {"text": value, "version": result["version"]}})
+
+
+@console_ns.route("/workbench/files/shares")
+class FileShares(WorkbenchResource):
+    @console_ns.doc(params=query_params_from_model(WorkbenchFileLinksQuery))
+    @console_ns.response(200, "Current owned file share", console_ns.models[WorkbenchShareEnvelopeResponse.__name__])
+    def get(self):
+        from services.workbench.file_shares import get_share
+
+        path = WorkbenchFileLinksQuery.model_validate(request.args.to_dict()).path
+        return dump_response(WorkbenchShareEnvelopeResponse, {"data": get_share(*self.owner(), path)})
+
+    @console_ns.expect(console_ns.models[WorkbenchSharePayload.__name__])
+    @console_ns.response(200, "Created revocable share", console_ns.models[WorkbenchShareEnvelopeResponse.__name__])
+    def post(self):
+        from services.workbench.file_shares import create_share
+
+        payload = WorkbenchSharePayload.model_validate(console_ns.payload or {})
+        return dump_response(
+            WorkbenchShareEnvelopeResponse, {"data": create_share(*self.owner(), payload.path, payload.expires_days)}
+        )
+
+    @console_ns.expect(console_ns.models[WorkbenchFileLinksQuery.__name__])
+    @console_ns.response(200, "Share revoked", console_ns.models[WorkbenchDeletedEnvelopeResponse.__name__])
+    def delete(self):
+        from services.workbench.file_shares import revoke_share
+
+        payload = WorkbenchFileLinksQuery.model_validate(console_ns.payload or {})
+        return dump_response(WorkbenchDeletedEnvelopeResponse, {"data": revoke_share(*self.owner(), payload.path)})
 
 
 @console_ns.route("/workbench/files/download")

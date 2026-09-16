@@ -85,7 +85,7 @@ def history(run, events=None):
         from services.workbench.event_log import history_snapshot, uses_journal
 
         events = history_snapshot(run)[0] if uses_journal(run, payload) else json.loads(run.event_log or "[]")
-    calls = {}
+    calls: dict[object, dict] = {}
     for event in events:
         data = _object(event.get("data"))
         if event.get("event") == "workbench_activity" and data.get("tool_name") == "ask_human":

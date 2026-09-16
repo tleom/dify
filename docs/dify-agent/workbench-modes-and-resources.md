@@ -50,7 +50,7 @@ description: 说明技能完成什么工作，以及什么时候使用。
 
 文件操作使用工作空间目录描述符定位，并拒绝符号链接、路径穿越和越界归档。另一账号的会话、模式状态、记忆、技能和文件不能通过传入账号或会话 ID 访问。文件交付链接仍由服务端签发，执行层按完整工作空间路径核验，不按文件名猜测。
 
-生成或修改文件后，Agent 默认通过 `open_file_preview` 打开侧栏主要产物。Word、Excel、PowerPoint 采用按需加载的浏览器预览组件；工具接受、浏览器渲染与下载是三个独立状态。支持格式、实现来源和供管理员手动采用的提示词见[文件侧栏预览](../../workbench/office-preview.md)。
+生成或修改文件后，Agent 默认通过 `open_file_preview` 打开侧栏主要产物。Word 由服务端在独立离线容器中排版为 PDF，Excel、PowerPoint 使用按需加载的浏览器组件。文本可在侧栏编辑并按文件版本保存；文件可生成长期有效或有期限的可撤销短链接，HTML 直接作为网页打开。工具接受、浏览器渲染与下载是三个独立状态。支持格式、实现来源和供管理员手动采用的提示词见[文件侧栏预览](../../workbench/office-preview.md)。
 
 ## 源码研究与实现对应
 
@@ -80,6 +80,8 @@ description: 说明技能完成什么工作，以及什么时候使用。
 ## 升级与回滚
 
 迁移 `wb20260916control` 在 `wb20260914events` 之后新增 `workbench_controls` 和 `workbench_commands`。先备份数据库，再执行迁移并更新 API、worker、控制调度、Agent backend 和 sandbox manager，最后更新 GXZS 网关及前端。
+
+文件分享迁移 `wb20260916share` 在其后新增 `workbench_file_shares`，记录链接所属账号、文件路径、有效期及撤销状态。Word 排版需要同步更新 sandbox manager；GXZS 网关需放行 `files/preview`、`files/text`、`files/shares` 的指定请求方法，再更新前端。
 
 本次接口是增量扩展。回滚应用镜像时保留新增表和个人文件，旧版本可继续读取原有会话。旧 Agent 会重新使用较窄的会话写入范围；如需继续使用新个人资源功能，应重新部署匹配版本。
 

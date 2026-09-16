@@ -6,12 +6,14 @@
 
 | 文件 | 当前实现 | 说明 |
 | --- | --- | --- |
-| Word：DOCX、DOCM、DOTX、DOTM | `docx-preview` 0.4.0 | 浏览器渲染，支持表格、图片、页眉页脚、显式分页；隔离文档样式，禁止脚本和外部资源加载 |
+| Word：DOC、DOCX、DOCM、DOTX、DOTM、ODT、RTF | 服务端 LibreOffice 排版，前端 PDF.js 6.3.289 分页显示 | 在无网络的临时容器中转换；连续页面、页码、翻页和缩放，支持选择文字；下载仍为原文件 |
 | Excel：XLSX、XLS、XLSB、XLSM、XLTX、XLTM | `@arcships/vue-xlsx` 0.6.0 | 只读模式、独立 Worker/WASM 解析、多工作表、公式、合并单元格和图表 |
 | PowerPoint：PPTX、PPTM、PPSX、PPSM、POTX、POTM | `@arcships/vue-pptx` 0.6.0 | 连续浏览、翻页和缩放；禁止外部媒体，默认不自动播放 |
 | PDF、图片、文本、Markdown、HTML、音视频 | 原有预览体系 | 共用文件标签、下载、重新加载、宽度调整和全屏 |
 
-Word 的复杂自动分页、字体替代、Excel 高级图表与公式、PowerPoint 特殊效果可能与桌面 Office 有差异。宏不会执行。旧版二进制 DOC、PPT 仍需要下载，或先在文件空间转换为 DOCX、PPTX、PDF；不能将其标为已支持在线渲染。
+Word 使用服务器安装的字体进行自动分页。明确设置固定行距的 OOXML 段落在转换副本中关闭网格吸附，保留 Word 的固定行距语义；原文件不作修改。缺少字体、复杂域、浮动对象等仍可能与桌面 Word 有细微差异。Excel 高级图表与公式、PowerPoint 特殊效果也可能存在兼容性差异。宏不会执行。旧版二进制 PPT 需要下载，或先转换为 PPTX、PDF。
+
+Word 预览限制为单个文档 20 MiB。转换容器以普通用户运行，使用只读镜像、无网络和独立临时目录，不挂载个人文件空间，也不注入业务凭据。转换超时会返回提示。相同账号、相同文件内容的小型 PDF 结果缓存 10 分钟；跨账号不共享缓存。
 
 研究依据：
 
@@ -19,7 +21,16 @@ Word 的复杂自动分页、字体替代、Excel 高级图表与公式、PowerP
 - 本机 Codex `26.901.6511.0` 的安装包资源包含按需加载的 `docx-preview` 及专用表格、演示预览模块。这里只核对组件结构，没有复制产品内部实现；其专用表格和演示模块不能当作公开可复用的库。
 - [Suna Word 预览](https://github.com/kortix-ai/suna/blob/main/apps/web/src/features/file-renderers/docx/docx-viewer.tsx)、[Excel 预览](https://github.com/kortix-ai/suna/blob/main/apps/web/src/features/file-renderers/xlsx/xlsx-viewer.tsx)：使用浏览器专用渲染器，表格采用 WASM/Worker。
 - [DeepSeek Harness 文件预览](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-sidebar-documentpreview/README.md)：采用可扩展预览器和标签页，所核对的版本没有原生 Office 渲染器。
-- [docx-preview](https://github.com/VolodymyrBaydalka/docxjs)、[Agentic Office UI](https://github.com/arcships/agentic-office-ui)：本实现采用的开源组件，许可证均为 Apache-2.0。依赖版本在前端锁文件中固定。
+- [LibreOffice](https://www.libreoffice.org/)、[Agentic Office UI](https://github.com/arcships/agentic-office-ui)：分别用于 Word 排版、表格及演示文稿预览。Office 前端组件的依赖版本在锁文件中固定。
+- [OOXML 固定行距与文档网格规则](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.docgrid.linepitch?view=openxml-3.0.1)：固定行距优先于文档行网格。
+
+## 文件刷新、编辑和分享
+
+Agent 创建、修改文件，任务结束以及用户上传或保存文件后，前端刷新当前文件夹和仍可见的展开目录，保持当前位置与展开状态。拖动侧栏宽度后，指针抬起、取消或窗口失去焦点都会结束拖动，恢复文件预览交互。
+
+UTF-8 文本文件（例如 PY、MD、TXT、HTML）可在侧栏预览方式菜单中选择“编辑”，直接修改文本，通过“保存”或 `Ctrl/Cmd+S` 提交。自动换行开关同时作用于编辑区；切换代码或网页视图时保留草稿。单个文件限制为 2 MiB，保留原有 CRLF/LF 换行。保存使用读取时的文件版本；Agent 或其他页面已修改文件时，返回冲突并保留草稿。关闭标签或离开页面前提示处理未保存的修改。文件预览标签支持拖动排序。
+
+“分享文件”生成单文件短链接 `/files/s/<随机标识>`，默认长期有效，也可选择 1、7、30 天。拥有链接的人可直接打开，HTML 直接作为网页显示。链接绑定原账号的文件路径，文件保存后读取最新内容；撤销、到期、删除所属会话或停用所属文件空间后失效。重新生成链接会使旧链接失效。HTML 使用浏览器沙箱隔离，不继承文件服务的认证上下文。相对路径引用的其他文件不会自动公开，独立网页应内嵌所需资源或使用可访问的资源地址。
 
 ## Agent 工具契约
 

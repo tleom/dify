@@ -142,6 +142,26 @@ def operation(key, action, payload):
     if action == "touch":
         touch(key)
         return {"ok": True}
+    if action == "office-preview":
+        # No owner volumes, credentials, network or writable image are exposed.
+        preview_name = PREFIX + "-preview-" + uuid.uuid4().hex
+        with lock(key):
+            try:
+                script = Path(__file__).with_name("office_preview.py").read_text()
+                result = docker("run", "--rm", "--name", preview_name, "--network", "none",
+                                "--read-only", "--tmpfs", "/tmp:rw,nosuid,noexec,size=256m",
+                                "--user", "1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+                                "--memory", "1g", "--cpus", "1", "--pids-limit", "128", "-e", "HOME=/tmp",
+                                "--entrypoint", MANAGER_PYTHON[0], "-i", IMAGE, *MANAGER_PYTHON[1:], "-c", script,
+                                stdin=json.dumps(payload), timeout=55, check=False)
+                output = json.loads(result.stdout or "{}")
+                if result.returncode or not output.get("data"):
+                    raise ValueError(output.get("error", "文档排版失败"))
+                return output
+            except subprocess.TimeoutExpired as error:
+                raise ValueError("文档排版超时，请下载原文件查看") from error
+            finally:
+                docker("rm", "-f", preview_name, check=False)
     if action == "files":
         with lock(key):
             ensure(key)
