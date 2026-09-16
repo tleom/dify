@@ -25,13 +25,18 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Test workspace files and container migration
+      - name: Test workspace files, container migration and personal MCP
         run: >-
-          uv run --no-project --with pytest==9.0.2 python -m pytest
+          uv run --no-project --with pytest==9.0.2
+          --with-requirements workbench/sandbox-office/mcp-requirements.lock.txt
+          python -m pytest
           workbench/tests/test_file_ops.py
           workbench/tests/test_file_directories.py
           workbench/tests/test_manager_migration.py
-          workbench/tests/test_personal_resources.py -q
+          workbench/tests/test_personal_resources.py
+          workbench/tests/test_personal_mcp.py
+          workbench/tests/test_mcp_manager.py
+          workbench/tests/test_mcp_worker.py -q
 
   sandbox-runtime-unit:
     name: Sandbox Runtime Unit Tests

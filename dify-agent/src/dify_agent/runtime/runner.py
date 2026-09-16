@@ -66,6 +66,7 @@ from dify_agent.layers.dify_plugin.tools_layer import DifyPluginToolsLayer
 from dify_agent.layers.knowledge.client import DifyKnowledgeBaseClientError
 from dify_agent.layers.knowledge.layer import DifyKnowledgeBaseLayer
 from dify_agent.layers.workbench_files import WorkbenchFilesLayer
+from dify_agent.layers.workbench_mcp import WorkbenchMCPLayer
 from dify_agent.protocol.schemas import (
     DIFY_AGENT_MODEL_LAYER_ID,
     AgentRunUsage,
@@ -370,6 +371,9 @@ class AgentRunRunner:
                     await control_layer.request()
                     await control_layer.resource_request(initialize=True)
                 control_capability = WorkbenchControlCapability(control_layer) if control_layer else None
+                for slot in run.slots.values():
+                    if isinstance(slot.layer, WorkbenchMCPLayer):
+                        slot.layer.run_id = self.run_id
                 user_prompts = run.user_prompts
                 deferred_tool_results = _resolve_deferred_tool_results(self.request)
                 if deferred_tool_results is None and not has_non_blank_user_prompt(user_prompts):
@@ -402,8 +406,8 @@ class AgentRunRunner:
                 )
                 from dify_agent.layers.shell.argument_compatibility import ShellArgumentCompatibilityCapability
                 from dify_agent.layers.shell.layer import DifyShellLayer
-                from dify_agent.layers.workbench_files import WorkbenchFilesLayer
                 from dify_agent.layers.workbench_activity import result_metadata
+                from dify_agent.layers.workbench_files import WorkbenchFilesLayer
                 from dify_agent.runtime.workbench_files import WorkbenchFileChanges, WorkbenchFileDeliveryCapability
 
                 files_layer = next(
@@ -428,8 +432,8 @@ class AgentRunRunner:
                 shell_arguments = (
                     ShellArgumentCompatibilityCapability() if files_layer is not None or activity is not None else None
                 )
-                from dify_agent.runtime.workbench_tool_recovery import WorkbenchToolRecoveryCapability
                 from dify_agent.runtime.workbench_checkpoint import HistoryCheckpointSink, WorkbenchHistoryCheckpoint
+                from dify_agent.runtime.workbench_tool_recovery import WorkbenchToolRecoveryCapability
 
                 tool_recovery = (
                     WorkbenchToolRecoveryCapability()
@@ -791,7 +795,7 @@ async def _resolve_run_tools(
             )
         if isinstance(layer, DifyCoreToolsLayer):
             resolved_tools.extend(await layer.get_tools(http_client=dify_api_http_client))
-        if isinstance(layer, (DifyKnowledgeBaseLayer, WorkbenchFilesLayer)):
+        if isinstance(layer, (DifyKnowledgeBaseLayer, WorkbenchFilesLayer, WorkbenchMCPLayer)):
             resolved_tools.extend(await layer.get_tools(http_client=dify_api_http_client))
     _validate_unique_tool_names(resolved_tools)
     return resolved_tools
