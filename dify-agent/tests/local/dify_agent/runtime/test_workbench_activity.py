@@ -92,6 +92,39 @@ def _state(events):
     return WorkbenchActivityState.model_validate(layer.runtime_state)
 
 
+def test_applied_file_diff_metadata_reaches_ui_without_echoing_to_model(monkeypatch):
+    calls = 0
+    applied = [{"oldText": "header\nold\ntail\n", "newText": "header\nnew\ntail\n"}]
+
+    async def file_edit(path: str, old_text: str, new_text: str):
+        return ToolReturn(
+            return_value={"path": path, "operation": "edit", "bytes": 16}, metadata={"workbench_file_diffs": applied}
+        )
+
+    async def stream(messages, info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield {0: _call("file_edit", {"path": "note.txt", "old_text": "old", "new_text": "new"}, "edit")}
+        else:
+            part = next(
+                part
+                for message in messages
+                for part in message.parts
+                if isinstance(part, ToolReturnPart) and part.tool_name == "file_edit"
+            )
+            assert part.content == {"path": "note.txt", "operation": "edit", "bytes": 16}
+            assert part.metadata["workbench_file_diffs"] == applied
+            yield "已修改。"
+
+    _, _, execute = _setup(monkeypatch, stream, [Tool(file_edit)])
+    events = asyncio.run(execute())
+    returned = next(
+        item for item in _progress(events, "tool") if item.stage == "returned" and item.tool_name == "file_edit"
+    )
+    assert returned.output["diffs"] == applied
+
+
 def test_missing_title_is_requested_at_next_model_boundary_without_replaying_work(monkeypatch):
     calls = 0
     executed = []

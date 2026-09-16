@@ -222,6 +222,88 @@ def test_modifying_a_previewed_file_requires_a_new_delivery_request():
     assert layer.delivery_error("文件已生成。", final=True) is not None
 
 
+def test_presented_files_require_new_verification_after_modification_or_removal():
+    layer = WorkbenchFilesLayer(config=LayerConfig(), inner_api_url="", inner_api_key="")
+    path = "conversations/chat/report.pdf"
+    layer.record_changes([path])
+    layer.runtime_state.presented_paths.add(path)
+    assert layer.delivery_error("文件已生成。", final=True) is None
+    layer.record_changes(["conversations/chat/script.py"])
+    assert layer.delivery_error("文件已生成。", final=True) is None
+    layer.record_changes([path])
+    assert not layer.runtime_state.presented_paths
+    assert layer.delivery_error("文件已生成。", final=True) is not None
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_present_files_uses_owned_lookup_and_persists_only_verified_deliveries(monkeypatch, invalid):
+    calls = 0
+
+    async def stream(messages, info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield {
+                0: _call("present_files", {"files": [{"path": "报告.pdf", "description": "核验后的报告"}]}, "deliver")
+            }
+        else:
+            yield "文件交付受阻，查询失败。" if invalid else "文件已生成，请打开下方卡片。"
+
+    request, sink, _ = _setup(monkeypatch, stream)
+    add_files(request)
+    requested = []
+
+    def transport(incoming):
+        body = json.loads(incoming.content)
+        requested.append(body)
+        assert str(incoming.url).endswith("/agent/workbench/files")
+        assert body["account_id"] == "owner-1" and body["workbench_run_id"] == "turn-1"
+        return httpx.Response(
+            200,
+            json={
+                "cwd": "conversations/chat",
+                "entries": []
+                if invalid
+                else [
+                    {
+                        "path": "conversations/chat/报告.pdf",
+                        "name": "报告.pdf",
+                        "kind": "file",
+                        "size": 42,
+                        "preview_url": PREVIEW,
+                        "download_url": DOWNLOAD,
+                    }
+                ],
+            },
+        )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            await AgentRunRunner(
+                run_id="delivery",
+                request=request,
+                sink=sink,
+                plugin_daemon_http_client=client,
+                dify_api_http_client=client,
+            ).run()
+
+    asyncio.run(scenario())
+    events = sink.events["delivery"]
+    assert isinstance(events[-1], RunSucceededEvent), events[-1]
+    state = next(
+        layer.runtime_state for layer in events[-1].data.session_snapshot.layers if layer.name == "workbench_files"
+    )
+    assert state["presented_paths"] == ([] if invalid else ["conversations/chat/报告.pdf"])
+    returns = [
+        item for item in _progress(events, "tool") if item.stage != "started" and item.tool_name == "present_files"
+    ]
+    assert len(returns) == 1 and len(requested) == 1
+    if invalid:
+        assert returns[0].stage == "error" and "files" not in returns[0].output
+    else:
+        assert returns[0].output["files"][0]["description"] == "核验后的报告"
+
+
 def test_invented_split_stream_is_withheld_then_model_queries_and_corrects(monkeypatch):
     calls = 0
 
@@ -548,14 +630,10 @@ def test_runner_observes_binary_creation_and_editing_and_exports_real_events(
     observed = [
         item
         for item in _progress(events, "tool")
-        if item.stage == "returned"
-        and isinstance(item.output, dict)
-        and item.output.get("source") == "workspace_change"
+        if item.stage == "returned" and isinstance(item.output, dict) and item.output.get("source") == "workspace_image"
     ]
     expected = [
-        ("file_create", "conversations/chat/chart.png"),
-        ("file_create", "conversations/chat/报告.docx"),
-        ("file_edit", "conversations/chat/报告.docx"),
+        ("image_preview", "conversations/chat/chart.png"),
     ]
     assert [(item.tool_name, item.output["path"]) for item in observed] == (expected if activity_enabled else [])
     target = os.environ.get("WORKBENCH_EVENT_FIXTURE")

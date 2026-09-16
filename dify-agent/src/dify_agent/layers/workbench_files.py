@@ -1,6 +1,7 @@
 """Current-chat file discovery with server-issued preview and download URLs."""
 
 import re
+import json
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 from typing import ClassVar, Self
@@ -24,6 +25,12 @@ class WorkbenchFilesState(BaseModel):
     changed_paths: set[str] = Field(default_factory=set)
     path_protocol: int = 0
     opened_paths: set[str] = Field(default_factory=set)
+    presented_paths: set[str] = Field(default_factory=set)
+
+
+class PresentedFile(BaseModel):
+    path: str = Field(min_length=1, max_length=1024)
+    description: str = Field(default="", max_length=300)
 
 
 @dataclass
@@ -63,6 +70,7 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
         self.runtime_state.changed_paths.update(paths)
         self.runtime_state.changed_paths.difference_update(removed or [])
         self.runtime_state.opened_paths.difference_update([*paths, *(removed or [])])
+        self.runtime_state.presented_paths.difference_update([*paths, *(removed or [])])
         # Other conversations may write concurrently in this owner's workspace.
         # Only a changed file (or its containing directory archive) loses proof;
         # unrelated writes must not invalidate already verified delivery links.
@@ -130,10 +138,19 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
             for path, item in self._verified.items()
         )
         opened_changed = bool(self.runtime_state.changed_paths & self.runtime_state.opened_paths)
-        if final and self.runtime_state.changed_paths and not (opened_changed or supplied_changed or blocked):
-            return "请调用 open_file_preview 打开本次生成或修改的主要交付文件，然后说明结果；无需提供下载链接。"
-        if delivered and not (supplied or self.runtime_state.opened_paths or blocked):
-            return "交付前调用 open_file_preview 确认文件可见并打开侧栏预览；如查询失败，请明确说明交付受阻。"
+        presented_changed = bool(self.runtime_state.changed_paths & self.runtime_state.presented_paths)
+        if (
+            final
+            and self.runtime_state.changed_paths
+            and not (opened_changed or presented_changed or supplied_changed or blocked)
+        ):
+            return (
+                "请调用 present_files 交付本次生成或修改的主要文件，或用 open_file_preview 打开侧栏预览，然后说明结果。"
+            )
+        if delivered and not (
+            supplied or self.runtime_state.opened_paths or self.runtime_state.presented_paths or blocked
+        ):
+            return "交付前调用 present_files 或 open_file_preview 确认文件可见；如查询失败，请明确说明交付受阻。"
         return None
 
     @classmethod
@@ -144,7 +161,9 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
     def prefix_prompts(self) -> list[str]:
         return [
             "默认将生成文件保存到当前会话目录；用户明确指定时可访问个人 /workspace 下的其他目录。"
-            "open_file_preview(path) 会校验文件并请求前端在当前会话侧栏打开预览。新文件交付时调用该工具打开主要产物，"
+            "任务生成用户需要接收的文件后，调用 present_files(files=[{path, description}]) 交付全部主要产物，每次最多 8 个。"
+            "该工具校验真实文件，并在本轮回答底部显示可打开和下载的文件卡片；中间脚本和检查图片不作为最终交付。"
+            "需要立即展示单个文件时调用 open_file_preview(path)，它会校验文件并请求当前会话侧栏打开预览。"
             "随后简要说明结果，默认不附下载链接。工具 accepted 表示预览请求已发送，不代表前端渲染已完成。"
             "workbench_files 可用于查询文件目录；用户明确要求下载链接时可逐字使用它返回的 download_url。"
             "在对话中展示图片时使用 ![图片说明](preview_url)，其中 preview_url 必须逐字取自该文件查询结果。"
@@ -246,7 +265,40 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
                 )
                 return {"error": "文件预览请求失败，尚未确认文件可见，请重试或说明交付受阻"}
 
-        return [Tool(workbench_files), Tool(open_file_preview, sequential=True)]
+        async def present_files(ctx: RunContext[object], files: list[PresentedFile]) -> dict:
+            """Declare 1 to 8 existing regular files as this turn's final deliverables.
+
+            Call after generating the requested outputs, including files created
+            through shell/code execution. Each description is a short user-facing
+            summary. The UI opens the current source file, not a preserved copy.
+            """
+            if not 1 <= len(files) <= 8:
+                return {"error": "每次请交付 1 到 8 个文件"}
+            confirmed = {}
+            for file in files:
+                data = json.loads(await workbench_files(ctx, file.path))
+                target = self.canonical_path(file.path)
+                match = next(
+                    (
+                        entry
+                        for entry in data.get("entries", [])
+                        if isinstance(entry, dict)
+                        and entry.get("path") == target
+                        and entry.get("kind") == "file"
+                        and entry.get("downloadable") is not False
+                        and isinstance(entry.get("download_url"), str)
+                        and isinstance(entry.get("preview_url"), str)
+                    ),
+                    None,
+                )
+                if data.get("error") or match is None:
+                    self._lookup_failed = True
+                    return {"error": f"交付失败，未确认文件可用：{file.path}"}
+                confirmed[target] = {**match, "description": file.description.strip()}
+            self.runtime_state.presented_paths.update(confirmed)
+            return {"status": "presented", "files": list(confirmed.values())}
+
+        return [Tool(workbench_files), Tool(open_file_preview, sequential=True), Tool(present_files, sequential=True)]
 
 
 def _relative_path(path: str) -> str:

@@ -121,14 +121,18 @@ class WorkbenchFileChanges:
             for path in changed:
                 if path == explicit:
                     continue
+                # The inventory protects delivery freshness; it does not describe
+                # model-issued write/edit calls. Keep only the user-requested
+                # image preview entries for generated charts and rendered pages.
+                if not path.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".svg")):
+                    continue
                 self.sequence += 1
                 identifier = f"{self.activity.run_id}:file-change:{self.sequence}"
-                name = "file_edit" if path in self.previous else "file_create"
                 common = dict(
                     workbench_run_id=self.activity.layer.config.workbench_run_id,
                     call_id=identifier,
                     tool_call_id=identifier,
-                    tool_name=name,
+                    tool_name="image_preview",
                     activity_id=self.activity.layer.runtime_state.current_id,
                 )
                 await self.activity.emit(WorkbenchToolData(**common, stage="started", input={"path": path}))
@@ -136,7 +140,7 @@ class WorkbenchFileChanges:
                     WorkbenchToolData(
                         **common,
                         stage="returned",
-                        output={"path": path, "bytes": current[path][0], "source": "workspace_change"},
+                        output={"path": path, "bytes": current[path][0], "source": "workspace_image"},
                     )
                 )
             self.previous = current

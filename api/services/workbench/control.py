@@ -260,7 +260,11 @@ def issue(
             elif parsed.name == "plan":
                 if state.plan.review_run_id and active and active.status == "waiting_input":
                     raise Conflict("请先在计划卡片中选择开始执行或继续规划")
-                state.plan = PlanState(active=parsed.action == "on", pending=active is not None)
+                state.plan = PlanState(
+                    active=parsed.action == "on",
+                    pending=active is not None,
+                    objective=parsed.text if parsed.action == "on" else "",
+                )
                 state.revision += 1
                 message = "已进入计划模式" if state.plan.active else "已退出计划模式"
                 if parsed.text or files:
@@ -602,6 +606,8 @@ def agent_control(payload: AgentControlPayload):
             if not isinstance(plan, str) or not plan.strip().startswith("#") or len(plan) > 100000:
                 raise BadRequest("请提供以标题开头的完整 Markdown 计划")
             state.plan.review, state.plan.review_run_id = plan, run.id
+            if not state.plan.objective:
+                state.plan.objective = plan.splitlines()[0].lstrip("# ")[:20000]
         elif payload.action == "compact_result":
             result = CompactionState.model_validate(payload.data)
             if not state.compaction or result.id != state.compaction.id:
@@ -636,6 +642,9 @@ def review_answer(session, chat, run, action):
     if action not in {"approve", "keep_planning"}:
         raise BadRequest("请选择开始执行或继续规划")
     state.plan.active = action != "approve"
+    state.plan.completed = action == "approve"
+    if not state.plan.objective and state.plan.review:
+        state.plan.objective = state.plan.review.splitlines()[0].lstrip("# ")[:20000]
     state.plan.pending = False
     state.plan.review = None
     state.plan.review_run_id = None

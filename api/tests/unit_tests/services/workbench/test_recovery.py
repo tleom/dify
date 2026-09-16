@@ -551,6 +551,42 @@ def test_late_answer_steers_once_without_resuming_the_original_pause(database: R
         supplement(tenant, account, run_id, request_id, {"region": "bj"}, None)
 
 
+def test_partial_late_answers_remain_answerable_and_retry_without_duplicate_messages(
+    database: RecoveryDatabase,
+) -> None:
+    from services.workbench.human_input import supplement
+
+    request_id = skipped_question(database)
+    factory, tenant, account, _, run_id, _, _ = database
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        payload = json.loads(run.payload)
+        payload["human_input_history"][request_id]["args"]["fields"].append(
+            {"name": "purpose", "type": "paragraph", "label": "用途", "required": True}
+        )
+        run.payload = json.dumps(payload)
+    first = supplement(tenant, account, run_id, request_id, {"region": "sh"}, None, skipped_fields=["purpose"])
+    retry = supplement(tenant, account, run_id, request_id, {"region": "sh"}, None, skipped_fields=["purpose"])
+    assert retry["id"] == first["id"]
+    assert "用途：已跳过" in first["query"]
+    with factory() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        assert service.run_dto(run)["human_input_history"][0]["status"] == "skipped"
+    second = supplement(tenant, account, run_id, request_id, {"region": "sh", "purpose": "月度报告"}, None)
+    assert second["id"] != first["id"]
+    assert (
+        supplement(tenant, account, run_id, request_id, {"region": "sh", "purpose": "月度报告"}, None)["id"]
+        == second["id"]
+    )
+    with factory() as session:
+        run = session.get(WorkbenchRun, run_id)
+        assert run is not None
+        assert service.run_dto(run)["human_input_history"][0]["status"] == "submitted"
+        assert len(list(session.scalars(select(WorkbenchRun)))) == 3
+
+
 def test_late_answer_does_not_answer_a_new_pending_question(database: RecoveryDatabase) -> None:
     from services.workbench.human_input import supplement
 

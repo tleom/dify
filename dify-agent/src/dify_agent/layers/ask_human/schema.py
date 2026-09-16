@@ -41,6 +41,9 @@ class AskHumanSelectOption(BaseModel):
 
     value: str = Field(min_length=1, description="Stable option value returned in the human's answer.")
     label: str = Field(min_length=1, description="Human-readable option text; may use the user's language.")
+    description: str | None = Field(
+        default=None, max_length=300, description="Optional short explanation shown beside the option."
+    )
 
     @field_validator("value", "label")
     @classmethod
@@ -88,7 +91,7 @@ class AskHumanSelectField(AskHumanFieldBase):
     type: Literal["select"] = "select"
     options: list[AskHumanSelectOption] = Field(
         default_factory=list,
-        description="Options are objects with both value and label, for example {\"value\": \"yes\", \"label\": \"Yes\"}.",
+        description='Options are objects with both value and label, for example {"value": "yes", "label": "Yes"}.',
     )
     default: str | None = None
 
@@ -222,6 +225,12 @@ class AskHumanToolResult(BaseModel):
     status: AskHumanResultStatus
     action: AskHumanSelectedAction | None = None
     values: dict[str, JsonValue] = Field(default_factory=dict)
+    custom_fields: list[str] = Field(
+        default_factory=list, description="Select fields answered with free text rather than an option value."
+    )
+    skipped_fields: list[str] = Field(
+        default_factory=list, description="Questions explicitly skipped by the human; never infer their answers."
+    )
     message: str | None = None
     rendered_content: str | None = None
 

@@ -177,6 +177,7 @@ def catalog(tenant_id: str, account_id: str, *, include_personal: bool = True):
     return {
         **resources,
         "activity_protocol": 1,
+        "human_input_protocol": 1,
         "followup_protocol": 1,
         "control_protocol": 1,
         "resources_protocol": 1,
@@ -864,12 +865,17 @@ def delete_chat(tenant_id, account_id, chat_id):
         )
 
 
-def resume(tenant_id, account_id, run_id, values, action, request_id=None):
+def resume(tenant_id, account_id, run_id, values, action, request_id=None, *, custom_fields=None, skipped_fields=None):
     authorize(tenant_id, account_id)
     from services.workbench.human_input import remember, validate_answer
 
     if sum(len(key) + len(value) for key, value in values.items()) > 100000:
         raise ValueError("输入内容过长")
+    answer = {"values": values, "action": action, "request_id": request_id}
+    if custom_fields:
+        answer["custom_fields"] = sorted(set(custom_fields))
+    if skipped_fields:
+        answer["skipped_fields"] = sorted(set(skipped_fields))
     with session_factory.get_session_maker().begin() as session:
         # Serialize deletion and resume in the same chat -> run lock order.
         chat_id = session.scalar(
@@ -891,24 +897,24 @@ def resume(tenant_id, account_id, run_id, values, action, request_id=None):
             raise NotFound()
         payload = json.loads(run.payload)
         if run.status != "waiting_input":
-            if request_id and payload.get("submitted_input") == {
-                "values": values,
-                "action": action,
-                "request_id": request_id,
-            }:
+            if request_id and payload.get("submitted_input") == answer:
                 return run_dto(run)
             raise Conflict("此任务当前不在等待输入")
         pending = payload["pending"]
         if not request_id or request_id != input_request_id(run, payload):
             raise Conflict("输入请求已更新，请刷新后核对最新内容并重新提交")
-        result = validate_answer(pending["args"], values, action)
+        if pending.get("tool_name") == "exit_plan_mode" and (custom_fields or skipped_fields):
+            raise ValueError("计划审核必须明确选择，不能跳过或替换为自由文本")
+        result = validate_answer(
+            pending["args"], values, action, custom_fields=custom_fields, skipped_fields=skipped_fields
+        )
         if pending.get("tool_name") == "exit_plan_mode":
             from services.workbench.control import review_answer
 
             review_answer(session, chat, run, action)
         payload["continuation"] = {"calls": {pending["tool_call_id"]: result.model_dump(mode="json")}}
         remember(run, payload, pending, result.model_dump(mode="json"))
-        payload["submitted_input"] = {"values": values, "action": action, "request_id": request_id}
+        payload["submitted_input"] = answer
         payload.pop("pending", None)
         payload.pop("human_input", None)
         payload["recovery"] = {"attempt": 0}

@@ -60,6 +60,8 @@ class GoalUpdate(ControlModel):
 class PlanState(ControlModel):
     active: bool = False
     pending: bool = False
+    objective: str = Field(default="", max_length=20000)
+    completed: bool = False
     review: str | None = Field(default=None, max_length=100000)
     review_run_id: str | None = None
 

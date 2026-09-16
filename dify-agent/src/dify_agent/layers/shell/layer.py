@@ -11,6 +11,7 @@ from typing import ClassVar, NotRequired, Protocol, TypedDict, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, field_validator, model_validator
 from pydantic_ai import Tool
+from pydantic_ai.messages import ToolReturn
 from typing_extensions import Self, override
 
 from agenton.layers import (
@@ -326,15 +327,15 @@ class DifyShellLayer(PydanticAILayer[DifyShellLayerDeps, object, DifyShellLayerC
         await self._delete_tracked_jobs_best_effort(self.runtime_state.job_ids)
         self._clear_tracked_jobs()
 
-    async def _tool_file_create(self, path: str, content: str) -> dict[str, object]:
+    async def _tool_file_create(self, path: str, content: str) -> dict[str, object] | ToolReturn:
         """Create a new UTF-8 text file. Parent directory must exist; existing files are never overwritten."""
         return await self._file_operation("create", path=path, content=content)
 
-    async def _tool_file_edit(self, path: str, old_text: str, new_text: str) -> dict[str, object]:
+    async def _tool_file_edit(self, path: str, old_text: str, new_text: str) -> dict[str, object] | ToolReturn:
         """Edit a UTF-8 text file by replacing exactly one occurrence of old_text with new_text."""
         return await self._file_operation("edit", path=path, old_text=old_text, new_text=new_text)
 
-    async def _file_operation(self, operation: str, **arguments: str) -> dict[str, object]:
+    async def _file_operation(self, operation: str, **arguments: str) -> dict[str, object] | ToolReturn:
         try:
             result = await self.run_remote_script_complete(
                 file_script(self._require_workspace_cwd(), operation, **arguments)
@@ -342,6 +343,11 @@ class DifyShellLayer(PydanticAILayer[DifyShellLayerDeps, object, DifyShellLayerC
             output = json.loads(result.output)
             if not isinstance(output, dict):
                 raise ValueError("Invalid file operation result")
+            diffs = output.pop("diffs", None)
+            if diffs is not None and not output.get("error"):
+                # Persist UI data in SDK metadata; the model only needs the
+                # short confirmation and must not receive the file twice.
+                return ToolReturn(return_value=output, metadata={"workbench_file_diffs": diffs})
             return output
         except Exception as exc:
             return {"error": str(exc)}

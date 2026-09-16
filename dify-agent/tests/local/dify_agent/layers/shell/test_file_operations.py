@@ -27,6 +27,20 @@ def test_create_and_exact_edit_preserve_utf8_and_reject_ambiguous_changes(tmp_pa
     code, result = execute(tmp_path, "edit", path="script.py", old_text='print("hello")', new_text='print("世界")')
     assert code == 0 and result["operation"] == "edit"
     assert path.read_bytes() == '中文\r\nprint("世界")\r\n'.encode()
+    assert result["diffs"] == [{"oldText": content, "newText": '中文\r\nprint("世界")\r\n'}]
+
+
+def test_edit_reports_applied_context_and_rejects_no_op_without_changing_file(tmp_path):
+    path = tmp_path / "report.txt"
+    lines = [f"line {number}\n" for number in range(20)]
+    path.write_bytes("".join(lines).encode("utf-8"))
+    code, result = execute(tmp_path, "edit", path="report.txt", old_text="line 10", new_text="changed 10")
+    assert code == 0
+    assert result["diffs"][0]["oldText"] == "".join(lines[7:14])
+    assert result["diffs"][0]["newText"] == "".join(lines[7:14]).replace("line 10", "changed 10")
+    original = path.read_bytes()
+    assert execute(tmp_path, "edit", path="report.txt", old_text="changed 10", new_text="changed 10")[0] == 1
+    assert path.read_bytes() == original
 
 
 def test_file_operation_rejects_escape_and_oversized_command(tmp_path):

@@ -286,7 +286,15 @@ def test_plan_review_requires_explicit_action_and_disables_goal_driver(queue: Si
     with pytest.raises(BadRequest):
         service.resume(queue.owner[0], queue.owner[1], run["id"], {}, None, request_id)
     service.resume(queue.owner[0], queue.owner[1], run["id"], {}, "approve", request_id)
-    assert control.read(queue.owner[0], queue.owner[1], queue.chat_id)["plan"]["active"] is False
+    plan = control.read(queue.owner[0], queue.owner[1], queue.chat_id)["plan"]
+    assert plan["active"] is False
+    assert plan["completed"] is True
+    assert plan["objective"] == "实施计划"
+    assert command(queue, "/plan off").plan.completed is False
+    revised = command(queue, "/plan 修改后的计划").plan
+    assert revised.active
+    assert not revised.completed
+    assert revised.objective == "修改后的计划"
 
 
 def test_exhausted_failure_blocks_same_goal_generation(queue: SimpleNamespace) -> None:

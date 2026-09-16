@@ -80,7 +80,7 @@ def test_model_call_defers_and_resumes_with_human_answer(invalid_first):
         initial = await agent.run("需要我选择时请询问。")
         assert isinstance(initial.output, DeferredToolRequests)
         payload = layer.build_deferred_tool_call_payload(initial.output)
-        assert payload.args["fields"][0]["options"] == [{"value": "yes", "label": "继续"}]
+        assert payload.args["fields"][0]["options"] == [{"value": "yes", "label": "继续", "description": None}]
         assert payload.args["actions"][0]["id"] == "submit"
         if invalid_first:
             assert any(

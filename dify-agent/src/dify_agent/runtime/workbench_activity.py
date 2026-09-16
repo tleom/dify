@@ -88,10 +88,19 @@ class WorkbenchActivityCapability(AbstractCapability[None]):
     async def observe(self, event, *, run_step: int, text_delta: str | None = None) -> None:
         if isinstance(event, FunctionToolResultEvent):
             part = event.part
+            output = part.content
+            if (
+                isinstance(part, ToolReturnPart)
+                and part.tool_name in {"file_create", "file_edit"}
+                and isinstance(part.content, dict)
+                and isinstance(part.metadata, dict)
+                and isinstance(part.metadata.get("workbench_file_diffs"), list)
+            ):
+                output = {**part.content, "diffs": part.metadata["workbench_file_diffs"]}
             await self.layer.finish_call(
                 part.tool_call_id,
                 part.tool_name or "unknown",
-                part.content,
+                output,
                 failed=isinstance(part, RetryPromptPart)
                 or (
                     isinstance(part, ToolReturnPart)
