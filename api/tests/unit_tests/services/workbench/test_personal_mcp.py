@@ -1,6 +1,8 @@
 """MCP owner and execution fences exercised against real persisted Workbench runs."""
 
 import json
+from collections.abc import Callable
+from typing import Literal, TypedDict
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -18,7 +20,22 @@ from tests.unit_tests.services.workbench.test_followups import Queue, queue_fixt
 queue = pytest.fixture(queue_fixture)
 
 
-def declaration():
+class MCPDeclaration(TypedDict):
+    id: str
+    plugin_id: str
+    server_id: str
+    provider_name: str
+    runtime_name: str
+    tool_name: str
+    version: str
+    manifest_version: str
+    input_schema: dict[str, object]
+
+
+type Execution = tuple[personal_mcp.AgentMCPPayload, list[MCPDeclaration], Mock, Mock]
+
+
+def declaration() -> MCPDeclaration:
     return {
         "id": "personal:mcp:demo:query",
         "plugin_id": "personal:mcp:demo",
@@ -33,12 +50,13 @@ def declaration():
 
 
 @pytest.fixture
-def execution(queue: Queue, monkeypatch):
+def execution(queue: Queue, monkeypatch: pytest.MonkeyPatch) -> Execution:
     current = [declaration()]
     monkeypatch.setattr(personal_mcp, "catalog", lambda *_: current)
     run = queue.send("查询", resource_mentions={"tools": [current[0]["id"]]})
     queue.running(run["id"])
     record = queue.get(run["id"])
+    assert record.backend_run_id is not None
     payload = personal_mcp.AgentMCPPayload(
         tenant_id=queue.owner[0],
         account_id=queue.owner[1],
@@ -53,6 +71,7 @@ def execution(queue: Queue, monkeypatch):
     workspace, conversation, binding = [str(uuid4()) for _ in range(3)]
     with queue.factory.begin() as session:
         chat = session.get(WorkbenchChat, queue.chat_id)
+        assert chat is not None
         chat.conversation_id = conversation
         session.add(
             Conversation(
@@ -85,11 +104,15 @@ def execution(queue: Queue, monkeypatch):
     return payload, current, owner, transport
 
 
-def test_run_freezes_personal_tools_and_invocation_resolves_workspace_on_server(queue, execution):
+def test_run_freezes_personal_tools_and_invocation_resolves_workspace_on_server(
+    queue: Queue, execution: Execution
+) -> None:
     payload, _, owner, transport = execution
     frozen = json.loads(queue.get(payload.workbench_run_id).payload)["personal_mcp_tools"]
     assert frozen == [declaration()]
-    assert personal_mcp.agent_operation(payload)["result"]["isError"] is False
+    result = personal_mcp.agent_operation(payload)["result"]
+    assert isinstance(result, dict)
+    assert result["isError"] is False
     owner.assert_called_with(*queue.owner)
     workspace, action, request = transport.call_args.args
     assert workspace == owner.return_value
@@ -104,7 +127,7 @@ def test_run_freezes_personal_tools_and_invocation_resolves_workspace_on_server(
 
 
 @pytest.mark.parametrize("field", ["tenant_id", "account_id", "app_id", "backend_run_id", "workbench_run_id"])
-def test_foreign_owner_or_superseded_execution_cannot_access_mcp(execution, field):
+def test_foreign_owner_or_superseded_execution_cannot_access_mcp(execution: Execution, field: str) -> None:
     payload, _, owner, transport = execution
     with pytest.raises((Forbidden, NotFound)):
         personal_mcp.agent_operation(payload.model_copy(update={field: str(uuid4())}))
@@ -113,24 +136,29 @@ def test_foreign_owner_or_superseded_execution_cannot_access_mcp(execution, fiel
 
 
 @pytest.mark.parametrize("change", ["disabled", "version", "manifest_version"])
-def test_disabled_or_changed_tools_cannot_run_with_stale_schema(execution, change):
+def test_disabled_or_changed_tools_cannot_run_with_stale_schema(
+    execution: Execution, change: Literal["disabled", "version", "manifest_version"]
+) -> None:
     payload, current, _, transport = execution
     if change == "disabled":
         current.clear()
     else:
-        current[0] = {**current[0], change: "changed"}
+        current[0][change] = "changed"
     with pytest.raises(Forbidden):
         personal_mcp.agent_operation(payload)
     transport.assert_not_called()
 
 
 @pytest.mark.parametrize("change", ["cancelled", "execution_replaced"])
-def test_fence_is_rechecked_after_catalog_io(queue, execution, monkeypatch, change):
+def test_fence_is_rechecked_after_catalog_io(
+    queue: Queue, execution: Execution, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
     payload, current, _, transport = execution
 
-    def catalog(*_args, **_kwargs):
+    def catalog(*_args: object, **_kwargs: object) -> list[MCPDeclaration]:
         with queue.factory.begin() as session:
             run = session.get(WorkbenchRun, payload.workbench_run_id)
+            assert run is not None
             if change == "cancelled":
                 run.status = "cancelled"
             else:
@@ -147,12 +175,15 @@ def test_fence_is_rechecked_after_catalog_io(queue, execution, monkeypatch, chan
     "change",
     ["cancelled", "execution_replaced", "workspace_id", "binding_id", "version"],
 )
-def test_manager_authorization_rechecks_execution_and_owned_binding(queue, execution, change):
+def test_manager_authorization_rechecks_execution_and_owned_binding(
+    queue: Queue, execution: Execution, change: str
+) -> None:
     payload, _, _, transport = execution
     personal_mcp.agent_operation(payload)
     value = dict(transport.call_args.args[2]["authorization"])
     with queue.factory.begin() as session:
         run = session.get(WorkbenchRun, payload.workbench_run_id)
+        assert run is not None
         if change == "cancelled":
             run.status = "cancelled"
         elif change == "execution_replaced":
@@ -163,7 +194,9 @@ def test_manager_authorization_rechecks_execution_and_owned_binding(queue, execu
         personal_mcp.authorize_call(personal_mcp.MCPAuthorizationPayload.model_validate(value))
 
 
-def test_manager_authorization_http_requires_credential_and_current_execution(queue, execution, config_overrides):
+def test_manager_authorization_http_requires_credential_and_current_execution(
+    queue: Queue, execution: Execution, config_overrides: Callable[..., None]
+) -> None:
     from flask import Flask
 
     from controllers.inner_api.agent.workbench_control import ManagerMCPAuthorization
@@ -185,7 +218,7 @@ def test_manager_authorization_http_requires_credential_and_current_execution(qu
     assert client.post("/authorize", json=value, headers=headers).status_code == 403
 
 
-def test_public_resource_mutations_cannot_invoke_tools_or_write_manifest(monkeypatch):
+def test_public_resource_mutations_cannot_invoke_tools_or_write_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
     owner = Mock()
     monkeypatch.setattr(personal_mcp, "ensure_workspace", owner)
     for operation in ("mcp_call", "mcp_cache", "mcp_probe"):
@@ -194,7 +227,7 @@ def test_public_resource_mutations_cannot_invoke_tools_or_write_manifest(monkeyp
     owner.assert_not_called()
 
 
-def test_personal_mcp_mentions_have_separate_groups_and_runtime_names():
+def test_personal_mcp_mentions_have_separate_groups_and_runtime_names() -> None:
     tool = declaration()
     result = resolve_mentions({}, {"tools": [tool["id"]]}, personal_mcp=[tool])
     assert result["mentioned_resources"] == [

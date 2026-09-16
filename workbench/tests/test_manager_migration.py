@@ -2,17 +2,20 @@
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 os.environ['WORKBENCH_SANDBOX_MANAGER_TOKEN'] = 'test-token-' * 4
 state = tempfile.TemporaryDirectory()
 os.environ['WORKBENCH_MANAGER_STATE'] = state.name
 spec = importlib.util.spec_from_file_location('candidate_manager', Path(__file__).parents[1] / 'sandbox-manager' / 'server.py')
 module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+with patch.object(sys, 'path', [str(Path(spec.origin).parent), *sys.path]):
+    spec.loader.exec_module(module)
 module.IMAGE = 'candidate-office-image'
 key = '12345678-1234-5678-1234-567812345678'
 

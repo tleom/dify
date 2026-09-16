@@ -80,7 +80,7 @@ def test_workbench_uses_only_frozen_skills_and_rebuilds_new_turn(monkeypatch: py
         "core.app.apps.agent_app.runtime_request_builder.load_runtime_agent_skill_configs",
         unexpected_workspace_skills,
     )
-    builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_NoToolsBuilder())  # type: ignore[arg-type]
+    builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_NoToolsBuilder())
     result = builder.build(replace(_ctx(_soul_with_model_and_skill()), workbench_run_id="run-1"))
     config = next(layer.config for layer in result.request.composition.layers if layer.name == DIFY_CONFIG_LAYER_ID)
     assert config.reset_materialized_assets is True
@@ -91,7 +91,7 @@ def test_workbench_uses_only_frozen_skills_and_rebuilds_new_turn(monkeypatch: py
     assert personal_mcp.deps == {"execution_context": "execution_context"}
 
 
-def test_native_agent_does_not_include_personal_mcp_layer():
+def test_native_agent_does_not_include_personal_mcp_layer() -> None:
     builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_NoToolsBuilder())
     native = builder.build(_ctx(_soul_with_model())).request
     assert all(layer.type != "dify.workbench_mcp" for layer in native.composition.layers)
@@ -233,9 +233,9 @@ class TestBuildForAgentApp:
 
 
 class _NoToolsBuilder:
-    def build_layers(self, **kwargs):
+    def build_layers(self, **kwargs: object) -> WorkflowAgentToolLayers:
         del kwargs
-        return SimpleNamespace(plugin_tools=None, core_tools=None, exposed_tool_names=lambda: [])
+        return WorkflowAgentToolLayers()
 
 
 class _PluginLayerBuilder:
