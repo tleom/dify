@@ -27,7 +27,7 @@ calls = 0
 def add(value: int, ctx: Context) -> CallToolResult:
     global calls
     calls += 1
-    result = {"value": value + 1, "calls": calls, "pid": os.getpid(),
+    result = {"value": value + 1, "calls": calls, "pid": os.getpid(), "cwd": os.getcwd(),
             "platform_secret": os.environ.get("SHELLCTL_AUTH_TOKEN"),
             "owner_env": os.environ.get("OWNER_CONFIG"),
             "authorization": getattr(ctx.request_context.request, "headers", {}).get("authorization")}
@@ -172,6 +172,7 @@ def test_transports_schema_results_persistence_and_clean_exit(connected):
     assert (first["value"], second["value"], second["calls"]) == (3, 5, 2)
     assert first["pid"] == second["pid"]
     if transport == "stdio":
+        assert first["cwd"] == str(root)
         assert first["platform_secret"] is None and first["owner_env"] == "owner-value"
     else:
         assert first["authorization"] == "Bearer owner-http-test"

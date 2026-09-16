@@ -87,12 +87,15 @@ async def serve(name, expected_version, root="/workspace"):
         if config["transport"] == "stdio":
             # Config env is supplied by this owner; manager/platform env was
             # removed before exec and cannot leak through parent /proc entries.
+            # Resolve config paths under the same owner root used for file access.
             transport = stdio_client(
                 StdioServerParameters(
                     command=config["command"],
                     args=config["args"],
                     env=config["env"],
-                    cwd=config["cwd"],
+                    cwd=os.path.join(
+                        root, os.path.relpath(config["cwd"], "/workspace")
+                    ),
                 ),
                 errlog=stack.enter_context(open(os.devnull, "w")),
             )

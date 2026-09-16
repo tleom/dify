@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Literal, TypedDict
 from unittest.mock import Mock
 from uuid import uuid4
@@ -13,7 +14,7 @@ from models.agent import AgentConfigVersionKind, AgentWorkspaceBinding
 from models.enums import ConversationFromSource
 from models.model import AppMode, Conversation
 from models.workbench import WorkbenchChat, WorkbenchRun
-from services.workbench import personal_mcp
+from services.workbench import mentions, personal_mcp, resources, runtime
 from services.workbench.mentions import resolve_mentions
 from tests.unit_tests.services.workbench.test_followups import Queue, queue_fixture
 
@@ -236,3 +237,26 @@ def test_personal_mcp_mentions_have_separate_groups_and_runtime_names() -> None:
     assert tool["runtime_name"] in result["mention_prompt"]
     with pytest.raises(ValueError, match="个人 MCP"):
         resolve_mentions({}, {"tools": [tool["id"]]})
+
+
+def test_runtime_combines_personal_skills_and_mcp_without_changing_global_mentions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = declaration()
+    second = declaration()
+    second["id"] = "personal:mcp:demo:other"
+    second["runtime_name"] = "personal_mcp_other"
+    selected = mentions.ResourceMentions(skills=["write", "personal:write"], tools=[first["id"], second["id"]])
+    monkeypatch.setattr(mentions, "load_run_mentions", Mock(return_value=selected))
+    monkeypatch.setattr(resources, "personal_skill_catalog", Mock(return_value=[{"id": "personal:write"}]))
+    monkeypatch.setattr(personal_mcp, "available_run_tools", Mock(return_value=[first, second]))
+    global_groups = Mock(return_value=[])
+    monkeypatch.setattr(mentions, "required_tool_groups", global_groups)
+    skills, groups = runtime.resolve_run_requirements(
+        "run", "tenant", "owner", SimpleNamespace(model_dump=lambda **_: {}), object()
+    )
+    assert skills == ["write"]
+    assert len(groups) == 1
+    assert groups[0].name == "个人查询"
+    assert groups[0].tool_names == [first["runtime_name"], second["runtime_name"]]
+    assert global_groups.call_args.args[1] == mentions.ResourceMentions(skills=["write"])

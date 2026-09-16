@@ -70,14 +70,14 @@
 
 Agent 使用受内部凭据保护的 `/inner/api/agent/workbench/mcp`，由 `dify.workbench_mcp` 层提供真实工具 schema。该层仅在工作台任务中添加；调用经 API 授权后交给 Sandbox Manager，再通过 `docker exec --user 1000` 在所属沙盒中执行。运行器使用清空环境的固定解释器启动，平台内部令牌不继承到 MCP 进程。
 
-| 文件 | 职责 |
-| --- | --- |
-| `api/services/workbench/personal_mcp.py` | 账号目录、任务快照、执行校验与路由 |
-| `dify-agent/src/dify_agent/layers/workbench_mcp.py` | Agent 工具声明与调用 |
-| `workbench/sandbox-manager/mcp_ops.py` | 配置、开关、缓存与备份 |
-| `workbench/sandbox-manager/mcp_runtime.py`、`mcp_worker.py` | 进程生命周期与 MCP 协议 |
-| `workbench/sandbox-manager/mcp_journal.py` | 有界结果存储和持久化去重记录 |
-| `workbench/sandbox-office/mcp-requirements.lock.txt` | 锁定版本及哈希的运行依赖 |
+| 文件                                                        | 职责                               |
+| ----------------------------------------------------------- | ---------------------------------- |
+| `api/services/workbench/personal_mcp.py`                    | 账号目录、任务快照、执行校验与路由 |
+| `dify-agent/src/dify_agent/layers/workbench_mcp.py`         | Agent 工具声明与调用               |
+| `workbench/sandbox-manager/mcp_ops.py`                      | 配置、开关、缓存与备份             |
+| `workbench/sandbox-manager/mcp_runtime.py`、`mcp_worker.py` | 进程生命周期与 MCP 协议            |
+| `workbench/sandbox-manager/mcp_journal.py`                  | 有界结果存储和持久化去重记录       |
+| `workbench/sandbox-office/mcp-requirements.lock.txt`        | 锁定版本及哈希的运行依赖           |
 
 当前覆盖 MCP tools 的发现和调用。MCP resources、prompts、交互式授权及 OAuth 不在此接口中提供。
 

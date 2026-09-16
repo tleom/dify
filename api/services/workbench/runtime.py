@@ -53,6 +53,8 @@ def resolve_run_config(run_id, tenant_id, account_id):
 
 
 def resolve_run_requirements(run_id, tenant_id, account_id, soul, tool_layers):
+    from dify_agent.layers.workbench_mentions import RequiredToolGroup
+
     from services.workbench.mentions import load_run_mentions, required_tool_groups
 
     mentions = load_run_mentions(run_id, tenant_id, account_id)
@@ -67,15 +69,13 @@ def resolve_run_requirements(run_id, tenant_id, account_id, soul, tool_layers):
         # ConfigLayer only materializes published global skill archives.
         mentions = mentions.model_copy(update={"skills": [name for name in mentions.skills if name not in personal]})
     personal_tools = [name for name in mentions.tools if name.startswith("personal:mcp:")]
-    mcp_groups = {}
+    mcp_groups: dict[str, RequiredToolGroup] = {}
     if personal_tools:
-        from dify_agent.layers.workbench_mentions import RequiredToolGroup
-
         from services.workbench.personal_mcp import available_run_tools
 
-        available = {item["id"]: item for item in available_run_tools(run_id, tenant_id, account_id)}
+        available_mcp = {item["id"]: item for item in available_run_tools(run_id, tenant_id, account_id)}
         for name in personal_tools:
-            item = available.get(name)
+            item = available_mcp.get(name)
             if item is None:
                 raise ValueError("本轮点名的个人 MCP 已失效，请重新选择")
             group = mcp_groups.setdefault(
