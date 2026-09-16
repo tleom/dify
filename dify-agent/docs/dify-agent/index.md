@@ -305,6 +305,12 @@ not consume that idle deadline. A silent model ends the attempt through the
 existing checkpoint, remote fencing and bounded automatic recovery path;
 manual cancellation remains cancellation and is never converted into recovery.
 
+File delivery proof is invalidated only when that file changes or is removed.
+A directory archive also loses proof when one of its members changes. Writes in
+another conversation or unrelated build/preview files retain verified links,
+so simultaneous work in one personal workspace does not force repeated delivery
+retries for unchanged artifacts.
+
 The API treats a stream without a terminal frame as a failure and tolerates brief
 Redis heartbeat outages until the last confirmed execution lease expires. Recovery
 reconciles lost leases and rechecks renewed ones before interrupting a run. Continued

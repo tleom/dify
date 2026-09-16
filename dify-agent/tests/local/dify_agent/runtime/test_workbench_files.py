@@ -185,6 +185,34 @@ def test_agent_requests_sidebar_preview_then_delivers_without_a_download_link(mo
     assert text == "文件已生成，已请求打开侧栏预览。"
 
 
+def test_concurrent_workspace_writes_preserve_unmodified_delivery_links():
+    layer = WorkbenchFilesLayer(config=LayerConfig(), inner_api_url="", inner_api_key="")
+    path = "conversations/current/报告.docx"
+    layer.record_changes([path])
+    layer._verified[path] = {"download_url": DOWNLOAD, "preview_url": PREVIEW, "kind": "file"}
+    layer.record_changes(["conversations/other/预览.pdf", "conversations/current/build.py"])
+    assert layer.delivery_error(f"[报告.docx]({DOWNLOAD})", final=True) is None
+    layer.record_changes([], ["conversations/other/预览.pdf"])
+    assert layer.delivery_error(f"[报告.docx]({DOWNLOAD})", final=True) is None
+    layer.record_changes([path])
+    assert layer.delivery_error(f"[报告.docx]({DOWNLOAD})", final=True) is not None
+
+
+@pytest.mark.parametrize("removed", [False, True])
+def test_changed_archive_member_invalidates_only_its_containing_directory(removed):
+    layer = WorkbenchFilesLayer(config=LayerConfig(), inner_api_url="", inner_api_key="")
+    layer._verified["conversations/current"] = {"download_url": DOWNLOAD, "preview_url": PREVIEW, "kind": "directory"}
+    layer._verified["conversations/current2"] = {
+        "download_url": DOWNLOAD + "2",
+        "preview_url": PREVIEW + "2",
+        "kind": "directory",
+    }
+    changed = ["conversations/current/报告.docx"]
+    layer.record_changes([] if removed else changed, changed if removed else None)
+    assert "conversations/current" not in layer._verified
+    assert "conversations/current2" in layer._verified
+
+
 def test_modifying_a_previewed_file_requires_a_new_delivery_request():
     layer = WorkbenchFilesLayer(config=LayerConfig(), inner_api_url="", inner_api_key="")
     layer.record_changes(["conversations/chat/报告.docx"])

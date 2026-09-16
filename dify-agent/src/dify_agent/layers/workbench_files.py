@@ -63,8 +63,17 @@ class WorkbenchFilesLayer(PlainLayer[WorkbenchFilesDeps, LayerConfig, WorkbenchF
         self.runtime_state.changed_paths.update(paths)
         self.runtime_state.changed_paths.difference_update(removed or [])
         self.runtime_state.opened_paths.difference_update([*paths, *(removed or [])])
-        # Fixed URLs survive edits, but delivery must confirm the current file exists.
-        self._verified.clear()
+        # Other conversations may write concurrently in this owner's workspace.
+        # Only a changed file (or its containing directory archive) loses proof;
+        # unrelated writes must not invalidate already verified delivery links.
+        affected = [*paths, *(removed or [])]
+        for verified_path, entry in list(self._verified.items()):
+            if any(
+                changed == verified_path
+                or (entry.get("kind") == "directory" and changed.startswith(verified_path.rstrip("/") + "/"))
+                for changed in affected
+            ):
+                self._verified.pop(verified_path)
         self._lookup_failed = False
 
     def covers_changed_path(self, path: str, *, directory: bool) -> bool:
