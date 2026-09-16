@@ -285,6 +285,14 @@ class AgentAppRuntimeRequestBuilder:
 
             request.composition.layers.append(
                 RunLayerSpec(
+                    name="workbench_mcp",
+                    type="dify.workbench_mcp",
+                    deps={"execution_context": "execution_context"},
+                    config={},
+                )
+            )
+            request.composition.layers.append(
+                RunLayerSpec(
                     name="workbench_control",
                     type="dify.workbench_control",
                     deps={"execution_context": "execution_context"},

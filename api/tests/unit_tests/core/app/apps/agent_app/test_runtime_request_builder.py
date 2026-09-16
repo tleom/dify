@@ -87,6 +87,14 @@ def test_workbench_uses_only_frozen_skills_and_rebuilds_new_turn(monkeypatch: py
     assert [skill.name for skill in config.skills] == ["tender-analyzer"]
     assert result.request.rebuild_layers is True
     assert any(layer.type == "dify.workbench_environment" for layer in result.request.composition.layers)
+    personal_mcp = next(layer for layer in result.request.composition.layers if layer.type == "dify.workbench_mcp")
+    assert personal_mcp.deps == {"execution_context": "execution_context"}
+
+
+def test_native_agent_does_not_include_personal_mcp_layer():
+    builder = AgentAppRuntimeRequestBuilder(dify_tools_builder=_NoToolsBuilder())
+    native = builder.build(_ctx(_soul_with_model())).request
+    assert all(layer.type != "dify.workbench_mcp" for layer in native.composition.layers)
 
 
 def test_workbench_retrieves_same_question_again_on_new_turn():

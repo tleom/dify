@@ -66,7 +66,29 @@ def resolve_run_requirements(run_id, tenant_id, account_id, soul, tool_layers):
         # Personal skills are read through the owner-scoped workbench tool, while
         # ConfigLayer only materializes published global skill archives.
         mentions = mentions.model_copy(update={"skills": [name for name in mentions.skills if name not in personal]})
-    return mentions.skills, required_tool_groups(soul.model_dump(mode="json"), mentions, tool_layers)
+    personal_tools = [name for name in mentions.tools if name.startswith("personal:mcp:")]
+    mcp_groups = {}
+    if personal_tools:
+        from dify_agent.layers.workbench_mentions import RequiredToolGroup
+
+        from services.workbench.personal_mcp import available_run_tools
+
+        available = {item["id"]: item for item in available_run_tools(run_id, tenant_id, account_id)}
+        for name in personal_tools:
+            item = available.get(name)
+            if item is None:
+                raise ValueError("本轮点名的个人 MCP 已失效，请重新选择")
+            group = mcp_groups.setdefault(
+                item["plugin_id"], RequiredToolGroup(name=item["provider_name"], tool_names=[])
+            )
+            group.tool_names.append(item["runtime_name"])
+        mentions = mentions.model_copy(
+            update={"tools": [name for name in mentions.tools if name not in personal_tools]}
+        )
+    return mentions.skills, [
+        *required_tool_groups(soul.model_dump(mode="json"), mentions, tool_layers),
+        *mcp_groups.values(),
+    ]
 
 
 def resolve_run_generation(run_id, tenant_id, account_id):

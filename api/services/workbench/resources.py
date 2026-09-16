@@ -128,6 +128,10 @@ def personal_skill_catalog(tenant_id: str, account_id: str) -> list[dict[str, st
 
 
 def mutate(tenant_id, account_id, payload):
+    if payload["operation"].startswith("mcp_"):
+        from services.workbench.personal_mcp import mutate as mutate_mcp
+
+        return mutate_mcp(tenant_id, account_id, payload)
     identifier = ensure_workspace(tenant_id, account_id)
     if payload["operation"] == "skill_inspect":
         name = _import_name(payload)
@@ -194,10 +198,14 @@ def _global_resources(tenant_id, identifier, soul):
 
 
 def listing(tenant_id, account_id):
+    from services.workbench.personal_mcp import snapshot as mcp_snapshot
     from services.workbench.service import catalog, template
 
     identifier = ensure_workspace(tenant_id, account_id)
     personal = personal_snapshot(identifier)
+    mcp = mcp_snapshot(tenant_id, account_id)
+    personal["mcp"] = mcp["mcp"]
+    personal["warnings"] = [*personal.get("warnings", []), *mcp.get("warnings", [])]
     global_items = _global_resources(tenant_id, identifier, template(tenant_id, account_id)["soul"])
     visible = catalog(tenant_id, account_id, include_personal=False)
     return {**personal, "global": {**global_items, "tools": visible["tools"], "knowledge": visible["knowledge"]}}
