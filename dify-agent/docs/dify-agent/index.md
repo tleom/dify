@@ -175,6 +175,35 @@ The config layer selects file-delivery guidance from the trusted `workbench_run_
 
 Pending generated paths persist in the session snapshot across deferred continuations of the same workbench run. URL verification resets on resume, and a new logical run clears the pending paths. Entries with `downloadable=false` remain visible but receive no URLs; the model must split unsupported artifacts or explain that delivery is blocked. File downloads are limited to 20 MiB, and directory archives to 50 MiB of supported file contents.
 
+Workbench file-change inventories cover the owned `/workspace`, including writes
+outside the current conversation directory. Personal memory, skills and resource
+staging paths are excluded from generated-file delivery. Inventories remain bounded
+by file count, output size and execution time. Acquiring a conversation binding
+prepares its current directory from `/workspace` and verifies the persistent home;
+it does not require the obsolete account-named working directory to exist.
+
+The resource catalog lists published global skills first and enabled, valid personal
+skills second. Personal skill IDs use `personal:<name>`; they belong to explicit
+resource mentions, not the global archive selection. The API resolves them against
+the authenticated owner's workspace at submission and dispatch. The model reads
+the chosen content through `read_skill(scope="personal", name=...)`.
+
+The command endpoint advertises `command_resources_protocol=1` in the catalog and
+accepts `resource_mentions` with `/goal`, `/plan` and `/compact`. Goal state preserves
+these mentions for subsequent automatic rounds. `/plan <direction>` starts planning
+that direction. `/compact <instruction>` durably compacts history and then executes
+the instruction in the same run; bare `/compact` only compacts history. Completion
+notification retries cannot turn a committed summary into an "original retained"
+failure. Human-input submissions carry the current pending `request_id`; replies to
+a superseded request are rejected even if the logical run ID has not changed.
+
+Sandbox manager helpers use `/usr/local/bin/python -I -S`, while normal user commands
+retain their personal-environment-first PATH. The office image makes `/usr/local`
+root-owned and removes group/other write permissions. A running container on a
+previous image is rejected before management helpers execute. Deployments drain
+active runs, stop old containers, and recreate them with the configured hardened
+image while preserving home, workspace and personal-environment volumes.
+
 Final delivery requires a download URL for at least one changed path or a directory archive containing it. Each query refreshes verification for its requested path; file changes invalidate previous query results and failures. Unrelated files do not establish delivery or explain a failure to deliver the current artifacts.
 
 Workbench shell sessions also expose `file_create(path, content)` and `file_edit(path, old_text, new_text)` for bounded UTF-8 file operations inside the current workspace. Creation refuses overwrite; editing requires exactly one match and preserves unchanged content. Shell argument envelopes are only unwrapped when complete JSON parses, independently of activity reporting; repeated malformed calls produce bounded, explicit observations.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from typing import Any, TypedDict
 from uuid import uuid4
 
@@ -161,18 +162,25 @@ def rules_for(tenant_id: str, model: dict):
     }
 
 
-def catalog(tenant_id: str, account_id: str):
+def catalog(tenant_id: str, account_id: str, *, include_personal: bool = True):
     base = template(tenant_id, account_id)
     models = models_and_rules(tenant_id)
     resources = public_resources(base["soul"], dify_config.WORKBENCH_TOOL_PARAMETERS.get(tenant_id))
     enrich_tool_labels(tenant_id, resources["tools"])
     enrich_skill_labels(tenant_id, base["agent_id"], resources["skills"])
+    for skill in resources["skills"]:
+        skill["scope"] = "global"
+    if include_personal:
+        from services.workbench.resources import personal_skill_catalog
+
+        resources["skills"].extend(personal_skill_catalog(tenant_id, account_id))
     return {
         **resources,
         "activity_protocol": 1,
         "followup_protocol": 1,
         "control_protocol": 1,
         "resources_protocol": 1,
+        "command_resources_protocol": 1,
         "default_selection": default_selection(tenant_id, account_id, base).model_dump(mode="json"),
         "models": [
             {"id": key, "name": value["model"], "provider": value["model_provider"]} for key, value in models.items()
@@ -253,6 +261,15 @@ def read_chat(tenant_id: str, account_id: str, chat_id: str):
         }
 
 
+def input_request_id(run, payload):
+    """Bind an answer to the displayed question and execution attempt, including legacy pauses."""
+    pending = payload.get("pending")
+    if not pending:
+        return None
+    source = [run.id, run.backend_run_id, payload.get("attempt", 0), pending]
+    return sha256(json.dumps(source, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def run_dto(run, *, include_events=True):
     from services.workbench.context_status import merge_context_events
     from services.workbench.knowledge_events import run_knowledge_events
@@ -263,6 +280,7 @@ def run_dto(run, *, include_events=True):
 
     ids = message_ids(run) if include_events else payload.get("message_ids", [])
     from services.workbench.event_log import history_snapshot, uses_journal
+    from services.workbench.human_input import history as input_history
 
     journal = uses_journal(run, payload)
     history, cursor = history_snapshot(run) if journal and include_events else (None, None)
@@ -271,8 +289,14 @@ def run_dto(run, *, include_events=True):
         "chat_id": run.chat_id,
         "revision_id": run.revision_id,
         "version": payload.get("version", 1),
-        "pending": payload.get("pending"),
+        "pending": {**payload["pending"], "request_id": input_request_id(run, payload)}
+        if payload.get("pending")
+        else None,
         "human_input": input_dto(payload),
+        "human_input_history": input_history(
+            run,
+            [] if not include_events else history if history is not None else json.loads(run.event_log or "[]"),
+        ),
         "recovery": recovery_dto(payload),
         "status": run.status,
         "error": run.error,
@@ -678,7 +702,15 @@ def _prepare_message(tenant_id, account_id, chat_id, base, payload: dict[str, An
     # External provider discovery happens outside the write transaction.
     current = read_chat(tenant_id, account_id, chat_id)
     selected = default_capabilities(base["soul"], Selection.model_validate(current["selection"]))
-    mention_data = resolve_mentions(base["soul"], payload.get("resource_mentions"))
+    from services.workbench.mentions import ResourceMentions
+
+    refs = ResourceMentions.model_validate(payload.get("resource_mentions") or {})
+    personal_skills = []
+    if any(name.startswith("personal:") for name in refs.skills):
+        from services.workbench.resources import personal_skill_catalog
+
+        personal_skills = personal_skill_catalog(tenant_id, account_id)
+    mention_data = resolve_mentions(base["soul"], refs, personal_skills=personal_skills)
     mentioned_tools = mention_data["resource_mentions"]["tools"]
     mentioned_skills = mention_data["resource_mentions"]["skills"]
     provider_names, skill_names = {}, {}
@@ -694,7 +726,11 @@ def _prepare_message(tenant_id, account_id, chat_id, base, payload: dict[str, An
         skill_names = {skill["id"]: skill["name"] for skill in display_skills}
     if mentioned_tools or mentioned_skills:
         mention_data = resolve_mentions(
-            base["soul"], payload.get("resource_mentions"), provider_names=provider_names, skill_names=skill_names
+            base["soul"],
+            refs,
+            provider_names=provider_names,
+            skill_names=skill_names,
+            personal_skills=personal_skills,
         )
     selected.knowledge = list(dict.fromkeys([*selected.knowledge, *mention_data["resource_mentions"]["knowledge"]]))
     effective = compile_config(tenant_id, base, selected)
@@ -819,9 +855,9 @@ def delete_chat(tenant_id, account_id, chat_id):
         )
 
 
-def resume(tenant_id, account_id, run_id, values, action):
+def resume(tenant_id, account_id, run_id, values, action, request_id=None):
     authorize(tenant_id, account_id)
-    from dify_agent.layers.ask_human.schema import AskHumanSelectedAction, AskHumanToolArgs, AskHumanToolResult
+    from services.workbench.human_input import remember, validate_answer
 
     if sum(len(key) + len(value) for key, value in values.items()) > 100000:
         raise ValueError("输入内容过长")
@@ -846,40 +882,24 @@ def resume(tenant_id, account_id, run_id, values, action):
             raise NotFound()
         payload = json.loads(run.payload)
         if run.status != "waiting_input":
-            if payload.get("submitted_input") == {"values": values, "action": action}:
+            if request_id and payload.get("submitted_input") == {
+                "values": values,
+                "action": action,
+                "request_id": request_id,
+            }:
                 return run_dto(run)
             raise Conflict("此任务当前不在等待输入")
         pending = payload["pending"]
-        args = AskHumanToolArgs.model_validate(pending["args"])
-        allowed = {field.name: field for field in args.fields}
-        if not set(values) <= allowed.keys():
-            raise ValueError("输入包含未请求的字段")
-        for field in args.fields:
-            value = values.get(field.name)
-            if field.required and not value:
-                raise ValueError(f"请填写 {field.label}")
-            if field.type == "select" and value is not None and value not in {option.value for option in field.options}:
-                raise ValueError(f"{field.label} 选项无效")
-        selected = None
-        if action is not None:
-            selected = next((item for item in args.actions if item.id == action), None)
-            if selected is None:
-                raise ValueError("操作选项无效")
-        elif not args.fields and args.actions:
-            raise ValueError("请选择操作")
-        # Form answers stand on their own. Do not fabricate a separate action
-        # that could contradict the user's selected field values.
-        result = AskHumanToolResult(
-            status="submitted",
-            values=values,
-            action=AskHumanSelectedAction(id=selected.id, label=selected.label) if selected else None,
-        )
+        if not request_id or request_id != input_request_id(run, payload):
+            raise Conflict("输入请求已更新，请刷新后核对最新内容并重新提交")
+        result = validate_answer(pending["args"], values, action)
         if pending.get("tool_name") == "exit_plan_mode":
             from services.workbench.control import review_answer
 
             review_answer(session, chat, run, action)
         payload["continuation"] = {"calls": {pending["tool_call_id"]: result.model_dump(mode="json")}}
-        payload["submitted_input"] = {"values": values, "action": action}
+        remember(run, payload, pending, result.model_dump(mode="json"))
+        payload["submitted_input"] = {"values": values, "action": action, "request_id": request_id}
         payload.pop("pending", None)
         payload.pop("human_input", None)
         payload["recovery"] = {"attempt": 0}

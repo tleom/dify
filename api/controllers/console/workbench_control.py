@@ -9,6 +9,7 @@ from controllers.console.workbench import WorkbenchResource, WorkbenchRunRespons
 from fields.base import ResponseModel
 from libs.helper import dump_response
 from services.workbench import control
+from services.workbench.mentions import ResourceMentions
 
 
 class WorkbenchCommandPayload(BaseModel):
@@ -17,10 +18,17 @@ class WorkbenchCommandPayload(BaseModel):
     request_key: str = Field(min_length=1, max_length=128)
     expected_revision: int | None = Field(default=None, ge=0)
     files: list[WorkbenchSandboxFilePayload] = Field(default_factory=list, max_length=20)
+    resource_mentions: ResourceMentions | None = None
 
 
 class WorkbenchControlResponse(ResponseModel):
     data: WorkbenchControlState
+
+
+class WorkbenchClearTodosPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_key: str = Field(min_length=1, max_length=128)
+    expected_revision: int = Field(ge=0)
 
 
 class WorkbenchCommandResultResponse(ResponseModel):
@@ -33,7 +41,7 @@ class WorkbenchCommandResponse(ResponseModel):
     data: WorkbenchCommandResultResponse
 
 
-register_schema_models(console_ns, WorkbenchCommandPayload)
+register_schema_models(console_ns, WorkbenchCommandPayload, WorkbenchClearTodosPayload)
 register_response_schema_models(console_ns, WorkbenchControlResponse, WorkbenchCommandResponse)
 
 
@@ -42,6 +50,18 @@ class Control(WorkbenchResource):
     @console_ns.response(200, "Current goal, plan and task list", console_ns.models[WorkbenchControlResponse.__name__])
     def get(self, chat_id):
         return dump_response(WorkbenchControlResponse, {"data": control.read(*self.owner(), str(chat_id))})
+
+
+@console_ns.route("/workbench/chats/<uuid:chat_id>/todos/clear")
+class ClearTodos(WorkbenchResource):
+    @console_ns.expect(console_ns.models[WorkbenchClearTodosPayload.__name__])
+    @console_ns.response(200, "Task list cleared", console_ns.models[WorkbenchControlResponse.__name__])
+    def post(self, chat_id):
+        payload = WorkbenchClearTodosPayload.model_validate(console_ns.payload or {})
+        return dump_response(
+            WorkbenchControlResponse,
+            {"data": control.clear_todos(*self.owner(), str(chat_id), **payload.model_dump())},
+        )
 
 
 @console_ns.route("/workbench/chats/<uuid:chat_id>/commands")

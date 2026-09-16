@@ -21,6 +21,11 @@ class PendingRun:
     authorize: Mock
     publish: Mock
 
+    @property
+    def request_id(self) -> str:
+        payload = json.loads(self.run.payload)
+        return service.input_request_id(self.run, payload) or payload["submitted_input"]["request_id"]
+
 
 @pytest.fixture
 def pending_run(monkeypatch: pytest.MonkeyPatch) -> PendingRun:
@@ -59,26 +64,27 @@ def pending_run(monkeypatch: pytest.MonkeyPatch) -> PendingRun:
 
 def test_form_submission_preserves_answers_without_selecting_the_first_action(pending_run: PendingRun) -> None:
     values = {"task": "other", "extra": "只核对引用"}
-    assert service.resume("tenant", "account", "run", values, None) == {"id": "run", "status": "queued"}
+    request_id = pending_run.request_id
+    assert service.resume("tenant", "account", "run", values, None, request_id) == {"id": "run", "status": "queued"}
     payload = json.loads(pending_run.run.payload)
     result = payload["continuation"]["calls"]["question"]
     assert result["status"] == "submitted"
     assert result["values"] == values
     assert result["action"] is None
     assert "pending" not in payload
-    assert payload["submitted_input"] == {"values": values, "action": None}
+    assert payload["submitted_input"] == {"values": values, "action": None, "request_id": request_id}
     pending_run.authorize.assert_called_once_with("tenant", "account")
     query = pending_run.session.scalar.call_args.args[0].compile()
     assert query.params == {"id_1": "run", "tenant_id_1": "tenant", "account_id_1": "account"}
     pending_run.publish.assert_called_once_with("tenant", "account", "run")
-    assert service.resume("tenant", "account", "run", values, None)["status"] == "queued"
+    assert service.resume("tenant", "account", "run", values, None, request_id)["status"] == "queued"
     pending_run.publish.assert_called_once()
     with pytest.raises(Conflict):
-        service.resume("tenant", "account", "run", {"task": "polish"}, None)
+        service.resume("tenant", "account", "run", {"task": "polish"}, None, request_id)
 
 
 def test_legacy_explicit_action_remains_supported(pending_run: PendingRun) -> None:
-    service.resume("tenant", "account", "run", {"task": "other"}, "review")
+    service.resume("tenant", "account", "run", {"task": "other"}, "review", pending_run.request_id)
     result = json.loads(pending_run.run.payload)["continuation"]["calls"]["question"]
     assert result["action"] == {"id": "review", "label": "深度审查"}
 
@@ -88,7 +94,7 @@ def test_action_only_question_requires_a_valid_selection(pending_run: PendingRun
     pending_run.args["fields"] = list[JsonValue]()
     pending_run.run.payload = json.dumps({"pending": {"tool_call_id": "question", "args": pending_run.args}})
     with pytest.raises(ValueError, match="请选择操作|操作选项无效"):
-        service.resume("tenant", "account", "run", {}, action)
+        service.resume("tenant", "account", "run", {}, action, pending_run.request_id)
     pending_run.publish.assert_not_called()
     assert pending_run.run.status == "waiting_input"
 
@@ -96,7 +102,7 @@ def test_action_only_question_requires_a_valid_selection(pending_run: PendingRun
 def test_action_only_selection_is_returned_to_the_agent(pending_run: PendingRun) -> None:
     pending_run.args["fields"] = list[JsonValue]()
     pending_run.run.payload = json.dumps({"pending": {"tool_call_id": "question", "args": pending_run.args}})
-    service.resume("tenant", "account", "run", {}, "review")
+    service.resume("tenant", "account", "run", {}, "review", pending_run.request_id)
     result = json.loads(pending_run.run.payload)["continuation"]["calls"]["question"]
     assert result["action"] == {"id": "review", "label": "深度审查"}
 
@@ -114,9 +120,29 @@ def test_invalid_answers_and_actions_still_fail(
     pending_run: PendingRun, values: dict[str, str], action: str | None, message: str
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        service.resume("tenant", "account", "run", values, action)
+        service.resume("tenant", "account", "run", values, action, pending_run.request_id)
     pending_run.publish.assert_not_called()
     assert pending_run.run.status == "waiting_input"
+
+
+@pytest.mark.parametrize("change", ["question", "attempt", "backend", "missing"])
+def test_obsolete_or_missing_request_cannot_answer_a_later_question(pending_run: PendingRun, change: str) -> None:
+    original = pending_run.request_id
+    payload = json.loads(pending_run.run.payload)
+    if change == "question":
+        payload["pending"]["args"]["question"] = "新的问题"
+    elif change == "attempt":
+        payload["attempt"] = 2
+    elif change == "backend":
+        pending_run.run.backend_run_id = "later-execution"
+    pending_run.run.payload = json.dumps(payload)
+    with pytest.raises(Conflict, match="输入请求已更新"):
+        service.resume(
+            "tenant", "account", "run", {"task": "other"}, "review", None if change == "missing" else original
+        )
+    assert pending_run.run.status == "waiting_input"
+    assert json.loads(pending_run.run.payload) == payload
+    pending_run.publish.assert_not_called()
 
 
 def test_resume_does_not_accept_a_run_outside_the_owner(pending_run: PendingRun) -> None:

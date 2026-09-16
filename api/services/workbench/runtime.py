@@ -56,6 +56,16 @@ def resolve_run_requirements(run_id, tenant_id, account_id, soul, tool_layers):
     from services.workbench.mentions import load_run_mentions, required_tool_groups
 
     mentions = load_run_mentions(run_id, tenant_id, account_id)
+    personal = [name for name in mentions.skills if name.startswith("personal:")]
+    if personal:
+        from services.workbench.resources import personal_skill_catalog
+
+        available = {item["id"] for item in personal_skill_catalog(tenant_id, account_id)}
+        if not set(personal) <= available:
+            raise ValueError("本轮点名的个人技能已失效，请重新选择")
+        # Personal skills are read through the owner-scoped workbench tool, while
+        # ConfigLayer only materializes published global skill archives.
+        mentions = mentions.model_copy(update={"skills": [name for name in mentions.skills if name not in personal]})
     return mentions.skills, required_tool_groups(soul.model_dump(mode="json"), mentions, tool_layers)
 
 

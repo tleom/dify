@@ -25,6 +25,52 @@ def add_control(request):
     )
 
 
+@pytest.mark.parametrize("continue_after", [False, True])
+def test_manual_compaction_continues_same_run_only_when_instruction_was_supplied(monkeypatch, continue_after):
+    state = WorkbenchControlState()
+    phases, model_calls = [], []
+
+    async def stream(messages, info):
+        assert phases[-1] in {"compacted", "unchanged"}
+        model_calls.append(messages)
+        yield "继续指令已执行。"
+
+    request, sink, _ = _setup(monkeypatch, stream)
+    add_control(request)
+
+    def transport(request):
+        payload = json.loads(request.content)
+        if request.url.path.endswith("/resources"):
+            return httpx.Response(200, json={"memory": {"content": ""}, "skills": [], "global_resources": {}})
+        if payload["action"] == "compact_result":
+            phases.append(payload["data"]["phase"])
+        return httpx.Response(
+            200,
+            json={
+                "state": state.model_dump(mode="json"),
+                "control": {"kind": "compact", "id": "compact-one", "continue_after": continue_after},
+            },
+        )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            await AgentRunRunner(
+                run_id="compact-one",
+                request=request,
+                sink=sink,
+                plugin_daemon_http_client=client,
+                dify_api_http_client=client,
+            ).run()
+
+    asyncio.run(scenario())
+    terminal = sink.events["compact-one"][-1]
+    assert isinstance(terminal, RunSucceededEvent), terminal
+    assert phases == ["compacting", "unchanged"]
+    assert len(model_calls) == int(continue_after)
+    if continue_after:
+        assert terminal.data.output == "继续指令已执行。"
+
+
 def test_reused_provider_ids_update_distinct_steps_and_retry_the_same_http_operation(monkeypatch):
     state = WorkbenchControlState(goal=GoalState(id="goal", objective="验收", revision=1, phase="active"))
     calls = 0

@@ -105,6 +105,16 @@ def personal_snapshot(identifier):
     return result
 
 
+def personal_skill_catalog(tenant_id: str, account_id: str) -> list[dict[str, str]]:
+    """List usable skills from this account's workspace with distinct public IDs."""
+    snapshot = personal_snapshot(ensure_workspace(tenant_id, account_id))
+    return [
+        {"id": f"personal:{item['id']}", "name": item["name"], "description": item["description"], "scope": "personal"}
+        for item in snapshot["skills"]
+        if item.get("enabled") and not item.get("error")
+    ]
+
+
 def mutate(tenant_id, account_id, payload):
     identifier = ensure_workspace(tenant_id, account_id)
     if payload["operation"] == "skill_inspect":
@@ -164,7 +174,7 @@ def listing(tenant_id, account_id):
     identifier = ensure_workspace(tenant_id, account_id)
     personal = personal_snapshot(identifier)
     global_items = _global_resources(tenant_id, identifier, template(tenant_id, account_id)["soul"])
-    visible = catalog(tenant_id, account_id)
+    visible = catalog(tenant_id, account_id, include_personal=False)
     return {**personal, "global": {**global_items, "tools": visible["tools"], "knowledge": visible["knowledge"]}}
 
 

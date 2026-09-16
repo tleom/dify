@@ -11,9 +11,9 @@ from flask import Flask
 from flask.testing import FlaskClient
 from flask_restx import Api
 from pydantic import ValidationError
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
-from werkzeug.exceptions import BadRequest, Forbidden, NotFound
+from werkzeug.exceptions import BadRequest, Conflict, Forbidden, NotFound
 
 from controllers.common.schema import query_params_from_model
 from controllers.console.workbench import FileLinks, WorkbenchFileLinksQuery
@@ -21,8 +21,9 @@ from controllers.files.workbench_files import WorkbenchFileContent
 from core.db import session_factory as factory_module
 from models.agent import AgentWorkspace, AgentWorkspaceOwnerType
 from models.base import TypeBase
-from models.workbench import WorkbenchChat, WorkbenchRun
+from models.workbench import WorkbenchChat, WorkbenchRun, WorkbenchRunEvent
 from services.workbench import file_links, files
+from services.workbench.preview import AgentFilePreviewPayload, open_preview
 
 type FileSpace = tuple[file_links.AgentFileLinksPayload, str, dict[str, bytes], sessionmaker[Session], FlaskClient]
 
@@ -47,7 +48,8 @@ def file_space(monkeypatch: pytest.MonkeyPatch, config_overrides: Callable[..., 
     TypeBase.metadata.create_all(
         engine,
         tables=[
-            TypeBase.metadata.tables[model.__tablename__] for model in (WorkbenchChat, WorkbenchRun, AgentWorkspace)
+            TypeBase.metadata.tables[model.__tablename__]
+            for model in (WorkbenchChat, WorkbenchRun, AgentWorkspace, WorkbenchRunEvent)
         ],
     )
     factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -165,6 +167,44 @@ def test_ui_and_agent_receive_identical_stable_links_and_inline_bytes(file_space
     assert client.get(urlsplit(ui[0]["preview_url"]).path + "?mode=preview").mimetype == "image/png"
     specific = file_links.agent_lookup(payload.model_copy(update={"path": "/workspace/" + ui[0]["path"]}))
     assert specific["entries"] == ui[:1]
+
+
+def test_preview_records_one_owned_event_and_retries_do_not_reopen(
+    file_space: FileSpace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload, root, _, factory, _ = file_space
+    notify = Mock()
+    monkeypatch.setattr("services.workbench.preview.notify", notify)
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, payload.workbench_run_id)
+        assert run is not None
+        run.backend_run_id = "native-preview"
+    request = AgentFilePreviewPayload(
+        **payload.model_dump(exclude={"path"}), path="图表.png", backend_run_id="native-preview", request_key="one"
+    )
+    first = open_preview(request)
+    assert first == open_preview(request)
+    assert first["accepted"] is True
+    assert first["file"]["path"] == root + "/图表.png"
+    assert "download_url" not in first["file"]
+    with factory() as session:
+        events = session.scalars(select(WorkbenchRunEvent)).all()
+        assert len(events) == 1
+        assert events[0].sequence == 1
+    with pytest.raises(Conflict):
+        open_preview(request.model_copy(update={"path": "报告.html"}))
+    with pytest.raises(Forbidden):
+        open_preview(request.model_copy(update={"backend_run_id": "old-execution"}))
+    with pytest.raises(Forbidden):
+        open_preview(request.model_copy(update={"account_id": "another-account"}))
+    with pytest.raises(BadRequest):
+        open_preview(request.model_copy(update={"path": "."}))
+    with factory.begin() as session:
+        run = session.get(WorkbenchRun, payload.workbench_run_id)
+        assert run is not None
+        run.status = "completed"
+    with pytest.raises(Forbidden):
+        open_preview(request)
 
 
 def test_signature_tamper_owner_mismatch_missing_file_and_deleted_chat_revoke(file_space: FileSpace) -> None:

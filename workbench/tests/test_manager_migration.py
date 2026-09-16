@@ -30,17 +30,26 @@ class MigrationTests(unittest.TestCase):
                 present = False
             return SimpleNamespace(returncode=0, stdout='')
         module.docker = docker
+        if exists and running and not current:
+            with self.assertRaisesRegex(RuntimeError, '个人沙箱需要更新'):
+                module.ensure(key)
+            return calls
         result = module.ensure(key)
         self.assertIn('endpoint', result)
         self.assertTrue((Path(state.name) / key).exists())
+        for args, _ in calls:
+            if args[0] == 'exec':
+                interpreter = args.index(name := module.identity(key)[0]) + 1
+                self.assertEqual(args[interpreter:interpreter + 4], ('/usr/local/bin/python', '-I', '-S', '-c'))
+            elif args[0] == 'run':
+                self.assertEqual(args[args.index('--entrypoint') + 1], '/usr/local/bin/python')
+                image = args.index(module.IMAGE)
+                self.assertEqual(args[image + 1:image + 4], ('-I', '-S', '-c'))
         return calls
 
-    def test_running_previous_image_is_not_interrupted(self):
+    def test_running_previous_image_is_not_interrupted_or_used_for_helpers(self):
         calls = self.scenario(True, True)
-        self.assertEqual([args[0] for args, _ in calls], ['inspect', 'start', 'exec'])
-        preparation = calls[-1][0]
-        self.assertEqual(preparation[1:3], ('--user', '0'))
-        self.assertIn("os.makedirs('/opt/workbench-global', mode=0o755, exist_ok=True)", preparation[-1])
+        self.assertEqual([args[0] for args, _ in calls], ['inspect'])
 
     def test_current_image_uses_existing_container(self):
         calls = self.scenario(True, False, True)

@@ -407,6 +407,8 @@ class AgentRunRunner:
                 files_layer = next(
                     (slot.layer for slot in run.slots.values() if isinstance(slot.layer, WorkbenchFilesLayer)), None
                 )
+                if files_layer is not None:
+                    files_layer.run_id = self.run_id
                 from dify_agent.layers.workbench_followups import WorkbenchFollowupsLayer
                 from dify_agent.runtime.workbench_followups import WorkbenchFollowupsCapability
 
@@ -571,7 +573,12 @@ class AgentRunRunner:
                         "Deferred tool results require a 'history' layer with prior message history."
                     )
 
-                if control_layer is not None and (control_layer.runtime_state.control or {}).get("kind") == "compact":
+                compact_command = control_layer.runtime_state.control if control_layer is not None else None
+                manual_compaction = bool(compact_command and compact_command.get("kind") == "compact")
+                continue_after_compaction = bool(
+                    manual_compaction and compact_command and compact_command.get("continue_after")
+                )
+                if manual_compaction and deferred_tool_results is None:
                     from dify_agent.runtime.manual_compaction import compact_history
 
                     async with asyncio.timeout(self.run_timeout_seconds):
@@ -587,7 +594,8 @@ class AgentRunRunner:
                     usage = _serialize_agent_usage(compact_usage)
                     self._terminal_usage = usage
                     result_kind = "output"
-                else:
+                    message_history = history_layer.message_history if history_layer is not None else None
+                if not manual_compaction or continue_after_compaction or deferred_tool_results is not None:
                     from dify_agent.runtime.knowledge import require_knowledge_before_answer
 
                     agent = create_agent(

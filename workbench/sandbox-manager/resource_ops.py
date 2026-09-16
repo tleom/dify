@@ -130,16 +130,15 @@ def personal(payload, root="/workspace"):
     rootfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         warnings = []
-        try:
-            memory = read_file(rootfd, "memory.md")
-        except (ValueError, OSError) as error:
-            if operation != "list":
-                raise
-            memory = None
-            warnings.append("memory.md 无法读取：" + str(error))
+        memory = None
+        if operation in {"list", "memory_update"}:
+            try:
+                memory = read_file(rootfd, "memory.md")
+            except (ValueError, OSError) as error:
+                if operation != "list":
+                    raise
+                warnings.append("memory.md 无法读取：" + str(error))
         if memory is not None and len(memory) > MAX_SKILL_TEXT:
-            if operation != "list":
-                raise ValueError("memory.md 不能超过 64 KiB")
             warnings.append("memory.md 超过 64 KiB，未载入模型")
         try:
             memory_text = (memory or b"").decode("utf-8-sig") if len(memory or b"") <= MAX_SKILL_TEXT else ""
@@ -179,7 +178,7 @@ def personal(payload, root="/workspace"):
         try:
             if operation == "list":
                 skills = []
-                for name in sorted(os.listdir(skillsfd))[:101]:
+                for name in sorted(os.listdir(skillsfd)):
                     info = os.stat(name, dir_fd=skillsfd, follow_symlinks=False)
                     if not stat.S_ISDIR(info.st_mode):
                         continue

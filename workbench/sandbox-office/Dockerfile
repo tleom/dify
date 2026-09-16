@@ -61,6 +61,12 @@ RUN fc-cache -f
 RUN google-chrome --version > /opt/office/chrome-version.txt \
     && dpkg-query -W > /opt/office/system-packages.txt
 
+# Management helpers use this interpreter and its standard library as root.
+# The upstream image assigns some /usr/local directories to the task user;
+# keep the interpreter, all import dependencies and their parents immutable.
+RUN chown -R 0:0 /usr/local \
+    && chmod -R go-w /usr/local
+
 ENV PATH=/opt/user-env/current/python/bin:/opt/office/python/bin:/opt/user-env/current/node/node_modules/.bin:/opt/office/node/node_modules/.bin:/usr/local/bin:/usr/bin:/bin \
     NODE_PATH=/opt/user-env/current/node/node_modules:/opt/office/node/node_modules
 USER dify

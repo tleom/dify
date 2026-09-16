@@ -27,6 +27,10 @@ class GoalState(ControlModel):
     max_rounds: int = Field(default=256, ge=1, le=10000)
     reason: str | None = Field(default=None, max_length=4000)
     last_run_id: str | None = None
+    resource_mentions: dict[str, list[str]] = Field(default_factory=dict)
+    started_at: float | None = Field(default=None, ge=0)
+    elapsed_seconds: float = Field(default=0, ge=0)
+    active_since: float | None = Field(default=None, ge=0)
 
 
 class TodoItem(ControlModel):

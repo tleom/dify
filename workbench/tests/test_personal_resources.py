@@ -49,6 +49,35 @@ def test_import_toggle_replace_and_recoverable_backup(resources, tmp_path):
     assert next((tmp_path / ".skill-backups").iterdir()).joinpath("SKILL.md").read_text().startswith("---")
 
 
+@pytest.mark.parametrize("old", [b"a" * (64 * 1024 + 1), b"\xff\xfe"])
+def test_invalid_memory_can_be_replaced_without_blocking_skills(resources, tmp_path, old):
+    (tmp_path / "memory.md").write_bytes(old)
+    resources.personal({"operation": "skill_import", "name": "report", **package()}, str(tmp_path))
+    resources.personal({"operation": "skill_toggle", "name": "report", "enabled": False}, str(tmp_path))
+    listing = resources.personal({"operation": "list"}, str(tmp_path))
+    assert listing["warnings"] and not listing["skills"][0]["enabled"]
+    assert resources.personal({"operation": "memory_update", "content": "short", "version": None}, str(tmp_path)) == {"conflict": True}
+    resources.personal({"operation": "memory_update", "content": "新记忆", "version": listing["memory"]["version"]}, str(tmp_path))
+    assert (tmp_path / "memory.md").read_text(encoding="utf-8") == "新记忆"
+
+
+def test_unreadable_memory_does_not_block_independent_skill_operations(resources, tmp_path):
+    (tmp_path / "memory.md").symlink_to(tmp_path / "missing")
+    resources.personal({"operation": "skill_import", "name": "report", **package()}, str(tmp_path))
+    resources.personal({"operation": "skill_toggle", "name": "report", "enabled": False}, str(tmp_path))
+    assert (tmp_path / "memory.md").is_symlink()
+
+
+def test_skills_after_the_previous_listing_limit_remain_visible(resources, tmp_path):
+    for index in range(105):
+        directory = tmp_path / "skills" / f"skill-{index:03}"
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(f"# Skill {index}", encoding="utf-8")
+    result = resources.personal({"operation": "list"}, str(tmp_path))
+    assert len(result["skills"]) == 105
+    assert result["skills"][-1]["id"] == "skill-104"
+
+
 @pytest.mark.parametrize("bad", ["../escape", "/outside", "a/../../escape", "a\\escape", "C:/escape", "a//escape"])
 def test_archive_path_traversal_rejected_before_write(resources, bad):
     stream = io.BytesIO()

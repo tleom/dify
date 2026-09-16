@@ -213,6 +213,9 @@ def expire_input(run_id, *, owner=None, request_id=None, manual=False):
             ),
         )
         payload["continuation"] = {"calls": {pending["tool_call_id"]: result.model_dump(mode="json")}}
+        from services.workbench.human_input import remember
+
+        remember(run, payload, pending, result.model_dump(mode="json"))
         payload["last_input_timeout"] = expected_id
         payload.pop("pending", None)
         payload.pop("human_input", None)

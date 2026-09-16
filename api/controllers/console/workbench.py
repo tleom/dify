@@ -104,6 +104,7 @@ class WorkbenchFilePayload(BaseModel):
 
 class WorkbenchResumePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=1, max_length=200)
     values: dict[str, str] = Field(default_factory=dict)
     action: str | None = Field(default=None, min_length=1, max_length=100)
 
@@ -143,6 +144,7 @@ class WorkbenchRegeneratePayload(BaseModel):
 
 class WorkbenchResourceResponse(ResponseModel):
     id: str
+    scope: Literal["global", "personal"] | None = None
     name: str
     description: str | None = None
     group: str | None = None
@@ -160,6 +162,7 @@ class WorkbenchModelResponse(ResponseModel):
 
 
 class WorkbenchCatalogResponse(ResponseModel):
+    command_resources_protocol: Literal[1] = 1
     control_protocol: Literal[1] = 1
     resources_protocol: Literal[1] = 1
     activity_protocol: Literal[1] = 1
@@ -225,6 +228,7 @@ class WorkbenchRunResponse(ResponseModel):
     context_usage: dict[str, Any] | None = None
     pending: dict[str, Any] | None = None
     human_input: WorkbenchHumanInputResponse | None = None
+    human_input_history: list[dict[str, Any]] = Field(default_factory=list)
     recovery: WorkbenchRecoveryResponse | None = None
 
 
@@ -696,7 +700,21 @@ class Resume(WorkbenchResource):
         payload = WorkbenchResumePayload.model_validate(console_ns.payload or {})
         return dump_response(
             WorkbenchRunEnvelopeResponse,
-            {"data": service.resume(*self.owner(), str(run_id), payload.values, payload.action)},
+            {"data": service.resume(*self.owner(), str(run_id), payload.values, payload.action, payload.request_id)},
+        )
+
+
+@console_ns.route("/workbench/runs/<uuid:run_id>/input-supplement")
+class InputSupplement(WorkbenchResource):
+    @console_ns.expect(console_ns.models[WorkbenchResumePayload.__name__])
+    @console_ns.response(200, "Answer sent as a follow-up", console_ns.models[WorkbenchRunEnvelopeResponse.__name__])
+    def post(self, run_id):
+        from services.workbench.human_input import supplement
+
+        payload = WorkbenchResumePayload.model_validate(console_ns.payload or {})
+        return dump_response(
+            WorkbenchRunEnvelopeResponse,
+            {"data": supplement(*self.owner(), str(run_id), payload.request_id, payload.values, payload.action)},
         )
 
 

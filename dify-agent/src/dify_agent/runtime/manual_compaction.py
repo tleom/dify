@@ -1,5 +1,6 @@
 """Manual context summary using the installed harness's native compaction API."""
 
+import asyncio
 import copy
 import hashlib
 
@@ -104,10 +105,22 @@ async def compact_history(*, layer, model, history, checkpoint, sink, run_id, wi
             if checkpoint is None:
                 raise RuntimeError("Manual compaction requires durable history checkpointing")
             await checkpoint.save(result)
-            replace_run_history(history, result)
-        message = f"上下文已压缩，估算用量从 {before} 降至 {after}" if changed else "当前上下文无需进一步压缩"
-        await publish("compacted" if changed else "unchanged", after=after if changed else before, message=message)
-        return message, usage
     except Exception:
         await publish("failed", message="上下文压缩未完成，原始记录已保留")
         raise
+
+    if changed:
+        replace_run_history(history, result)
+    # History is already committed. A failed notification must never change the
+    # outcome to "failed / original retained". The stable key makes retries safe
+    # when the API committed its state but the event transport lost its response.
+    message = f"上下文已压缩，估算用量从 {before} 降至 {after}" if changed else "当前上下文无需进一步压缩"
+    for attempt in range(3):
+        try:
+            await publish("compacted" if changed else "unchanged", after=after if changed else before, message=message)
+            break
+        except Exception as error:
+            if attempt == 2:
+                raise RuntimeError(message + "；完成状态同步失败，请刷新后核对") from error
+            await asyncio.sleep(0.2 * (attempt + 1))
+    return message, usage

@@ -8,13 +8,15 @@ idempotency records; periodic goal admission recovers a lost publication.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import UTC, timedelta
 from hashlib import sha256
+from operator import itemgetter
 from typing import Any, Literal
 from uuid import uuid4
 
 from dify_agent.protocol.workbench_control import (
     CompactionState,
+    GoalState,
     GoalUpdate,
     PlanState,
     TodoWrite,
@@ -45,6 +47,49 @@ class AgentControlPayload(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+def _tick_goal(goal: GoalState, now: float) -> None:
+    """Persist active time at phase boundaries; reading never advances stored time."""
+    if goal.started_at is None:
+        goal.started_at = now
+    if goal.phase == "active":
+        if goal.active_since is None:
+            goal.active_since = now
+    elif goal.active_since is not None:
+        goal.elapsed_seconds += max(0, now - goal.active_since)
+        goal.active_since = None
+
+
+def _restore_goal_clock(session, chat, goal: GoalState) -> None:
+    """Recover pre-clock goals from their durable command lifecycle snapshots."""
+    snapshots = []
+    for record in session.scalars(
+        select(WorkbenchCommand).where(
+            WorkbenchCommand.chat_id == chat.id,
+            WorkbenchCommand.tenant_id == chat.tenant_id,
+            WorkbenchCommand.account_id == chat.account_id,
+            WorkbenchCommand.result.contains(goal.id),
+        )
+    ):
+        state = json.loads(record.result).get("state", {})
+        value = state.get("goal") or {}
+        if value.get("id") == goal.id:
+            snapshots.append((state.get("revision", 0), record.created_at, value["phase"]))
+    if not snapshots:
+        return
+    phase = goal.phase
+    last_time = 0.0
+    for _, created_at, saved_phase in sorted(snapshots, key=itemgetter(0)):
+        last_time = max(last_time, created_at.replace(tzinfo=UTC).timestamp())
+        goal.phase = saved_phase
+        _tick_goal(goal, last_time)
+    goal.phase = phase
+    # Human stop and terminal-error settlement can change phase without a command.
+    run = session.get(WorkbenchRun, goal.last_run_id) if goal.last_run_id else None
+    if run is not None and run.chat_id == chat.id:
+        last_time = max(last_time, run.updated_at.replace(tzinfo=UTC).timestamp())
+    _tick_goal(goal, last_time)
+
+
 def load(session, chat) -> WorkbenchControlState:
     row = session.scalar(
         select(WorkbenchControl).where(
@@ -53,7 +98,10 @@ def load(session, chat) -> WorkbenchControlState:
             WorkbenchControl.account_id == chat.account_id,
         )
     )
-    return WorkbenchControlState.model_validate_json(row.state) if row else WorkbenchControlState()
+    state = WorkbenchControlState.model_validate_json(row.state) if row else WorkbenchControlState()
+    if state.goal and state.goal.started_at is None:
+        _restore_goal_clock(session, chat, state.goal)
+    return state
 
 
 def save(session, chat, state: WorkbenchControlState):
@@ -68,12 +116,15 @@ def save(session, chat, state: WorkbenchControlState):
         session.add(row)
     elif row.tenant_id != chat.tenant_id or row.account_id != chat.account_id:
         raise Forbidden()
+    now = naive_utc_now()
+    if state.goal:
+        _tick_goal(state.goal, now.replace(tzinfo=UTC).timestamp())
     row.state = state.model_dump_json()
     row.goal_active = bool(
         (state.goal and state.goal.phase == "active")
         or (state.compaction and state.compaction.phase in {"queued", "compacting"})
     )
-    row.updated_at = naive_utc_now()
+    row.updated_at = now
     return state
 
 
@@ -113,7 +164,36 @@ def _record(session, chat, request_key, command, result):
     )
 
 
-def issue(tenant_id, account_id, chat_id, *, command, request_key, expected_revision=None, files=None):
+def clear_todos(tenant_id, account_id, chat_id, *, request_key, expected_revision):
+    """Clear the displayed generation without touching the goal or conversation."""
+    from services.workbench.service import _chat, authorize
+
+    authorize(tenant_id, account_id)
+    fingerprint = json.dumps({"action": "clear_todos", "revision": expected_revision}, sort_keys=True)
+    with session_factory.get_session_maker().begin() as session:
+        chat = _chat(session, tenant_id, account_id, chat_id, lock=True)
+        previous = session.scalar(
+            select(WorkbenchCommand).where(
+                WorkbenchCommand.chat_id == chat.id, WorkbenchCommand.request_key == request_key
+            )
+        )
+        state = load(session, chat)
+        if previous:
+            if previous.command != fingerprint:
+                raise Conflict("操作编号已用于另一个操作")
+        else:
+            if state.revision != expected_revision:
+                raise Conflict("任务清单已更新，请刷新后再清除")
+            state.todos, state.todos_run_id = [], None
+            state.revision += 1
+            save(session, chat, state)
+            _record(session, chat, request_key, fingerprint, {"state": state.model_dump(mode="json")})
+        return state.model_dump(mode="json")
+
+
+def issue(
+    tenant_id, account_id, chat_id, *, command, request_key, expected_revision=None, files=None, resource_mentions=None
+):
     """Execute a slash command without sending command/status text to a model."""
     from services.workbench.service import _chat, authorize, enqueue
 
@@ -123,9 +203,26 @@ def issue(tenant_id, account_id, chat_id, *, command, request_key, expected_revi
     except ValueError as error:
         raise BadRequest(str(error)) from error
     files = files or []
-    if files and not (parsed.action in {"create", "edit"} or (parsed.name == "plan" and parsed.action == "on")):
+    if files and not (
+        parsed.action in {"create", "edit"}
+        or (parsed.name == "plan" and parsed.action == "on")
+        or (parsed.name == "compact" and parsed.text)
+    ):
         raise BadRequest("附件需要随目标内容或计划内容一起发送")
-    fingerprint = json.dumps({"command": command, "files": files}, sort_keys=True)
+    from services.workbench.mentions import ResourceMentions, resolve_mentions
+
+    refs = ResourceMentions.model_validate(resource_mentions or {}).model_dump()
+    if any(refs.values()):
+        from services.workbench.resources import personal_skill_catalog
+        from services.workbench.service import template
+
+        personal = (
+            personal_skill_catalog(tenant_id, account_id)
+            if any(name.startswith("personal:") for name in refs["skills"])
+            else []
+        )
+        resolve_mentions(template(tenant_id, account_id)["soul"], refs, personal_skills=personal)
+    fingerprint = json.dumps({"command": command, "files": files, "resource_mentions": refs}, sort_keys=True)
     result: dict[str, Any]
     with session_factory.get_session_maker().begin() as session:
         chat = _chat(session, tenant_id, account_id, chat_id, lock=True)
@@ -150,6 +247,8 @@ def issue(tenant_id, account_id, chat_id, *, command, request_key, expected_revi
                     state = change_goal(state, parsed)
                 except ValueError as error:
                     raise Conflict(str(error)) from error
+                if state.goal and parsed.action in {"create", "edit"} and resource_mentions is not None:
+                    state.goal.resource_mentions = refs
                 message = "当前没有目标" if state.goal is None else f"目标：{state.goal.objective}"
                 if files:
                     run_request = {"query": "目标参考附件", "files": files, "queue_when_busy": True}
@@ -187,9 +286,12 @@ def issue(tenant_id, account_id, chat_id, *, command, request_key, expected_revi
                 state.revision += 1
                 message = "已开始压缩上下文"
                 run_request = {
-                    "query": "压缩上下文",
-                    "_control": {"kind": "compact", "id": identifier, "focus": parsed.text},
+                    "query": parsed.text or "压缩上下文",
+                    "files": files,
+                    "_control": {"kind": "compact", "id": identifier, "continue_after": bool(parsed.text)},
                 }
+            if run_request is not None:
+                run_request["resource_mentions"] = refs
             save(session, chat, state)
             result = {
                 "state": state.model_dump(mode="json"),
@@ -306,6 +408,8 @@ def drive_goal(tenant_id, account_id, chat_id):
             {
                 "query": current.objective if number == 1 else "继续完成目标：" + current.objective,
                 "activity_protocol": 1,
+                "followup_protocol": 1,
+                "resource_mentions": current.resource_mentions,
             },
             control={"kind": "goal", "goal_id": current.id, "goal_revision": current.revision, "round": number},
         )
@@ -345,26 +449,21 @@ def settle(tenant_id, account_id, chat_id):
     with session_factory.get_session_maker().begin() as session:
         chat = _chat(session, tenant_id, account_id, chat_id, lock=True)
         state = load(session, chat)
-        latest = session.scalar(
-            select(WorkbenchRun)
-            .where(
-                WorkbenchRun.chat_id == chat.id,
-                WorkbenchRun.status.not_in(["waiting_turn", "discarded", "steered"]),
-            )
-            .order_by(WorkbenchRun.created_at.desc(), WorkbenchRun.id.desc())
-            .limit(1)
-        )
-        payload = json.loads(latest.payload) if latest else {}
-        changed = False
-        if state.compaction and state.compaction.phase == "queued":
-            compact_run = session.scalar(
-                select(WorkbenchRun.id)
-                .where(
-                    WorkbenchRun.chat_id == chat.id,
-                    WorkbenchRun.payload.contains(state.compaction.id),
-                )
+        # Settle the run belonging to each control generation. A newer ordinary
+        # message must not hide a failed goal round or leave compaction stuck.
+        goal_run = session.get(WorkbenchRun, state.goal.last_run_id) if state.goal and state.goal.last_run_id else None
+        compact_run = (
+            session.scalar(
+                select(WorkbenchRun)
+                .where(WorkbenchRun.chat_id == chat.id, WorkbenchRun.payload.contains(state.compaction.id))
+                .order_by(WorkbenchRun.created_at.desc(), WorkbenchRun.id.desc())
                 .limit(1)
             )
+            if state.compaction and state.compaction.phase in {"queued", "compacting"}
+            else None
+        )
+        changed = False
+        if state.compaction and state.compaction.phase == "queued":
             command_row = session.scalar(
                 select(WorkbenchCommand)
                 .where(
@@ -378,11 +477,14 @@ def settle(tenant_id, account_id, chat_id):
                 state.compaction.phase = "failed"
                 state.compaction.message = "压缩任务未能入队，原上下文保留，请重新执行 /compact"
                 changed = True
-        if (
-            latest
-            and latest.status in {"failed", "interrupted", "cancelled"}
-            and not (recovery_dto(payload) or {}).get("pending")
-        ):
+        for controlled_run in (goal_run, compact_run):
+            if controlled_run is None or controlled_run.chat_id != chat.id:
+                continue
+            payload = json.loads(controlled_run.payload)
+            if controlled_run.status not in {"failed", "interrupted", "cancelled"} or (recovery_dto(payload) or {}).get(
+                "pending"
+            ):
+                continue
             current = payload.get("control", {})
             if (
                 state.goal
@@ -390,15 +492,19 @@ def settle(tenant_id, account_id, chat_id):
                 and current.get("goal_id") == state.goal.id
                 and current.get("goal_revision") == state.goal.revision
             ):
-                state.goal.phase, state.goal.reason = "blocked", latest.error or "目标执行中断，请检查后继续"
+                state.goal.phase, state.goal.reason = "blocked", controlled_run.error or "目标执行中断，请检查后继续"
                 state.goal.revision += 1
                 changed = True
             if (
                 state.compaction
+                and current.get("kind") == "compact"
                 and current.get("id") == state.compaction.id
                 and state.compaction.phase in {"queued", "compacting"}
             ):
-                state.compaction.phase, state.compaction.message = "failed", latest.error or "压缩已取消，原上下文保留"
+                state.compaction.phase, state.compaction.message = (
+                    "failed",
+                    controlled_run.error or "压缩任务已中断，请刷新后核对上下文状态",
+                )
                 changed = True
         if changed:
             state.revision += 1
