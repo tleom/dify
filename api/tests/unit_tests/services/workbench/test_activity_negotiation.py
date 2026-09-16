@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from controllers.console.workbench import WorkbenchRegeneratePayload, WorkbenchRunPayload
 from models.workbench import WorkbenchRun
-from services.workbench import branches, mentions, scheduler, service
+from services.workbench import branches, mentions, personal_mcp, scheduler, service
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -34,6 +34,7 @@ def test_enqueue_freezes_only_a_negotiated_and_enabled_protocol(
         ),
     )
     monkeypatch.setattr(mentions, "default_capabilities", lambda _soul, selection: selection)
+    monkeypatch.setattr(personal_mcp, "catalog", Mock(return_value=[]))
     monkeypatch.setattr(branches, "resolve_parent", lambda *_args: {})
     session = Mock()
     empty_runs: list[object] = []
