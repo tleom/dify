@@ -117,8 +117,29 @@ Plan mode guides information gathering, analysis, requirements clarification,
 discussion of material choices, a complete reviewable plan, and revisions based
 on feedback. `exit_plan_mode` pauses for an explicit review action; keep-planning
 feedback leaves the mode active and requires another complete plan. Approval
-exits planning and resumes execution. This is model guidance and a persisted
-approval workflow, not an OS-level read-only sandbox.
+exits planning and resumes execution. Complete candidates have monotonically
+increasing versions; approval is tied to the exact content/version displayed in
+the pending card. The approved plan persists independently of history summaries.
+Clarification answers, skipped questions and stale review cards cannot approve a
+plan. Feedback requires a revised candidate before execution can be approved.
+
+While planning, the runtime exposes only trusted built-in investigation and
+collaboration tools. Validation covers deferred/external tools as well as normal
+functions, with API admission and environment-dispatch checks as a second boundary.
+Text is held until the response passes plan and file checks; rejected final text
+is never published as an answer. Neither text nor structured output can replace
+a completed plan review. `plan_inspect` runs
+bounded shell investigations in a disposable container: owner volumes are mounted
+read-only, the image is read-only, network is disabled, no runtime credentials are
+injected, and writable scratch is confined to `/tmp`. Scratch survives subsequent
+inspections within the same conversation and can hold parsing scripts/previews;
+up to four temporary PNG/JPEG previews can be returned to the model. Normal shell,
+file-write, environment-update and external plugin tools become available after
+approval. Sandbox-manager and Agent/API must be released together for this path.
+The manager issues a durable binding-generation ticket before the API rechecks
+the active execution. Stop rotates this ticket, removes preparing/running
+inspection containers, and serializes cleanup with startup and request teardown.
+Requests delayed beyond the stop cannot launch; manager restart preserves the fence.
 
 Goals are persisted control state independent of an assistant's final response.
 While active, the server schedules another round after the previous run and
@@ -128,21 +149,26 @@ complete the goal. Default goals have no fixed round cap. The former internal
 goals still need explicit resumption. Finite non-default limits remain readable.
 Human edits, pause/stop, plan review, recovery and completed-goal fencing retain
 their existing behavior. Completion requires the current goal revision and a
-finished task list; the model is instructed to audit every original requirement
+finished execution list when one is used; the model audits every original requirement
 against actual verification and delivery. The semantic truth of completion still
 depends on model judgment and the evidence available to it.
 
 `get_goal` exposes the goal's `goal_id` and `revision` directly, avoiding ambiguity
 with the collaboration state's separate revision. A rejected update returns the
 fresh goal for reevaluation; it never silently substitutes a newer revision.
-Plan and active-goal business tools require a task marked in progress. Once a
-task list exists it must have an active step before business work. Four business
-tool executions trigger a progress checkpoint even when no list was created:
-the next business tool waits for `todo_write`. Control, clarification and resource
-tools remain available. The model can keep the same step in progress when it is
-still working, and must only complete steps backed by evidence. Already-running
-parallel calls finish; the next admission observes the checkpoint. This bounds
-silent task-list staleness without treating tool counts as proof of completion.
+Execution lists are optional for complex work or an explicit user request. They
+are unavailable during planning and never gate ordinary business tools by call
+count or by requiring an active item. Updates describe actual milestones,
+changed next actions or blockers; identical list writes produce no new progress
+event. Simple goals can complete without creating a list. Goal input messages
+retain their original text and attachments; automatic subsequent rounds remain
+internal continuations. Legacy placeholder queries are recovered from their own
+immutable command record when reading history, never from an edited current goal.
+First-input recovery uses a non-recursive, idempotent enqueue path and the current
+authorized chat configuration until a run is committed. Once committed, its
+configuration remains frozen. Removing the first queued goal input pauses that
+goal; steering it binds the goal to the receiving run and counts that as its first
+round. A removed input is never replayed as a missing enqueue.
 
 Workbench runs with a conversation shell also apply the SDK's `ToolOutputLimits`.
 Oversized tool results are stored under that conversation's
@@ -242,10 +268,10 @@ latest memory and merges again. Transport retries retain the original payload; a
 already-applied identical value is a no-op. External file IO runs outside database
 transactions. Unreadable memory cannot be silently replaced by the Agent.
 
-For multi-step work, `todo_write` marks each step active before execution and completed
-after verification, before the next step starts. The current list is injected at every
-model boundary. Failures keep the step unfinished; completion is a model decision
-based on task evidence, not an inference from tool-call counts.
+For complex execution, `todo_write` is optional: update an existing list when the
+actual next action, progress or blocker changes, and mark steps completed only after
+verification. The current execution list is injected outside plan mode. Simple work
+does not need a list; unchanged lists do not create progress events or revisions.
 
 The resource catalog lists published global skills first and enabled, valid personal
 skills second. Personal skill IDs use `personal:<name>`; they belong to explicit

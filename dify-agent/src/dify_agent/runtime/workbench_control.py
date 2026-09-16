@@ -1,68 +1,43 @@
-"""Refresh collaboration guidance at accepted model boundaries, outside history."""
+"""Refresh mode guidance and enforce planning's read-only tool boundary."""
 
 from dataclasses import dataclass
 
 from pydantic_ai import ModelRetry
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.models import InstructionPart
+from pydantic_ai.tools import DeferredToolRequests
 
 from dify_agent.layers.workbench_control import WorkbenchControlLayer
 
-
-# Control and clarification tools remain available at a progress checkpoint.
-CONTROL_TOOLS = frozenset(
-    {
-        "todo_write",
-        "get_goal",
-        "update_goal",
-        "exit_plan_mode",
-        "ask_human",
-        "read_memory",
-        "update_memory",
-        "read_skill",
-        "report_activity",
-    }
+PLAN_REVIEW_RETRY = (
+    "计划模式尚未提交可审阅的完整方案。方案已准备好时调用 exit_plan_mode；"
+    "仍缺少关键决定时用 ask_human 讨论。不能用最终答复或任务清单跳过计划审阅。"
 )
-TASK_CHECKPOINT_INTERVAL = 4
 
 
 @dataclass
 class WorkbenchControlCapability(AbstractCapability[None]):
     layer: WorkbenchControlLayer
-    business_calls_since_todo: int = 0
 
-    def task_checkpoint(self) -> str | None:
-        state = self.layer.runtime_state.state
-        mode_active = state.plan.active or (state.goal is not None and state.goal.phase == "active")
-        if (mode_active or state.todos) and not any(item.status == "in_progress" for item in state.todos):
-            return (
-                "当前任务没有正在进行的清单步骤。请先用 todo_write 建立或更新完整清单，"
-                "把即将执行的步骤设为 in_progress，再进行业务操作。仅把已验证的步骤标为 completed。"
-            )
-        if self.business_calls_since_todo >= TASK_CHECKPOINT_INTERVAL:
-            return (
-                "已连续执行多个业务工具，需要核对任务清单。请先用 todo_write 建立或更新当前完整清单："
-                "将已验证完成的步骤立即标为 completed，下一步设为 in_progress；"
-                "如果仍在处理同一步，可以如实保留 in_progress，不能为了继续而虚报完成。"
-            )
-        return None
+    async def after_tool_validate(self, ctx, *, call, tool_def, args):
+        # External/deferred tools never enter before_tool_execute in the SDK.
+        # Validate every accepted call before it can leave the Agent process.
+        return await self.before_tool_execute(ctx, call=call, tool_def=tool_def, args=args)
+
+    def validate_response(self, response):
+        if self.layer.runtime_state.state.plan.active and not response.tool_calls:
+            raise ModelRetry(PLAN_REVIEW_RETRY)
 
     async def before_tool_execute(self, ctx, *, call, tool_def, args):
-        if call.tool_name not in CONTROL_TOOLS and (checkpoint := self.task_checkpoint()):
-            raise ModelRetry(checkpoint + " 本次业务工具尚未执行，更新清单后再调用。")
+        # Metadata is assigned by the owning built-in layer, never inferred from
+        # a tool's name, description or model-supplied arguments. Unknown/plugin
+        # tools stay unavailable even if the model invents an undisclosed call.
+        if self.layer.runtime_state.state.plan.active and not (tool_def.metadata or {}).get("workbench_plan"):
+            raise ModelRetry(
+                "当前仍在计划模式，本次工具未执行。请用 plan_inspect 调查和解析附件，"
+                "通过 exit_plan_mode 提交完整方案；用户批准后才能实施或使用外部操作工具。"
+            )
         return args
-
-    async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
-        if call.tool_name == "todo_write":
-            result = await handler(args)
-            self.business_calls_since_todo = 0
-            return result
-        if call.tool_name in CONTROL_TOOLS:
-            return await handler(args)
-        try:
-            return await handler(args)
-        finally:
-            self.business_calls_since_todo += 1
 
     async def before_model_request(self, ctx, request_context):
         await self.layer.request()
@@ -70,12 +45,28 @@ class WorkbenchControlCapability(AbstractCapability[None]):
         state = self.layer.runtime_state.state
         if state.plan.pending:
             await self.layer.request("apply_plan", {"revision": state.revision})
-        # Use the SDK's dynamic instruction slot, not a synthetic history turn.
+        # A review tool never unlocks sibling calls in the same model response.
+        # Mode changes take effect at the next accepted model boundary.
         params = request_context.model_request_parameters
-        checkpoint = self.task_checkpoint()
+        if self.layer.runtime_state.state.plan.active:
+            params.function_tools = [
+                tool for tool in params.function_tools if (tool.metadata or {}).get("workbench_plan")
+            ]
+        else:
+            params.function_tools = [
+                tool for tool in params.function_tools if (tool.metadata or {}).get("workbench_plan") != "planning_only"
+            ]
         params.instruction_parts = [
             *(params.instruction_parts or []),
             InstructionPart(content=self.layer.guidance(), dynamic=True),
-            *([InstructionPart(content="TASK CHECKPOINT: " + checkpoint, dynamic=True)] if checkpoint else []),
         ]
         return request_context
+
+    async def after_output_process(self, ctx, *, output_context, output):
+        if (
+            self.layer.runtime_state.state.plan.active
+            and not isinstance(output, DeferredToolRequests)
+            and not ctx.partial_output
+        ):
+            raise ModelRetry(PLAN_REVIEW_RETRY)
+        return output

@@ -547,7 +547,9 @@ def execute(owner, run_id):
 
 @shared_task(queue="workbench_environment", acks_late=False)
 def update_environment(tenant_id, account_id):
+    from services.workbench import control
     from services.workbench.files import ensure_workspace, manager
+    from services.workbench.recovery import locked_run
 
     owner = f"{tenant_id}:{account_id}"
     maintenance_key = scheduler.PREFIX + "maintenance:" + owner
@@ -555,21 +557,24 @@ def update_environment(tenant_id, account_id):
         if redis_client.zcard(scheduler.PREFIX + "active:" + owner):
             return
         pending_run = None
+        plan_active = False
         with session_factory.get_session_maker().begin() as session:
-            run = session.scalar(
-                select(WorkbenchRun)
+            run_id = session.scalar(
+                select(WorkbenchRun.id)
                 .where(
                     WorkbenchRun.tenant_id == tenant_id,
                     WorkbenchRun.account_id == account_id,
                     WorkbenchRun.status.in_(["environment_update", "environment_installing"]),
                 )
                 .order_by(WorkbenchRun.created_at)
-                .with_for_update()
                 .limit(1)
             )
-            if run is not None:
-                pending_run = run.id, run.status, json.loads(run.payload)
-                run.status = "environment_installing"
+            if run_id is not None:
+                chat, run = locked_run(session, tenant_id, account_id, run_id)
+                if run.status in {"environment_update", "environment_installing"}:
+                    pending_run = run.id, run.status, json.loads(run.payload)
+                    plan_active = control.load(session, chat).plan.active
+                    run.status = "environment_installing"
         if pending_run is None:
             try:
                 if not maintenance.cancelled_installations_finished(tenant_id, account_id, manager):
@@ -585,19 +590,37 @@ def update_environment(tenant_id, account_id):
         try:
             if previous_status != "environment_installing":
                 authorize(tenant_id, account_id)
-            workspace = ensure_workspace(tenant_id, account_id)
             request_id = f"{run_id}:{payload.get('attempt', 0)}"
+            if plan_active and previous_status != "environment_installing":
+                result = {"status": "failed", "error": "计划尚未批准，未更新共享运行环境，请先提交完整方案供用户审阅"}
+            else:
+                workspace = ensure_workspace(tenant_id, account_id)
             if previous_status == "environment_installing":
                 result = manager(workspace, "environment-status", {"request_id": request_id})
                 if result["status"] == "installing":
                     return
-            else:
-                event(run_id, {"event": "workbench_status", "status": "environment_installing"})
-                result = manager(
-                    workspace, "environment", {**payload["pending"]["args"], "request_id": request_id}, timeout=950
-                )
-                if result["status"] == "installing":
-                    return
+            elif result is None:
+                # Startup can wait. Recheck the ticket and the user's latest
+                # mode before dispatch; never hold a DB write lock during IO.
+                with session_factory.get_session_maker().begin() as session:
+                    chat, run = locked_run(session, tenant_id, account_id, run_id)
+                    current_payload = json.loads(run.payload)
+                    if run.status != "environment_installing" or current_payload.get("attempt", 0) != payload.get(
+                        "attempt", 0
+                    ):
+                        return
+                    if control.load(session, chat).plan.active:
+                        result = {
+                            "status": "failed",
+                            "error": "计划尚未批准，未更新共享运行环境，请先提交完整方案供用户审阅",
+                        }
+                if result is None:
+                    event(run_id, {"event": "workbench_status", "status": "environment_installing"})
+                    result = manager(
+                        workspace, "environment", {**payload["pending"]["args"], "request_id": request_id}, timeout=950
+                    )
+                    if result["status"] == "installing":
+                        return
         except Exception:
             logger.exception("Workbench environment update failed")
             # A lost response is not evidence that the installer stopped. Reconcile by request ID.

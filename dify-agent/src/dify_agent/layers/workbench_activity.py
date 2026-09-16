@@ -143,7 +143,16 @@ class WorkbenchActivityLayer(PydanticAILayer[NoLayerDeps, object, WorkbenchActiv
 
     @property
     def tools(self):
-        return [Tool(self._report, name=TOOL_NAME, takes_ctx=True, sequential=True, prepare=self._prepare)]
+        return [
+            Tool(
+                self._report,
+                name=TOOL_NAME,
+                takes_ctx=True,
+                sequential=True,
+                prepare=self._prepare,
+                metadata={"workbench_plan": "progress"},
+            )
+        ]
 
     def _prepare(self, _ctx: RunContext[object], definition: ToolDefinition):
         if not self.config.enabled or self.runtime_state.reports_without_work >= self.config.max_reports_without_work:

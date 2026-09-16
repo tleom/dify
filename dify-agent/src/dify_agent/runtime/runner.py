@@ -476,8 +476,9 @@ class AgentRunRunner:
                             )
                         ),
                         changes=changes,
+                        control=control_capability,
                     )
-                    if files_layer is not None
+                    if files_layer is not None or control_capability is not None
                     else None
                 )
 
@@ -496,11 +497,15 @@ class AgentRunRunner:
                         if mentions_layer is not None:
                             mentions_layer.record_event(event)
                         text_delta = _extract_agent_message_delta(event)
-                        if delivery is not None and (
-                            text_delta is not None
-                            or (isinstance(event, PartEndEvent) and isinstance(event.part, TextPart))
+                        if (
+                            delivery is not None
+                            and delivery.hold_text
+                            and (
+                                text_delta is not None
+                                or (isinstance(event, PartEndEvent) and isinstance(event.part, TextPart))
+                            )
                         ):
-                            # Release each complete model response only after file-link validation.
+                            # Check plan/final-answer policy and file links before publishing text.
                             continue
                         if text_delta is not None and knowledge_layer is not None and knowledge_layer.missing_searches:
                             continue

@@ -3,7 +3,7 @@
 import json
 
 from sqlalchemy import select
-from werkzeug.exceptions import Forbidden
+from werkzeug.exceptions import Conflict, Forbidden
 
 from configs import dify_config
 from core.db.session_factory import session_factory
@@ -283,13 +283,26 @@ def pause(tenant_id, conversation_id, account_id, terminal, binding_id):
     from extensions.ext_redis import redis_client
     from models.agent import AgentWorkspaceBinding
     from services.workbench.event_log import uses_journal
+    from services.workbench.recovery import locked_run
     from services.workbench.scheduler import PREFIX, event_key
 
     with session_factory.get_session_maker().begin() as session:
-        run = current_run(session, tenant_id, conversation_id, account_id, for_update=True)
+        run = current_run(session, tenant_id, conversation_id, account_id)
         if run is None:
             return False
+        run_id, ticket = run.id, run.backend_run_id
+        # Refresh the preliminary lookup after taking the chat/run locks.
+        # Otherwise SQLAlchemy can reuse a status cached before a concurrent stop.
+        session.expire(run)
+        chat, run = locked_run(session, tenant_id, account_id, run_id)
+        if run.status != "running" or run.backend_run_id != ticket or chat.conversation_id != conversation_id:
+            return False
         pending = terminal.deferred_tool_call.model_dump(mode="json")
+        if pending["tool_name"] == "update_shared_environment":
+            from services.workbench import control
+
+            if control.load(session, chat).plan.active:
+                raise Conflict("计划尚未批准，不能更新共享运行环境")
         payload = json.loads(run.payload)
         payload["pending"] = pending
         payload.pop("continuation", None)

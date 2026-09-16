@@ -13,6 +13,7 @@ from controllers.inner_api.wraps import plugin_inner_api_only
 from fields.base import ResponseModel
 from libs.helper import dump_response
 from services.workbench.control import AgentControlPayload, agent_control
+from services.workbench.planning import AgentPlanInspectPayload, inspect
 from services.workbench.resources import AgentMemoryPayload, agent_memory_update
 
 
@@ -43,12 +44,45 @@ class AgentMemoryResponse(ResponseModel):
     version: str | None
 
 
+class PlanPreviewResponse(ResponseModel):
+    path: str
+    media_type: str
+    data: str
+
+
+class AgentPlanInspectResponse(ResponseModel):
+    output: str
+    output_path: str
+    output_truncated: bool
+    exit_code: int
+    timed_out: bool
+    previews: list[PlanPreviewResponse] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 register_schema_models(inner_api_ns, AgentControlPayload)
 register_response_schema_models(inner_api_ns, AgentControlResponse)
 register_schema_models(inner_api_ns, AgentResourcesPayload)
 register_response_schema_models(inner_api_ns, AgentResourcesResponse)
 register_schema_models(inner_api_ns, AgentMemoryPayload)
 register_response_schema_models(inner_api_ns, AgentMemoryResponse)
+register_schema_models(inner_api_ns, AgentPlanInspectPayload)
+register_response_schema_models(inner_api_ns, PlanPreviewResponse, AgentPlanInspectResponse)
+
+
+@inner_api_ns.route("/agent/workbench/plan/inspect")
+class AgentWorkbenchPlanInspect(Resource):
+    @plugin_inner_api_only
+    @inner_api_ns.expect(inner_api_ns.models[AgentPlanInspectPayload.__name__])
+    @inner_api_ns.response(
+        200, "Read-only planning investigation", inner_api_ns.models[AgentPlanInspectResponse.__name__]
+    )
+    def post(self):
+        try:
+            payload = AgentPlanInspectPayload.model_validate(inner_api_ns.payload or {})
+        except ValidationError as error:
+            raise BadRequest("计划调查参数无效") from error
+        return dump_response(AgentPlanInspectResponse, inspect(payload))
 
 
 @inner_api_ns.route("/agent/workbench/control")
