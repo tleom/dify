@@ -11,12 +11,12 @@ from werkzeug.exceptions import Conflict
 
 from models.workbench import WorkbenchChat, WorkbenchRevision, WorkbenchRun
 from services.workbench import control, followups, service
-from tests.unit_tests.services.workbench.test_followups import queue_fixture
+from tests.unit_tests.services.workbench.test_followups import Queue, queue_fixture
 
 queue = pytest.fixture(queue_fixture)
 
 
-def test_api_rejects_environment_update_while_plan_is_unapproved(queue, monkeypatch):
+def test_api_rejects_environment_update_while_plan_is_unapproved(queue: Queue, monkeypatch: pytest.MonkeyPatch) -> None:
     from extensions.ext_redis import redis_client
     from models.agent import AgentConfigVersionKind, AgentWorkspaceBinding
     from services.workbench import runtime
@@ -27,6 +27,7 @@ def test_api_rejects_environment_update_while_plan_is_unapproved(queue, monkeypa
     conversation, binding = str(uuid4()), str(uuid4())
     with queue.factory.begin() as session:
         chat = session.get(WorkbenchChat, queue.chat_id)
+        assert chat is not None
         chat.conversation_id = conversation
         session.add(
             AgentWorkspaceBinding(
@@ -59,7 +60,9 @@ def test_api_rejects_environment_update_while_plan_is_unapproved(queue, monkeypa
 
 
 @pytest.mark.parametrize("mode_change", ["before_dispatch", "during_startup", "none"])
-def test_environment_dispatch_rechecks_plan_without_installing(queue, monkeypatch, mode_change):
+def test_environment_dispatch_rechecks_plan_without_installing(
+    queue: Queue, monkeypatch: pytest.MonkeyPatch, mode_change: str
+) -> None:
     from extensions.ext_redis import redis_client
     from services.workbench import files
     from tasks import workbench_tasks as tasks
@@ -67,6 +70,7 @@ def test_environment_dispatch_rechecks_plan_without_installing(queue, monkeypatc
     run_id = queue.send("更新依赖")["id"]
     with queue.factory.begin() as session:
         run = session.get(WorkbenchRun, run_id)
+        assert run is not None
         data = json.loads(run.payload)
         data["pending"] = {
             "tool_name": "update_shared_environment",
@@ -85,10 +89,10 @@ def test_environment_dispatch_rechecks_plan_without_installing(queue, monkeypatc
     install = MagicMock(return_value={"status": "ready"})
     monkeypatch.setattr(files, "manager", install)
 
-    def activate_plan():
+    def activate_plan() -> None:
         control.issue(*queue.owner, queue.chat_id, command="/plan", request_key="enable-plan")
 
-    def ensure(*_):
+    def ensure(*_: object) -> str:
         if mode_change == "during_startup":
             activate_plan()
         return "workspace"
@@ -112,13 +116,16 @@ def test_environment_dispatch_rechecks_plan_without_installing(queue, monkeypatc
 
 
 @pytest.mark.parametrize("retry", ["driver", "same_command"])
-def test_first_goal_recovery_uses_current_configuration_once(queue, monkeypatch, retry):
+def test_first_goal_recovery_uses_current_configuration_once(
+    queue: Queue, monkeypatch: pytest.MonkeyPatch, retry: str
+) -> None:
     with monkeypatch.context() as patch:
         patch.setattr(service, "enqueue", MagicMock(side_effect=RuntimeError("enqueue gap")))
         with pytest.raises(RuntimeError):
             control.issue(*queue.owner, queue.chat_id, command="/goal 原始要求", request_key="original")
     with queue.factory.begin() as session:
         chat = session.get(WorkbenchChat, queue.chat_id)
+        assert chat is not None
         chat.version = 2
         original = session.query(WorkbenchRevision).filter_by(chat_id=queue.chat_id, version=1).one()
         session.add(
@@ -138,6 +145,7 @@ def test_first_goal_recovery_uses_current_configuration_once(queue, monkeypatch,
         admitted = control.drive_goal(*queue.owner, queue.chat_id)
     else:
         admitted = control.issue(*queue.owner, queue.chat_id, command="/goal 原始要求", request_key="original")["run"]
+    assert admitted is not None
     assert admitted["query"] == "原始要求"
     assert control.drive_goal(*queue.owner, queue.chat_id) is None
     state = control.read(*queue.owner, queue.chat_id)
@@ -145,11 +153,14 @@ def test_first_goal_recovery_uses_current_configuration_once(queue, monkeypatch,
     assert queue.published == [admitted["id"]]
     with queue.factory() as session:
         revision = session.get(WorkbenchRevision, queue.get(admitted["id"]).revision_id)
+        assert revision is not None
         assert revision.version == 2
 
 
 @pytest.mark.parametrize("action", ["remove", "steer"])
-def test_queued_goal_move_reconciles_state_without_replaying_command(queue, monkeypatch, action):
+def test_queued_goal_move_reconciles_state_without_replaying_command(
+    queue: Queue, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
     busy = queue.send("正在执行")
     goal = control.issue(*queue.owner, queue.chat_id, command="/goal 原始目标", request_key="original")
     if action == "remove":
@@ -170,17 +181,20 @@ def test_queued_goal_move_reconciles_state_without_replaying_command(queue, monk
         assert state["source_request_key"] is None
         assert queue.published == [busy["id"]]
     else:
+        assert continuation is not None
         assert continuation["is_continuation"] is True
         assert state["rounds_started"] == 2
         assert json.loads(queue.get(busy["id"]).payload)["control"]["goal_id"] == state["id"]
         assert queue.published == [busy["id"], continuation["id"]]
 
 
-def test_committed_tombstone_is_not_treated_as_a_missing_enqueue(queue):
+def test_committed_tombstone_is_not_treated_as_a_missing_enqueue(queue: Queue) -> None:
     busy = queue.send("执行中")
     goal = control.issue(*queue.owner, queue.chat_id, command="/goal 目标", request_key="initial")
     with queue.factory.begin() as session:
-        session.get(WorkbenchRun, goal["run"]["id"]).status = "discarded"
+        run = session.get(WorkbenchRun, goal["run"]["id"])
+        assert run is not None
+        run.status = "discarded"
     queue.finish(busy["id"])
     assert control.drive_goal(*queue.owner, queue.chat_id) is None
     assert control.read(*queue.owner, queue.chat_id)["goal"]["phase"] == "paused"
