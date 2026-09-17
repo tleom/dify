@@ -172,6 +172,7 @@ def test_plan_clock_ticks_until_approval_and_resets_on_new_plan(queue: Queue, mo
     with queue.factory.begin() as session:
         chat = service._chat(session, queue.owner[0], queue.owner[1], queue.chat_id, lock=True)
         state = control.load(session, chat)
+        assert state.plan.review is not None
         state.plan.answer(run_id="plan-run", version=1, plan=state.plan.review, approve=True)
         control.save(session, chat, state)
     approved = control.read(*queue.owner, queue.chat_id)["plan"]
