@@ -369,7 +369,7 @@ def test_steer_any_position_joins_actual_running_task_once_and_seals_atomically(
             event for item in events if (event := json.loads(item.payload)).get("event") == "workbench_steering"
         ]
     assert len(steering) == 1
-    assert steering[0]["message_id"] == c["id"]
+    assert steering[0]["steering_id"] == c["id"]
     batch = queue.poll(first["id"], action="seal")
     assert batch["sealed"] is False
     assert [item["id"] for item in batch["messages"]] == [c["id"]]
