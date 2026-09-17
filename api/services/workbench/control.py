@@ -59,6 +59,18 @@ def _tick_goal(goal: GoalState, now: float) -> None:
         goal.active_since = None
 
 
+def _tick_plan(plan: PlanState, now: float) -> None:
+    """Persist planning time at approval; reads leave the saved clock unchanged."""
+    if plan.started_at is None:
+        return
+    if plan.active and not plan.completed:
+        if plan.active_since is None:
+            plan.active_since = now
+    elif plan.active_since is not None:
+        plan.elapsed_seconds += max(0, now - plan.active_since)
+        plan.active_since = None
+
+
 def _restore_goal_clock(session, chat, goal: GoalState) -> None:
     """Recover pre-clock goals from their durable command lifecycle snapshots."""
     snapshots = []
@@ -122,8 +134,10 @@ def save(session, chat, state: WorkbenchControlState):
     elif row.tenant_id != chat.tenant_id or row.account_id != chat.account_id:
         raise Forbidden()
     now = naive_utc_now()
+    instant = now.replace(tzinfo=UTC).timestamp()
     if state.goal:
-        _tick_goal(state.goal, now.replace(tzinfo=UTC).timestamp())
+        _tick_goal(state.goal, instant)
+    _tick_plan(state.plan, instant)
     row.state = state.model_dump_json()
     row.goal_active = bool(
         (state.goal and state.goal.phase == "active")
@@ -280,6 +294,7 @@ def issue(
                     pending=active is not None,
                     version=state.plan.version,
                     objective=parsed.text if parsed.action == "on" else "",
+                    started_at=naive_utc_now().replace(tzinfo=UTC).timestamp() if parsed.action == "on" else None,
                 )
                 state.revision += 1
                 message = "已进入计划模式" if state.plan.active else "已退出计划模式"

@@ -9,7 +9,7 @@ from typing import Literal, TypedDict, cast
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from werkzeug.exceptions import Conflict, Forbidden, NotFound
 
@@ -354,9 +354,22 @@ def test_stop_cannot_turn_a_waiting_message_into_a_paused_queue_parent(queue: Qu
 def test_steer_any_position_joins_actual_running_task_once_and_seals_atomically(queue: Queue) -> None:
     first = queue.send("原任务")
     queue.running(first["id"])
+    with queue.factory.begin() as session:
+        target = session.get(WorkbenchRun, first["id"])
+        assert target is not None
+        target.payload = json.dumps({**json.loads(target.payload), "activity_protocol": 1})
     a, b, c = [queue.send(name) for name in ("A", "B", "C")]
     for _ in range(2):
         assert followups.steer(*queue.owner, c["id"], first["id"])["steer_target_run_id"] == first["id"]
+    from models.workbench import WorkbenchRunEvent
+
+    with queue.factory() as session:
+        events = list(session.scalars(select(WorkbenchRunEvent).where(WorkbenchRunEvent.run_id == first["id"])))
+        steering = [
+            event for item in events if (event := json.loads(item.payload)).get("event") == "workbench_steering"
+        ]
+    assert len(steering) == 1
+    assert steering[0]["message_id"] == c["id"]
     batch = queue.poll(first["id"], action="seal")
     assert batch["sealed"] is False
     assert [item["id"] for item in batch["messages"]] == [c["id"]]

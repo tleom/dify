@@ -152,6 +152,43 @@ def test_goal_clock_survives_read_pause_resume_and_completion(queue: Queue, monk
     assert complete["active_since"] is None
 
 
+def test_plan_clock_ticks_until_approval_and_resets_on_new_plan(queue: Queue, monkeypatch: pytest.MonkeyPatch) -> None:
+    start = datetime(2026, 9, 16, 2)
+    instant = [start]
+    monkeypatch.setattr(control, "naive_utc_now", lambda: instant[0])
+    first = command(queue, "/plan 整理资料")
+    assert first.plan.started_at == start.replace(tzinfo=UTC).timestamp()
+    assert first.plan.active_since == first.plan.started_at
+    instant[0] += timedelta(seconds=63)
+    read = control.read(*queue.owner, queue.chat_id)["plan"]
+    assert read["elapsed_seconds"] == 0
+    assert read["active_since"] == first.plan.active_since
+    with queue.factory.begin() as session:
+        chat = service._chat(session, queue.owner[0], queue.owner[1], queue.chat_id, lock=True)
+        state = control.load(session, chat)
+        state.plan.submit("# 计划\n\n核验资料。", "plan-run")
+        control.save(session, chat, state)
+    instant[0] += timedelta(seconds=7)
+    with queue.factory.begin() as session:
+        chat = service._chat(session, queue.owner[0], queue.owner[1], queue.chat_id, lock=True)
+        state = control.load(session, chat)
+        state.plan.answer(run_id="plan-run", version=1, plan=state.plan.review, approve=True)
+        control.save(session, chat, state)
+    approved = control.read(*queue.owner, queue.chat_id)["plan"]
+    assert approved["completed"] is True
+    assert approved["elapsed_seconds"] == 70
+    assert approved["active_since"] is None
+    instant[0] += timedelta(hours=1)
+    assert control.read(*queue.owner, queue.chat_id)["plan"]["elapsed_seconds"] == 70
+    second = command(queue, "/plan 新计划")
+    assert second.plan.elapsed_seconds == 0
+    assert second.plan.started_at == instant[0].replace(tzinfo=UTC).timestamp()
+    assert second.plan.active_since == second.plan.started_at
+    off = command(queue, "/plan off")
+    assert off.plan.started_at is None
+    assert off.plan.active_since is None
+
+
 def test_legacy_goal_clock_restores_command_phase_history(queue: Queue) -> None:
     start = datetime(2026, 9, 16, 1)
     goal = GoalState(objective="已有目标", phase="complete")
