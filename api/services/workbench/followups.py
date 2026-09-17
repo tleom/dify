@@ -381,6 +381,15 @@ def _steer_locked(session, chat, message, target):
     }
     current["steering_messages"] = [*current.get("steering_messages", []), item]
     target.payload = json.dumps(current)
+    if current.get("activity_protocol") == 1 and target.status not in {
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted",
+    }:
+        from services.workbench.event_log import append_locked
+
+        append_locked(session, target, {"event": "workbench_steering", "steering_id": message.id})
     _unlink(session, chat, message)
     incoming["steer_target_run_id"] = target.id
     message.payload, message.status = json.dumps(incoming), "steered"

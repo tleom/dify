@@ -68,6 +68,9 @@ class PlanState(ControlModel):
     review_run_id: str | None = None
     approved: str | None = Field(default=None, max_length=100000)
     approved_version: int | None = Field(default=None, ge=1)
+    started_at: float | None = Field(default=None, ge=0)
+    elapsed_seconds: float = Field(default=0, ge=0)
+    active_since: float | None = Field(default=None, ge=0)
 
     def submit(self, plan: str, run_id: str) -> None:
         """Replace the complete candidate; approval belongs to one version only."""
