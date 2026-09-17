@@ -21,6 +21,7 @@ from pathlib import Path
 
 try:
     args = json.loads(base64.b64decode(sys.argv[1]))
+    presentation = {}
     root = Path(args["root"]).resolve(strict=True)
     boundary = Path('/workspace') if root.is_relative_to('/workspace') else root
     path = Path(args["path"])
@@ -41,6 +42,17 @@ try:
         old = args["old_text"]
         if not old or content.count(old) != 1:
             raise ValueError("old_text must match exactly once; read the file and provide unique surrounding text")
+        if old == args["new_text"]:
+            raise ValueError("old_text and new_text must differ")
+        start = content.index(old)
+        prefix, suffix = content[:start], content[start + len(old):]
+        # Actual applied replacement with three surrounding lines, matching
+        # DSH's result-time diff. Bound unusually long context lines.
+        left = ''.join(prefix.splitlines(keepends=True)[-3 if prefix.endswith(chr(10)) else -4:])
+        right = ''.join(suffix.splitlines(keepends=True)[:4])
+        if len((left + right).encode('utf-8')) > 32 * 1024:
+            left, right = '', ''
+        presentation = {"diffs": [{"oldText": left + old + right, "newText": left + args["new_text"] + right}]}
         content = content.replace(old, args["new_text"], 1)
         if len(content.encode("utf-8")) > 1024 * 1024:
             raise ValueError("Edited content exceeds 1 MiB")
@@ -56,7 +68,7 @@ try:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-    print(json.dumps({"path": str(path), "operation": args["operation"], "bytes": path.stat().st_size}))
+    print(json.dumps({"path": str(path), "operation": args["operation"], "bytes": path.stat().st_size, **presentation}))
 except Exception as error:
     print(json.dumps({"error": str(error)}))
     sys.exit(1)

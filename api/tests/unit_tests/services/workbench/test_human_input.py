@@ -150,3 +150,56 @@ def test_resume_does_not_accept_a_run_outside_the_owner(pending_run: PendingRun)
     with pytest.raises(NotFound):
         service.resume("tenant", "foreign", "run", {"task": "other"}, None)
     pending_run.publish.assert_not_called()
+
+
+def test_partial_answer_preserves_values_and_explicit_skips(pending_run: PendingRun) -> None:
+    request_id = pending_run.request_id
+    service.resume("tenant", "account", "run", {"extra": "只核对引用"}, None, request_id, skipped_fields=["task"])
+    result = json.loads(pending_run.run.payload)["continuation"]["calls"]["question"]
+    assert result["values"] == {"extra": "只核对引用"}
+    assert result["skipped_fields"] == ["task"]
+    assert (
+        service.resume("tenant", "account", "run", {"extra": "只核对引用"}, None, request_id, skipped_fields=["task"])[
+            "status"
+        ]
+        == "queued"
+    )
+    pending_run.publish.assert_called_once()
+
+
+def test_custom_choice_requires_explicit_marker(pending_run: PendingRun) -> None:
+    service.resume(
+        "tenant", "account", "run", {"task": "只校对英文"}, None, pending_run.request_id, custom_fields=["task"]
+    )
+    result = json.loads(pending_run.run.payload)["continuation"]["calls"]["question"]
+    assert result["custom_fields"] == ["task"]
+    assert result["values"]["task"] == "只校对英文"
+
+
+@pytest.mark.parametrize(
+    ("values", "details"),
+    [
+        ({"task": "other"}, {"skipped_fields": ["task"]}),
+        ({}, {"skipped_fields": ["invented"]}),
+        ({"task": "other", "extra": "文字"}, {"custom_fields": ["extra"]}),
+        ({"task": " "}, {"custom_fields": ["task"]}),
+    ],
+)
+def test_invalid_answer_details_do_not_resume(
+    pending_run: PendingRun, values: dict[str, str], details: dict[str, list[str]]
+) -> None:
+    with pytest.raises(ValueError):
+        service.resume("tenant", "account", "run", values, None, pending_run.request_id, **details)
+    pending_run.publish.assert_not_called()
+
+
+@pytest.mark.parametrize("details", [{"custom_fields": ["task"]}, {"skipped_fields": ["task"]}])
+def test_plan_cannot_be_approved_through_question_shortcuts(
+    pending_run: PendingRun, details: dict[str, list[str]]
+) -> None:
+    payload = json.loads(pending_run.run.payload)
+    payload["pending"]["tool_name"] = "exit_plan_mode"
+    pending_run.run.payload = json.dumps(payload)
+    with pytest.raises(ValueError, match="计划审核必须明确选择"):
+        service.resume("tenant", "account", "run", {}, "approve", pending_run.request_id, **details)
+    pending_run.publish.assert_not_called()

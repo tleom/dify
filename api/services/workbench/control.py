@@ -276,7 +276,10 @@ def issue(
                 if state.plan.review_run_id and active and active.status == "waiting_input":
                     raise Conflict("请先在计划卡片中选择开始执行或继续规划")
                 state.plan = PlanState(
-                    active=parsed.action == "on", pending=active is not None, version=state.plan.version
+                    active=parsed.action == "on",
+                    pending=active is not None,
+                    version=state.plan.version,
+                    objective=parsed.text if parsed.action == "on" else "",
                 )
                 state.revision += 1
                 message = "已进入计划模式" if state.plan.active else "已退出计划模式"

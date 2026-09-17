@@ -61,6 +61,8 @@ class GoalUpdate(ControlModel):
 class PlanState(ControlModel):
     active: bool = False
     pending: bool = False
+    objective: str = Field(default="", max_length=20000)
+    completed: bool = False
     version: int = Field(default=0, ge=0)
     review: str | None = Field(default=None, max_length=100000)
     review_run_id: str | None = None
@@ -74,6 +76,9 @@ class PlanState(ControlModel):
         if not plan.strip().startswith("#") or len(plan) > 100000:
             raise ValueError("请提供以标题开头的完整 Markdown 计划")
         self.version += 1
+        self.completed = False
+        if not self.objective:
+            self.objective = plan.splitlines()[0].lstrip("# ")[:20000]
         self.review, self.review_run_id = plan, run_id
         self.approved, self.approved_version = None, None
 
@@ -85,6 +90,9 @@ class PlanState(ControlModel):
             # A pre-versioning review is adopted as version one on approval.
             self.version = max(1, self.version)
             self.approved, self.approved_version = self.review, self.version
+        self.completed = approve
+        if not self.objective and self.review:
+            self.objective = self.review.splitlines()[0].lstrip("# ")[:20000]
         self.active = not approve
         self.pending = False
         self.review, self.review_run_id = None, None

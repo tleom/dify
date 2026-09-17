@@ -63,6 +63,7 @@ def test_plan_approval_is_bound_to_exact_content_run_and_version():
     state.submit("# 第一版\n核对文件。", "run")
     state.answer(run_id="run", version=1, plan=state.review, approve=False)
     assert state.active and state.approved is None
+    assert not state.completed
     state.submit("# 第二版\n核对文件及来源。", "run")
     for kwargs in (
         dict(run_id="old-run", version=2, plan=state.review),
@@ -76,3 +77,8 @@ def test_plan_approval_is_bound_to_exact_content_run_and_version():
     restored = PlanState.model_validate_json(state.model_dump_json())
     assert not restored.active and restored.approved_version == 2
     assert restored.approved == "# 第二版\n核对文件及来源。"
+    assert restored.completed and restored.objective == "第一版"
+    restored.active = True
+    restored.submit("# 修订计划\n补充验收标准。", "next-run")
+    assert not restored.completed and restored.approved is None
+    assert restored.version == 3

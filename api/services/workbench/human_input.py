@@ -13,18 +13,33 @@ from libs.datetime_utils import naive_utc_now
 from models.workbench import WorkbenchRun
 
 
-def validate_answer(raw_args, values, action):
+def validate_answer(raw_args, values, action, *, custom_fields=None, skipped_fields=None):
+    """Validate selections, explicit free-text choices and per-question skips against the stored request."""
     if sum(len(key) + len(value) for key, value in values.items()) > 100000:
         raise ValueError("输入内容过长")
     args = AskHumanToolArgs.model_validate(raw_args)
     allowed = {field.name: field for field in args.fields}
+    custom, skipped = set(custom_fields or []), set(skipped_fields or [])
     if not set(values) <= allowed.keys():
         raise ValueError("输入包含未请求的字段")
+    if not (custom | skipped) <= allowed.keys():
+        raise ValueError("输入包含未请求的字段")
+    if custom & skipped or skipped & values.keys():
+        raise ValueError("同一题不能同时回答和跳过")
+    if any(allowed[name].type != "select" or not values.get(name, "").strip() for name in custom):
+        raise ValueError("自由回答必须对应选择题并填写内容")
     for field in args.fields:
         value = values.get(field.name)
+        if field.name in skipped:
+            continue
         if field.required and not value:
             raise ValueError(f"请填写 {field.label}")
-        if field.type == "select" and value is not None and value not in {option.value for option in field.options}:
+        if (
+            field.type == "select"
+            and field.name not in custom
+            and value is not None
+            and value not in {option.value for option in field.options}
+        ):
             raise ValueError(f"{field.label} 选项无效")
     selected = None
     if action is not None:
@@ -36,6 +51,8 @@ def validate_answer(raw_args, values, action):
     return AskHumanToolResult(
         status="submitted",
         values=values,
+        custom_fields=sorted(custom),
+        skipped_fields=sorted(skipped),
         action=AskHumanSelectedAction(id=selected.id, label=selected.label) if selected else None,
     )
 
@@ -56,8 +73,12 @@ def question_record(run_id, pending, result):
         "tool_name": "ask_human",
         "args": args,
         "backend_run_id": backend_run_id,
-        "status": "submitted" if result.get("status") == "submitted" else "skipped",
+        "status": "submitted"
+        if result.get("status") == "submitted" and not result.get("skipped_fields")
+        else "skipped",
         "values": result.get("values") or {},
+        "custom_fields": result.get("custom_fields") or [],
+        "skipped_fields": result.get("skipped_fields") or [],
         "action": (result.get("action") or {}).get("id"),
     }
 
@@ -143,17 +164,19 @@ def answer_text(record, result):
         if value is not None:
             label = (
                 next((option.label for option in field.options if option.value == value), value)
-                if field.type == "select"
+                if field.type == "select" and field.name not in result.custom_fields
                 else value
             )
             lines.append(f"{field.label}：{label}")
+        elif field.name in result.skipped_fields:
+            lines.append(f"{field.label}：已跳过")
     if result.action:
         lines.append(f"选择：{result.action.label}")
     lines.append("请结合这份补充继续处理当前任务；已完成的操作无需重复。")
     return "\n".join(lines)
 
 
-def supplement(tenant_id, account_id, run_id, request_id, values, action):
+def supplement(tenant_id, account_id, run_id, request_id, values, action, *, custom_fields=None, skipped_fields=None):
     from services.workbench import followups, service
     from services.workbench.branches import chat_runs, resolve_parent
     from services.workbench.recovery import locked_run, pending_condition
@@ -164,12 +187,20 @@ def supplement(tenant_id, account_id, run_id, request_id, values, action):
         record = next((item for item in history(source) if item["request_id"] == request_id), None)
         if record is None:
             raise NotFound("补充信息请求不存在")
-        result = validate_answer(record["args"], values, action)
+        result = validate_answer(
+            record["args"], values, action, custom_fields=custom_fields, skipped_fields=skipped_fields
+        )
+        if (
+            record.get("supplement_run_id")
+            and record["values"] == values
+            and record.get("action") == action
+            and sorted(record.get("custom_fields") or []) == result.custom_fields
+            and sorted(record.get("skipped_fields") or []) == result.skipped_fields
+        ):
+            message = session.get(WorkbenchRun, record["supplement_run_id"])
+            if message is not None:
+                return service.run_dto(message)
         if record["status"] == "submitted":
-            if record.get("supplement_run_id") and record["values"] == values and record.get("action") == action:
-                message = session.get(WorkbenchRun, record["supplement_run_id"])
-                if message is not None:
-                    return service.run_dto(message)
             raise Conflict("这份补充信息已经提交，请刷新后查看")
         target = session.scalar(
             select(WorkbenchRun)
@@ -222,13 +253,17 @@ def supplement(tenant_id, account_id, run_id, request_id, values, action):
                 "input_supplement": {"run_id": source.id, "request_id": request_id},
             }
         )
+        request_key = f"input-supplement:{request_id}"
+        if record.get("supplement_run_id"):
+            signature = sha256(json.dumps(result.model_dump(mode="json"), sort_keys=True).encode()).hexdigest()[:16]
+            request_key += f":{signature}"
         message = WorkbenchRun(
             id=str(uuid4()),
             tenant_id=tenant_id,
             account_id=account_id,
             chat_id=chat.id,
             revision_id=previous.revision_id,
-            request_key=f"input-supplement:{request_id}",
+            request_key=request_key,
             payload=json.dumps(payload),
             status=followups.WAITING,
             event_log="[]",
@@ -241,8 +276,10 @@ def supplement(tenant_id, account_id, run_id, request_id, values, action):
         current = json.loads(source.payload)
         current.setdefault("human_input_history", {})[request_id] = {
             **record,
-            "status": "submitted",
+            "status": "skipped" if result.skipped_fields else "submitted",
             "values": values,
+            "custom_fields": result.custom_fields,
+            "skipped_fields": result.skipped_fields,
             "action": action,
             "supplement_run_id": message.id,
         }

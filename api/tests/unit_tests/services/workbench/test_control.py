@@ -287,8 +287,18 @@ def test_plan_review_requires_explicit_action_and_disables_goal_driver(queue: Qu
     with pytest.raises(BadRequest):
         service.resume(queue.owner[0], queue.owner[1], run["id"], {}, None, request_id)
     service.resume(queue.owner[0], queue.owner[1], run["id"], {}, "approve", request_id)
-    assert control.read(queue.owner[0], queue.owner[1], queue.chat_id)["plan"]["active"] is False
-    assert control.read(*queue.owner, queue.chat_id)["plan"]["approved"] == "# 实施计划\n\n检查后生成。"
+    plan = control.read(*queue.owner, queue.chat_id)["plan"]
+    assert plan["active"] is False
+    assert plan["completed"] is True
+    assert plan["objective"] == "实施计划"
+    assert plan["approved"] == "# 实施计划\n\n检查后生成。"
+    assert plan["approved_version"] == 1
+    assert command(queue, "/plan off").plan.completed is False
+    revised = command(queue, "/plan 修改后的计划").plan
+    assert revised.active
+    assert not revised.completed
+    assert revised.objective == "修改后的计划"
+    assert revised.version == 1
 
 
 def test_first_goal_message_and_legacy_attachment_placeholder_restore_original_text(

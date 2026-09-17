@@ -107,6 +107,8 @@ class WorkbenchResumePayload(BaseModel):
     request_id: str = Field(min_length=1, max_length=200)
     values: dict[str, str] = Field(default_factory=dict)
     action: str | None = Field(default=None, min_length=1, max_length=100)
+    custom_fields: list[str] = Field(default_factory=list, max_length=20)
+    skipped_fields: list[str] = Field(default_factory=list, max_length=20)
 
 
 class WorkbenchFeedbackPayload(BaseModel):
@@ -162,6 +164,7 @@ class WorkbenchModelResponse(ResponseModel):
 
 
 class WorkbenchCatalogResponse(ResponseModel):
+    human_input_protocol: Literal[1] = 1
     command_resources_protocol: Literal[1] = 1
     control_protocol: Literal[1] = 1
     resources_protocol: Literal[1] = 1
@@ -811,7 +814,17 @@ class Resume(WorkbenchResource):
         payload = WorkbenchResumePayload.model_validate(console_ns.payload or {})
         return dump_response(
             WorkbenchRunEnvelopeResponse,
-            {"data": service.resume(*self.owner(), str(run_id), payload.values, payload.action, payload.request_id)},
+            {
+                "data": service.resume(
+                    *self.owner(),
+                    str(run_id),
+                    payload.values,
+                    payload.action,
+                    payload.request_id,
+                    custom_fields=payload.custom_fields,
+                    skipped_fields=payload.skipped_fields,
+                )
+            },
         )
 
 
@@ -825,7 +838,17 @@ class InputSupplement(WorkbenchResource):
         payload = WorkbenchResumePayload.model_validate(console_ns.payload or {})
         return dump_response(
             WorkbenchRunEnvelopeResponse,
-            {"data": supplement(*self.owner(), str(run_id), payload.request_id, payload.values, payload.action)},
+            {
+                "data": supplement(
+                    *self.owner(),
+                    str(run_id),
+                    payload.request_id,
+                    payload.values,
+                    payload.action,
+                    custom_fields=payload.custom_fields,
+                    skipped_fields=payload.skipped_fields,
+                )
+            },
         )
 
 

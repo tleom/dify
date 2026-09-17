@@ -159,6 +159,15 @@ the active execution. Stop rotates this ticket, removes preparing/running
 inspection containers, and serializes cleanup with startup and request teardown.
 Requests delayed beyond the stop cannot launch; manager restart preserves the fence.
 
+`PlanState.objective` keeps the planning direction visible above the composer.
+Only an explicit approval sets `completed=true`; a declined review keeps planning
+active. `/plan <direction>` starts or edits a plan and clears completion, while
+`/plan off` clears the displayed plan. The review panel replaces the composer,
+has no timeout, and uses the current theme color. Discussing in chat uses the
+owned stop path, leaves planning active, restores the composer, and preserves the
+original Markdown plan in the historical tool row. Deploy the updated shared
+control schema to the API and Agent together before enabling the updated client.
+
 Goals are persisted control state independent of an assistant's final response.
 While active, the server schedules another round after the previous run and
 queued user messages finish. Client disconnection or a worker restart does not
@@ -305,6 +314,16 @@ the instruction in the same run; bare `/compact` only compacts history. Completi
 notification retries cannot turn a committed summary into an "original retained"
 failure. Human-input submissions carry the current pending `request_id`; replies to
 a superseded request are rejected even if the logical run ID has not changed.
+
+The catalog advertises `human_input_protocol=1` for optional `custom_fields` and
+`skipped_fields` on resume and late-answer requests. Field names are validated
+against the stored question: a custom selection must contain text, and an
+explicitly skipped field must not also have a value. Partial answers retain their
+values and keep the remaining questions answerable through durable follow-ups.
+Select options may include an optional short `description`. These additions do
+not apply to plan approval. Clients without the capability retain whole-request
+skip and ordinary selection behavior. The existing server-owned 60-second idle
+deadline and interaction cancellation remain authoritative.
 
 Sandbox manager helpers use `/usr/local/bin/python -I -S`, while normal user commands
 retain their personal-environment-first PATH. The office image makes `/usr/local`
@@ -476,3 +495,26 @@ process after a completed file operation, restoration through the actual API
 history bridge, and a Redis restart during checkpoint writes and cancellation
 observation. They do not establish arbitrary external side-effect idempotency or
 replace target-environment model, worker and sandbox-manager acceptance tests.
+
+### File activity and final deliveries
+
+Workbench activity rows for `file_create` and `file_edit` come from actual tool
+calls. Successful edits retain the applied replacement with three surrounding
+lines in Pydantic AI tool metadata; UI events receive that metadata while the
+model receives a short confirmation. The create operation remains exclusive and
+the edit operation requires one unique literal match, rejects no-op edits, and
+checks for concurrent changes before replacement.
+
+The workspace inventory still invalidates delivery proofs after writes and
+removals. It emits `image_preview` entries for generated images so users can
+inspect charts or rendered Office pages. These are user preview affordances,
+not evidence that the model visually inspected the image. Other script-produced
+files do not become synthetic create/edit tool calls.
+
+`present_files` verifies one to eight existing regular files through the owned
+file lookup API and records final-delivery metadata with optional descriptions.
+The conversation footer renders these as file cards. Presentation does not imply
+that a browser preview rendered successfully. Modified or removed files lose
+their presentation proof and must be verified again. `open_file_preview` remains
+available for an immediate sidebar preview. Both tools open the current source
+file; they do not archive a historical copy.
